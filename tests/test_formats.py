@@ -1,5 +1,44 @@
 from karaoke_forge.ass import AssStyle, write_ass
-from karaoke_forge.formats import parse_lrc, parse_srt, write_json, write_lrc, write_srt
+from karaoke_forge.formats import (
+    attach_lrc_translation,
+    attach_reference_translation,
+    parse_lrc,
+    parse_srt,
+    parse_yrc,
+    write_json,
+    write_lrc,
+    write_srt,
+)
+
+
+def test_yrc_preserves_non_uniform_word_timing() -> None:
+    document = parse_yrc(
+        "[70,6390](70,720,0)吐(790,130,0)い(920,1650,0)た"
+        "(2570,160,0) (2730,510,0)息(3240,110,0)は\n"
+    )
+
+    line = document.lines[0]
+    assert line.text == "吐いた 息は"
+    assert line.start == 0.07
+    assert line.end == 6.46
+    assert document.metadata["word_timing"] == "source"
+    assert [token.start for token in line.tokens] == [0.07, 0.79, 0.92, 2.57, 2.73, 3.24]
+    assert round(line.tokens[2].end - line.tokens[2].start, 2) == 1.65
+
+
+def test_yrc_translation_is_fuzzy_aligned_through_original_lrc() -> None:
+    document = parse_yrc(
+        "[1000,900](1000,200,0)I(1200,300,0) wish(1500,400,0) you\n"
+        "[3000,1000](3000,500,0)魂(3500,100,0)が(3600,400,0)揺れる\n"
+    )
+    attached = attach_reference_translation(
+        document,
+        "[00:02.20]I wish you\n[00:04.10]魂が揺れる\n",
+        "[00:02.20]我希望你\n[00:04.10]灵魂摇摆\n",
+    )
+
+    assert attached == 2
+    assert [line.translation for line in document.lines] == ["我希望你", "灵魂摇摆"]
 
 
 def test_enhanced_lrc_parsing_and_export() -> None:
@@ -41,4 +80,37 @@ def test_ass_has_karaoke_tags_and_style() -> None:
 
     assert "Style: Karaoke,Noto Sans CJK SC" in output
     assert r"{\kf" in output
-    assert "你好 world" not in output
+    assert "KaraokeInactive" in output
+    assert r"{\kf67}你" in output
+
+
+def test_translation_uses_top_center_split_ktv_layout() -> None:
+    document = parse_lrc("[00:01.00]Hello world\n[00:03.00]Next line\n")
+    document.lines[0].pronunciation = "ハロー　ワールド"
+    document.lines[1].pronunciation = "ネクスト　ライン"
+    count = attach_lrc_translation(
+        document,
+        "[00:01.00]你好，世界\n[00:03.00]下一句\n",
+    )
+
+    output = write_ass(
+        document,
+        AssStyle(font="Microsoft YaHei", translation_color="#AADDFF"),
+    )
+
+    assert count == 2
+    assert "Style: Translation,Microsoft YaHei,38" in output
+    assert ",8,60,60,54,1" in output
+    assert "Style: KaraokeLower,Microsoft YaHei" in output
+    assert "Style: KaraokeInactive,Microsoft YaHei" in output
+    assert "Dialogue: 0,0:00:01.00,0:00:07.00,KaraokeInactive" in output
+    assert "Dialogue: 3,0:00:01.00" in output
+    assert "你好，世界" in output
+    assert "Dialogue: 1,0:00:01.00" in output
+    assert "Dialogue: 1,0:00:03.00,0:00:07.00,KaraokeLower" in output
+    assert "Style: Pronunciation,Microsoft YaHei,26" in output
+    assert "Dialogue: 2,0:00:01.00,0:00:02.98,Pronunciation" in output
+    assert "ハロー　ワールド" in output
+    assert '"translation": "你好，世界"' in write_json(document)
+    assert '"pronunciation": "ハロー　ワールド"' in write_json(document)
+    assert "你好，世界\nHello world" in write_srt(document)

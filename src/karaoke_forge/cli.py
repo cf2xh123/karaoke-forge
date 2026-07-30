@@ -44,6 +44,12 @@ def _style_from_args(args: argparse.Namespace) -> AssStyle:
         outline_color=args.outline_color,
         margin_v=args.margin_v,
         resolution=(width, height),
+        show_translation=args.show_translation,
+        translation_font_size=args.translation_font_size,
+        translation_color=args.translation_color,
+        show_pronunciation=args.show_pronunciation,
+        pronunciation_font_size=args.pronunciation_font_size,
+        pronunciation_color=args.pronunciation_color,
     )
 
 
@@ -55,6 +61,22 @@ def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--highlight-color", default="#FFD54A")
     group.add_argument("--outline-color", default="#111111")
     group.add_argument("--margin-v", type=int, default=72, help="bottom margin in pixels")
+    group.add_argument(
+        "--show-translation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show the current translation at the top center of the video",
+    )
+    group.add_argument("--translation-font-size", type=int, default=38)
+    group.add_argument("--translation-color", default="#EAF4FF")
+    group.add_argument(
+        "--show-pronunciation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show Japanese furigana and English katakana readings above lyric rows",
+    )
+    group.add_argument("--pronunciation-font-size", type=int, default=26)
+    group.add_argument("--pronunciation-color", default="#FFFFFF")
     group.add_argument("--resolution", default="1920x1080", help="ASS design resolution")
 
 
@@ -149,6 +171,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     make.add_argument("--formats", type=_formats, default=_formats(DEFAULT_FORMATS))
     make.add_argument("--audio-offset", type=float, default=0.0)
+    make.add_argument(
+        "--auto-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="locate the reference song inside the MV audio before rendering",
+    )
+    make.add_argument(
+        "--refine-word-timing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="refine synthetic LRC/SRT word timing from the singing audio",
+    )
     make.add_argument("--crf", type=int, default=18)
     make.add_argument("--preset", default="medium")
     make.add_argument("--audio-bitrate", default="320k")
@@ -187,6 +221,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
     )
     netease.add_argument("--keep-audio", action="store_true")
+    netease.add_argument(
+        "--refine-word-timing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="refine synthetic LRC word timing from the singing audio",
+    )
+    netease.add_argument(
+        "--cookies-from-browser",
+        choices=["brave", "chrome", "edge", "firefox"],
+        help=(
+            "use the existing NetEase login from this local browser; "
+            "detects and uses only the account's available VIP/SVIP quality"
+        ),
+    )
+    netease.add_argument(
+        "--browser-profile",
+        help="optional browser profile name or path, for example 'Profile 1'",
+    )
     netease.add_argument(
         "--i-have-rights",
         action="store_true",
@@ -301,6 +353,8 @@ def _handle_make(args: argparse.Namespace) -> int:
             preset=args.preset,
             audio_bitrate=args.audio_bitrate,
             overwrite=args.overwrite,
+            auto_sync=args.auto_sync,
+            refine_word_timing=args.refine_word_timing,
         ),
         progress=_progress,
     )
@@ -343,6 +397,14 @@ def _handle_doctor(_args: argparse.Namespace) -> int:
             importlib.util.find_spec("yt_dlp") is not None,
             "installed" if importlib.util.find_spec("yt_dlp") else "optional, not installed",
         ),
+        (
+            "Pronunciation",
+            importlib.util.find_spec("pykakasi") is not None
+            and importlib.util.find_spec("alkana") is not None,
+            "installed"
+            if importlib.util.find_spec("pykakasi") and importlib.util.find_spec("alkana")
+            else "optional, not installed",
+        ),
     ]
     for name, ok, detail in checks:
         print(f"{'OK' if ok else '--':>2}  {name:<18} {detail}")
@@ -377,10 +439,15 @@ def _handle_netease(args: argparse.Namespace) -> int:
             use_page_lyrics=args.use_page_lyrics,
             keep_audio=args.keep_audio,
             rights_confirmed=args.i_have_rights,
+            cookie_browser=args.cookies_from_browser,
+            cookie_browser_profile=args.browser_profile,
+            refine_word_timing=args.refine_word_timing,
         ),
         progress=_progress,
     )
     print(f"Track: {result.track.title} — {result.track.artist_text}")
+    if result.track.access_text:
+        print(f"Access: {result.track.access_text}")
     if result.alignment_report:
         print(
             f"Alignment: {result.alignment_report.matched_units}/"

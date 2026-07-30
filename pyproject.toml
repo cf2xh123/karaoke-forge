@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "karaoke-forge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn a song, its lyrics, and an MV into a timed karaoke video."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,9 +28,18 @@ dependencies = []
 align = ["faster-whisper"]
 separate = ["demucs"]
 web = ["gradio>=6.15,<7"]
-netease = ["yt-dlp"]
+netease = ["yt-dlp", "certifi"]
+pronunciation = ["pykakasi>=2.3,<3", "alkana>=0.0.3,<0.1"]
 dev = ["pytest>=8", "ruff>=0.6"]
-all = ["faster-whisper", "demucs", "gradio>=6.15,<7", "yt-dlp"]
+all = [
+  "faster-whisper",
+  "demucs",
+  "gradio>=6.15,<7",
+  "yt-dlp",
+  "certifi",
+  "pykakasi>=2.3,<3",
+  "alkana>=0.0.3,<0.1",
+]
 
 [project.scripts]
 karaoke-forge = "karaoke_forge.cli:main"

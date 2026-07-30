@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import html
 import os
 import re
 import shutil
@@ -13,14 +14,20 @@ from pathlib import Path
 from uuid import uuid4
 
 from .ass import AssStyle
-from .formats import export_formats, read_lyrics, write_format
+from .formats import (
+    attach_reference_translation,
+    export_formats,
+    read_lyrics,
+    write_format,
+)
 from .netease import (
     NeteaseAlignOptions,
     align_netease_song,
-    download_public_netease_track,
+    download_netease_track,
     fetch_public_netease_info,
 )
 from .pipeline import AlignOptions, align_audio_and_lyrics
+from .pronunciation import generate_pronunciation
 from .workflows import MakeOptions, make_karaoke_video
 
 WEB_CSS = """
@@ -171,6 +178,39 @@ WEB_CSS = """
   min-height: 54px;
 }
 
+.kf-subtitle-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(10,18,30,.08), rgba(5,10,18,.5)),
+    radial-gradient(circle at 72% 32%, rgba(255,190,92,.55), transparent 18%),
+    linear-gradient(135deg, #537f91 0%, #28495d 42%, #101d2b 100%);
+  box-shadow: inset 0 0 70px rgba(0,0,0,.32);
+}
+
+.kf-preview-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 40%, transparent 28%, rgba(0,0,0,.42) 100%),
+    linear-gradient(155deg, transparent 45%, rgba(255,255,255,.08) 46%, transparent 48%);
+}
+
+.kf-preview-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: rgba(255,255,255,.8);
+  background: rgba(5,10,18,.38);
+  border: 1px solid rgba(255,255,255,.16);
+  font-size: 11px;
+}
+
 .kf-footer {
   color: var(--kf-muted);
   text-align: center;
@@ -253,6 +293,12 @@ def _build_style(
     text_color: str,
     highlight_color: str,
     margin_v: float,
+    show_translation: bool = True,
+    translation_font_size: float = 38,
+    translation_color: str = "#EAF4FF",
+    show_pronunciation: bool = True,
+    pronunciation_font_size: float = 26,
+    pronunciation_color: str = "#FFFFFF",
 ) -> AssStyle:
     return AssStyle(
         font=font or "Microsoft YaHei",
@@ -260,7 +306,142 @@ def _build_style(
         text_color=text_color,
         highlight_color=highlight_color,
         margin_v=int(margin_v),
+        show_translation=show_translation,
+        translation_font_size=int(translation_font_size),
+        translation_color=translation_color,
+        show_pronunciation=show_pronunciation,
+        pronunciation_font_size=int(pronunciation_font_size),
+        pronunciation_color=pronunciation_color,
     )
+
+
+def _lyrics_with_translation(
+    lyrics_path: Path,
+    translated_lrc: str | None,
+    job_dir: Path,
+    original_lrc: str | None = None,
+) -> Path:
+    if not translated_lrc:
+        return lyrics_path
+    document = read_lyrics(lyrics_path)
+    attached = attach_reference_translation(document, original_lrc, translated_lrc)
+    if not attached:
+        return lyrics_path
+    target = job_dir / "lyrics-bilingual.json"
+    target.write_text(write_format(document, "json"), encoding="utf-8")
+    return target
+
+
+def subtitle_preview_html(
+    font: str,
+    font_size: float,
+    text_color: str,
+    highlight_color: str,
+    margin_v: float,
+    show_translation: bool,
+    translation_font_size: float,
+    translation_color: str,
+    show_pronunciation: bool,
+    pronunciation_font_size: float,
+    pronunciation_color: str,
+    sample_text: str = "让每一句歌词，都踩准拍子。",
+    sample_translation: str = "让歌声与画面在这里相遇。",
+) -> str:
+    """Return a browser-native preview of the current ASS subtitle style."""
+
+    safe_font = html.escape(font or "Microsoft YaHei", quote=True)
+    raw_lines = [
+        line.strip()
+        for line in (sample_text or "让每一句歌词，都踩准拍子。").splitlines()
+        if line.strip()
+    ]
+    if not raw_lines:
+        raw_lines = ["让每一句歌词，都踩准拍子。"]
+    if len(raw_lines) >= 2:
+        upper_text, lower_text = raw_lines[-2:]
+    else:
+        upper_text = "The lyric before this line"
+        lower_text = raw_lines[0]
+    split_at = max(1, round(len(lower_text) * 0.4))
+    safe_translation = html.escape(sample_translation or "让歌声与画面在这里相遇。")
+    main_size = max(16, min(48, round(float(font_size) * 0.55)))
+    translated_size = max(13, min(36, round(float(translation_font_size) * 0.55)))
+    pronunciation_size = max(10, min(24, round(float(pronunciation_font_size) * 0.55)))
+    bottom = max(12, min(92, round(float(margin_v) * 0.42)))
+    translation_html = ""
+    if show_translation:
+        translation_html = (
+            '<div style="position:absolute;left:15%;right:15%;top:8%;'
+            f"text-align:center;font-family:'{safe_font}',sans-serif;"
+            f'font-size:{translated_size}px;color:{translation_color};font-weight:700;'
+            'text-shadow:-1px -1px 0 #111,1px -1px 0 #111,'
+            '-1px 1px 0 #111,1px 1px 0 #111,0 2px 6px #000;">'
+            f"{safe_translation}</div>"
+        )
+
+    def coloured_source(value: str, start: int, *, active: bool) -> str:
+        if not active:
+            return html.escape(value)
+        local_split = split_at - start
+        if local_split <= 0:
+            return html.escape(value)
+        if local_split >= len(value):
+            return f'<span style="color:{highlight_color};">{html.escape(value)}</span>'
+        return (
+            f'<span style="color:{highlight_color};">'
+            f"{html.escape(value[:local_split])}</span>{html.escape(value[local_split:])}"
+        )
+
+    def preview_line(value: str, *, active: bool) -> str:
+        pronunciation = generate_pronunciation(value) if show_pronunciation else None
+        if pronunciation is None:
+            return coloured_source(value, 0, active=active)
+        parts: list[str] = []
+        cursor = 0
+        for unit in pronunciation.units:
+            start = max(cursor, min(len(value), unit.start))
+            end = max(start, min(len(value), unit.end or start + len(unit.source)))
+            parts.append(coloured_source(value[cursor:start], cursor, active=active))
+            reading = unit.reading
+            reading_color = pronunciation_color
+            if active and start < split_at:
+                reading_color = highlight_color
+            parts.append(
+                '<ruby style="ruby-position:over;ruby-align:center;">'
+                f"{coloured_source(value[start:end], start, active=active)}"
+                f'<rt style="font-size:{pronunciation_size}px;color:{reading_color};'
+                'font-weight:700;text-shadow:-1px -1px 0 #111,1px -1px 0 #111,'
+                '-1px 1px 0 #111,1px 1px 0 #111,0 2px 5px #000;">'
+                f"{html.escape(reading)}</rt></ruby>"
+            )
+            cursor = end
+        parts.append(coloured_source(value[cursor:], cursor, active=active))
+        return "".join(parts)
+
+    upper_line_html = preview_line(upper_text, active=False)
+    lower_line_html = preview_line(lower_text, active=True)
+    return f"""
+    <div class="kf-subtitle-preview" data-kf-layout="ktv-split">
+      <div class="kf-preview-vignette"></div>
+      {translation_html}
+      <div style="position:absolute;left:6%;right:16%;
+                  bottom:{bottom + main_size + 28}px;text-align:left;
+                  font-family:'{safe_font}',sans-serif;font-size:{main_size}px;
+                  color:{text_color};font-weight:800;
+                  text-shadow:-2px -2px 0 #111,2px -2px 0 #111,
+                              -2px 2px 0 #111,2px 2px 0 #111,0 3px 8px #000;">
+        {upper_line_html}
+      </div>
+      <div style="position:absolute;left:16%;right:6%;bottom:{bottom}px;
+                  text-align:right;font-family:'{safe_font}',sans-serif;
+                  font-size:{main_size}px;color:{text_color};font-weight:800;
+                  text-shadow:-2px -2px 0 #111,2px -2px 0 #111,
+                              -2px 2px 0 #111,2px 2px 0 #111,0 3px 8px #000;">
+        {lower_line_html}
+      </div>
+      <div class="kf-preview-badge">实时字幕预览 · KTV 双行布局</div>
+    </div>
+    """
 
 
 def _build_align_options(
@@ -298,6 +479,16 @@ def run_make_job(
     netease_link: str = "",
     use_netease_lyrics: bool = True,
     rights_confirmed: bool = False,
+    cookie_browser: str = "",
+    cookie_browser_profile: str = "",
+    auto_sync: bool = True,
+    refine_word_timing: bool = True,
+    show_translation: bool = True,
+    translation_font_size: float = 38,
+    translation_color: str = "#EAF4FF",
+    show_pronunciation: bool = True,
+    pronunciation_font_size: float = 26,
+    pronunciation_color: str = "#FFFFFF",
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -323,14 +514,21 @@ def run_make_job(
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
             if audio is None:
-                track = download_public_netease_track(
+                track = download_netease_track(
                     link,
                     job_dir / ".source",
+                    cookie_browser=cookie_browser,
+                    cookie_browser_profile=cookie_browser_profile,
                     progress=report,
                 )
-                audio = track.audio_path
-                temporary_audio = track.audio_path
                 netease_info = track
+                if track.is_preview:
+                    track.audio_path.unlink(missing_ok=True)
+                    audio = video
+                    report("网易云只返回试听片段，已自动改用 MV 内嵌的完整音轨")
+                else:
+                    audio = track.audio_path
+                    temporary_audio = track.audio_path
             else:
                 netease_info = fetch_public_netease_info(link)
                 report("已使用本地音频，仅从网易云读取公开歌曲信息和歌词")
@@ -344,10 +542,35 @@ def run_make_job(
 
         if lyrics_file is not None or (pasted_lyrics and pasted_lyrics.strip()):
             lyrics = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
-        elif link and use_netease_lyrics and netease_info and netease_info.page_lyrics:
-            lyrics = job_dir / "netease-lyrics.lrc"
-            lyrics.write_text(netease_info.page_lyrics, encoding="utf-8")
-            report("已使用网易云页面公开歌词和行级时间轴")
+            if netease_info is not None:
+                lyrics = _lyrics_with_translation(
+                    lyrics,
+                    netease_info.translated_lyrics,
+                    job_dir,
+                    netease_info.page_lyrics,
+                )
+        elif (
+            link
+            and use_netease_lyrics
+            and netease_info
+            and (netease_info.word_lyrics or netease_info.page_lyrics)
+        ):
+            if netease_info.word_lyrics:
+                lyrics = job_dir / "netease-lyrics.yrc"
+                lyrics.write_text(netease_info.word_lyrics, encoding="utf-8")
+            else:
+                lyrics = job_dir / "netease-lyrics.lrc"
+                lyrics.write_text(netease_info.page_lyrics or "", encoding="utf-8")
+            lyrics = _lyrics_with_translation(
+                lyrics,
+                netease_info.translated_lyrics,
+                job_dir,
+                netease_info.page_lyrics,
+            )
+            timing_detail = "逐字时间轴" if netease_info.word_lyrics else "行级时间轴"
+            report(f"已使用网易云页面公开歌词和{timing_detail}")
+            if netease_info.translated_lyrics and lyrics.suffix == ".json":
+                report("已附加网易云中文翻译，将固定显示在画面顶部")
         else:
             raise ValueError("请提供歌词，或勾选使用网易云页面公开歌词。")
 
@@ -368,17 +591,31 @@ def run_make_job(
             assets,
             options=MakeOptions(
                 align=_build_align_options(language, model, device, separate_vocals),
-                style=_build_style(font, font_size, text_color, highlight_color, margin_v),
+                style=_build_style(
+                    font,
+                    font_size,
+                    text_color,
+                    highlight_color,
+                    margin_v,
+                    show_translation,
+                    translation_font_size,
+                    translation_color,
+                    show_pronunciation,
+                    pronunciation_font_size,
+                    pronunciation_color,
+                ),
                 audio_offset=float(audio_offset),
                 crf=crf,
                 preset=preset,
                 overwrite=False,
+                auto_sync=auto_sync,
+                refine_word_timing=refine_word_timing,
             ),
             progress=report,
         )
         if temporary_audio:
             temporary_audio.unlink(missing_ok=True)
-            report("公开音频仅作本次处理，现已清理")
+            report("本次获取的临时音频已清理")
         files = [str(result.video), *(str(path) for path in result.exports.values())]
         if result.alignment_report:
             alignment = (
@@ -388,8 +625,19 @@ def run_make_job(
             )
         else:
             alignment = "检测到已有时间轴歌词，因此跳过了自动对齐。"
+        sync_result = getattr(result, "sync_result", None)
+        if sync_result is not None:
+            sync_text = (
+                f"\n\n自动定位到歌曲从 MV 第 **{sync_result.offset:.2f} 秒**开始，"
+                f"置信度 **{sync_result.confidence:.0%}**。"
+            )
+        elif audio.resolve() == video.resolve():
+            sync_text = "\n\n已直接使用 MV 内嵌完整音轨。"
+        else:
+            sync_text = ""
         status = (
-            f"### ✅ 卡拉 OK MV 已生成\n{alignment}\n\n成品和所有歌词格式已保存，可以预览或下载。"
+            f"### ✅ 卡拉 OK MV 已生成\n{alignment}{sync_text}"
+            "\n\n成品和所有歌词格式已保存，可以预览或下载。"
         )
         report("全部完成")
         return UiJobResult(status, str(result.video), files, "\n".join(logs), str(job_dir))
@@ -494,6 +742,8 @@ def run_netease_align_job(
     use_page_lyrics: bool,
     keep_audio: bool,
     rights_confirmed: bool,
+    cookie_browser: str = "",
+    cookie_browser_profile: str = "",
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -535,6 +785,8 @@ def run_netease_align_job(
                 use_page_lyrics=use_page_lyrics,
                 keep_audio=keep_audio,
                 rights_confirmed=rights_confirmed,
+                cookie_browser=cookie_browser or None,
+                cookie_browser_profile=cookie_browser_profile or None,
             ),
             progress=report,
         )
@@ -548,10 +800,20 @@ def run_netease_align_job(
                 f"{result.alignment_report.target_units} 个词元。"
             )
         else:
-            timing = "使用了歌词文件中已有的网易云行级时间轴。"
+            timing = (
+                "使用了网易云提供的真实逐字时间轴。"
+                if result.track.word_lyrics
+                else "使用了歌词文件中已有的行级时间轴。"
+            )
+        access = (
+            f"账号与音质：{result.track.access_text}  \n"
+            if result.track.access_text
+            else ""
+        )
         status = (
             f"### ✅ {result.track.title} 的时间轴已生成\n"
             f"歌手：{result.track.artist_text}  \n"
+            f"{access}"
             f"{timing}"
         )
         report("全部歌词格式已导出")
@@ -624,6 +886,14 @@ def environment_markdown() -> str:
             importlib.util.find_spec("yt_dlp") is not None,
             "已安装" if importlib.util.find_spec("yt_dlp") else "未安装",
         ),
+        (
+            "日语/英语注音",
+            importlib.util.find_spec("pykakasi") is not None
+            and importlib.util.find_spec("alkana") is not None,
+            "已安装"
+            if importlib.util.find_spec("pykakasi") and importlib.util.find_spec("alkana")
+            else "未安装；请重新运行首次安装.bat",
+        ),
     ]
     rows = ["### 本机环境"]
     for name, ok, detail in checks:
@@ -634,7 +904,8 @@ def environment_markdown() -> str:
             "",
             (
                 "> faster-whisper 用于从无时间轴歌词生成时间；Demucs 只在勾选"
-                "“先分离人声”时需要；yt-dlp 只用于匿名获取公开可播放的网易云音频。"
+                "“先分离人声”时需要；yt-dlp 用于获取当前匿名或已登录账号有权播放的"
+                "网易云音频；pykakasi 与 alkana 用于离线生成日语和英语注音。"
             ),
             "",
             "输出默认保存在项目的 `outputs` 目录。页面运行在本机，素材不会自动上传到公网。",
@@ -732,17 +1003,34 @@ def create_web_app() -> object:
                                 label="网易云单曲链接",
                                 placeholder="https://music.163.com/song?id=...",
                             )
+                            with gr.Row():
+                                make_cookie_browser = gr.Dropdown(
+                                    label="账号权限",
+                                    choices=[
+                                        ("匿名（仅公开音频）", ""),
+                                        ("Chrome 已登录账号", "chrome"),
+                                        ("Edge 已登录账号", "edge"),
+                                        ("Firefox 已登录账号", "firefox"),
+                                        ("Brave 已登录账号", "brave"),
+                                    ],
+                                    value="",
+                                )
+                                make_cookie_profile = gr.Textbox(
+                                    label="浏览器配置（可选）",
+                                    placeholder="留空使用默认配置，如 Profile 1",
+                                )
                             make_use_netease_lyrics = gr.Checkbox(
                                 label="没有上传歌词时，使用网易云页面公开歌词",
                                 value=True,
                             )
                             make_rights = gr.Checkbox(
-                                label="我确认有权获取并处理该歌曲，且不会用本工具绕过会员、地区限制或 DRM",
+                                label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
                                 value=False,
                             )
                             gr.Markdown(
-                                "> 会员歌曲请优先上传官方允许导出的 MP3/FLAC/WAV/M4A。"
-                                "本工具不会读取账号或 Cookie，也不转换 NCM。"
+                                "> 选择浏览器后，会检测其中的网易云登录状态和本曲 VIP/SVIP"
+                                "音质权限，并使用账号实际有权播放的最高音质。Cookie 只在本机"
+                                "内存中读取，不会保存；本工具不接收密码，也不转换 NCM。"
                             )
                         gr.HTML(
                             '<div class="kf-tip">歌曲和 MV 应是同一版本。'
@@ -793,6 +1081,73 @@ def create_web_app() -> object:
                             make_highlight_color = gr.ColorPicker(
                                 label="唱到的颜色", value="#FFD54A"
                             )
+                        with gr.Row():
+                            make_show_translation = gr.Checkbox(
+                                label="有中文翻译时固定显示在画面顶部",
+                                value=True,
+                            )
+                            make_translation_size = gr.Slider(
+                                24,
+                                58,
+                                value=38,
+                                step=1,
+                                label="翻译字号",
+                            )
+                            make_translation_color = gr.ColorPicker(
+                                label="翻译颜色",
+                                value="#EAF4FF",
+                            )
+                        with gr.Row():
+                            make_show_pronunciation = gr.Checkbox(
+                                label="显示日语振假名和英语片假名读音",
+                                value=True,
+                            )
+                            make_pronunciation_size = gr.Slider(
+                                18,
+                                40,
+                                value=26,
+                                step=1,
+                                label="注音字号",
+                            )
+                            make_pronunciation_color = gr.ColorPicker(
+                                label="注音颜色",
+                                value="#FFFFFF",
+                            )
+
+                        with gr.Accordion("字幕实时预览", open=True):
+                            with gr.Row():
+                                make_preview_text = gr.Textbox(
+                                    label="原文双行预览（上一行 + 当前行）",
+                                    value=(
+                                        "I hear the flowers whisper.\n"
+                                        "Let me bloom inside your garden."
+                                    ),
+                                    lines=2,
+                                )
+                                make_preview_translation = gr.Textbox(
+                                    label="中文翻译预览",
+                                    value="让我在你的花园里盛放。",
+                                )
+                            make_style_preview = gr.HTML(
+                                subtitle_preview_html(
+                                    "Microsoft YaHei",
+                                    58,
+                                    "#FFFFFF",
+                                    "#FFD54A",
+                                    72,
+                                    True,
+                                    38,
+                                    "#EAF4FF",
+                                    True,
+                                    26,
+                                    "#FFFFFF",
+                                    (
+                                        "I hear the flowers whisper.\n"
+                                        "Let me bloom inside your garden."
+                                    ),
+                                    "让我在你的花园里盛放。",
+                                )
+                            )
 
                         with gr.Accordion("高级设置", open=False):
                             with gr.Row():
@@ -815,8 +1170,16 @@ def create_web_app() -> object:
                                     label="先分离人声（更慢，复杂伴奏可尝试）",
                                     value=False,
                                 )
+                                make_auto_sync = gr.Checkbox(
+                                    label="自动定位 MV 中歌曲开始位置",
+                                    value=True,
+                                )
+                                make_refine_word_timing = gr.Checkbox(
+                                    label="普通 LRC/SRT 根据演唱速度精修逐字时间",
+                                    value=True,
+                                )
                                 make_offset = gr.Number(
-                                    label="歌曲音轨延迟（秒）",
+                                    label="定位后的手动微调（秒）",
                                     value=0.0,
                                     precision=2,
                                 )
@@ -965,8 +1328,24 @@ def create_web_app() -> object:
                         label="没有提供自己的歌词时，使用网易云页面公开 LRC",
                         value=True,
                     )
+                    with gr.Row():
+                        netease_cookie_browser = gr.Dropdown(
+                            label="账号权限",
+                            choices=[
+                                ("匿名（仅公开音频）", ""),
+                                ("Chrome 已登录账号", "chrome"),
+                                ("Edge 已登录账号", "edge"),
+                                ("Firefox 已登录账号", "firefox"),
+                                ("Brave 已登录账号", "brave"),
+                            ],
+                            value="",
+                        )
+                        netease_cookie_profile = gr.Textbox(
+                            label="浏览器配置（可选）",
+                            placeholder="留空使用默认配置，如 Profile 1",
+                        )
                     netease_rights = gr.Checkbox(
-                        label="我确认有权获取并处理该歌曲，且不会用本工具绕过会员、地区限制或 DRM",
+                        label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
                         value=False,
                     )
                     with gr.Accordion("高级设置", open=False):
@@ -981,12 +1360,13 @@ def create_web_app() -> object:
                         )
                         netease_separate = gr.Checkbox(label="先分离人声", value=False)
                         netease_keep_audio = gr.Checkbox(
-                            label="保留公开获取的音频文件",
+                            label="保留本次获取的音频文件",
                             value=False,
                         )
                     gr.Markdown(
-                        "> 本工具不接收网易云账号、密码或 Cookie，也不会转换 NCM。"
-                        "会员歌曲请上传官方允许导出的标准音频文件。"
+                        "> 选择浏览器后，会读取其中现有的网易云登录会话，自动检测本曲"
+                        " VIP/SVIP 权限并获取账号有权播放的最高音质。Cookie 只在本机内存"
+                        "中使用，不会保存；不接收密码、不提升账号权限，也不会转换 NCM。"
                     )
                     netease_button = gr.Button(
                         "读取链接并生成时间轴",
@@ -1062,7 +1442,8 @@ def create_web_app() -> object:
 
                                 - **只有格式转换需求**：不需要 Whisper。
                                 - **歌词已有时间轴**：制作 MV 时不会运行 Whisper。
-                                - **网易云会员歌曲**：上传官方允许导出的标准音频；不支持 NCM。
+                                - **网易云会员歌曲**：可选择已登录浏览器来使用账号现有权限；
+                                  也可上传官方允许导出的标准音频；不支持 NCM。
                                 - **匹配率低**：确认歌词与歌曲是同一版本，或尝试分离人声。
                                 - **字幕没有中文字体**：在样式里换成本机已安装字体。
                                 """
@@ -1093,6 +1474,16 @@ def create_web_app() -> object:
             netease_link: str,
             use_netease_lyrics: bool,
             rights_confirmed: bool,
+            cookie_browser: str,
+            cookie_browser_profile: str,
+            auto_sync: bool,
+            refine_word_timing: bool,
+            show_translation: bool,
+            translation_font_size: float,
+            translation_color: str,
+            show_pronunciation: bool,
+            pronunciation_font_size: float,
+            pronunciation_color: str,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -1118,6 +1509,16 @@ def create_web_app() -> object:
                 netease_link,
                 use_netease_lyrics,
                 rights_confirmed,
+                cookie_browser,
+                cookie_browser_profile,
+                auto_sync,
+                refine_word_timing,
+                show_translation,
+                translation_font_size,
+                translation_color,
+                show_pronunciation,
+                pronunciation_font_size,
+                pronunciation_color,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -1151,6 +1552,16 @@ def create_web_app() -> object:
                 make_netease_link,
                 make_use_netease_lyrics,
                 make_rights,
+                make_cookie_browser,
+                make_cookie_profile,
+                make_auto_sync,
+                make_refine_word_timing,
+                make_show_translation,
+                make_translation_size,
+                make_translation_color,
+                make_show_pronunciation,
+                make_pronunciation_size,
+                make_pronunciation_color,
             ],
             outputs=[
                 make_status,
@@ -1161,6 +1572,29 @@ def create_web_app() -> object:
             ],
             show_progress="full",
         )
+
+        preview_inputs = [
+            make_font,
+            make_font_size,
+            make_text_color,
+            make_highlight_color,
+            make_margin,
+            make_show_translation,
+            make_translation_size,
+            make_translation_color,
+            make_show_pronunciation,
+            make_pronunciation_size,
+            make_pronunciation_color,
+            make_preview_text,
+            make_preview_translation,
+        ]
+        for preview_input in preview_inputs:
+            preview_input.change(
+                subtitle_preview_html,
+                inputs=preview_inputs,
+                outputs=make_style_preview,
+                queue=False,
+            )
 
         def align_wrapper(
             audio: object,
@@ -1219,6 +1653,8 @@ def create_web_app() -> object:
             use_page_lyrics: bool,
             keep_audio: bool,
             rights_confirmed: bool,
+            cookie_browser: str,
+            cookie_browser_profile: str,
             progress: object = gr.Progress(),
         ) -> tuple[str, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -1237,6 +1673,8 @@ def create_web_app() -> object:
                 use_page_lyrics,
                 keep_audio,
                 rights_confirmed,
+                cookie_browser,
+                cookie_browser_profile,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.files else "未完成")
@@ -1257,6 +1695,8 @@ def create_web_app() -> object:
                 netease_use_page_lyrics,
                 netease_keep_audio,
                 netease_rights,
+                netease_cookie_browser,
+                netease_cookie_profile,
             ],
             outputs=[
                 netease_status,

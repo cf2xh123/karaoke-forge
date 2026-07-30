@@ -3,10 +3,11 @@ from __future__ import annotations
 import html
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from .models import KaraokeToken, LyricLine, LyricsDocument
-from .text import split_display_units, strip_section_label
+from .text import alignment_key, split_display_units, strip_section_label
 from .timecode import lrc_clock, parse_clock, parse_lrc_clock, srt_clock, vtt_clock
 
 
@@ -17,6 +18,8 @@ class LyricsFormatError(ValueError):
 _LRC_LINE_TIME = re.compile(r"\[((?:\d+:)?\d{1,2}:\d{1,2}(?:[.,]\d+)?)\]")
 _ELRC_WORD_TIME = re.compile(r"<((?:\d+:)?\d{1,2}:\d{1,2}(?:[.,]\d+)?)>")
 _LRC_METADATA = re.compile(r"^\[([A-Za-z][A-Za-z0-9_-]*):(.*)]$")
+_YRC_LINE = re.compile(r"^\[(\d+),(\d+)](.*)$")
+_YRC_WORD = re.compile(r"\((\d+),(\d+),\d+\)")
 _ASS_TAG = re.compile(r"\{[^}]*}")
 _HTML_TAG = re.compile(r"<[^>]+>")
 
@@ -34,6 +37,8 @@ def read_lyrics(path: str | Path, format_name: str | None = None) -> LyricsDocum
         return parse_plain(text)
     if fmt in {"lrc", "elrc"}:
         return parse_lrc(text)
+    if fmt == "yrc":
+        return parse_yrc(text)
     if fmt == "srt":
         return parse_srt(text)
     if fmt == "vtt":
@@ -60,6 +65,8 @@ def parse_plain(text: str) -> LyricsDocument:
 def parse_lrc(text: str) -> LyricsDocument:
     metadata: dict[str, str] = {}
     parsed: list[LyricLine] = []
+    timestamp_lines = 0
+    word_timed_lines = 0
 
     for raw in text.splitlines():
         raw = raw.strip()
@@ -81,6 +88,9 @@ def parse_lrc(text: str) -> LyricsDocument:
         for stamp in timestamps:
             start = parse_lrc_clock(stamp.group(1))
             tokens, clean_text = _parse_elrc_content(content)
+            timestamp_lines += 1
+            if tokens:
+                word_timed_lines += 1
             parsed.append(LyricLine(text=clean_text, start=start, tokens=tokens))
 
     if not parsed:
@@ -91,6 +101,10 @@ def parse_lrc(text: str) -> LyricsDocument:
     for line in parsed:
         _finish_token_ends(line)
     _hydrate_missing_tokens(parsed)
+    metadata.setdefault(
+        "word_timing",
+        "source" if timestamp_lines and word_timed_lines == timestamp_lines else "synthetic",
+    )
     return LyricsDocument(lines=parsed, metadata=metadata, source_format="lrc")
 
 
@@ -118,6 +132,62 @@ def _parse_elrc_content(content: str) -> tuple[list[KaraokeToken], str]:
     return tokens, "".join(visible_parts).strip()
 
 
+def parse_yrc(text: str) -> LyricsDocument:
+    """Parse NetEase YRC millisecond line and word timing."""
+
+    lines: list[LyricLine] = []
+    for raw in text.splitlines():
+        line_match = _YRC_LINE.match(raw.strip())
+        if not line_match:
+            continue
+        line_start_ms = int(line_match.group(1))
+        line_duration_ms = int(line_match.group(2))
+        content = line_match.group(3)
+        matches = list(_YRC_WORD.finditer(content))
+        if not matches:
+            continue
+
+        pieces: list[str] = []
+        token_data: list[tuple[str, float, float]] = []
+        for index, match in enumerate(matches):
+            text_end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+            value = content[match.end() : text_end]
+            if index == 0:
+                value = value.lstrip()
+            if index + 1 == len(matches):
+                value = value.rstrip()
+            if not value:
+                continue
+            start = int(match.group(1)) / 1000
+            duration = max(0.01, int(match.group(2)) / 1000)
+            pieces.append(value)
+            token_data.append((value, start, start + duration))
+        line_text = "".join(pieces)
+        if not line_text:
+            continue
+        line_start = line_start_ms / 1000
+        line_end = max(line_start + 0.01, (line_start_ms + line_duration_ms) / 1000)
+        tokens = [
+            KaraokeToken(text=value, start=start, end=min(line_end, end))
+            for value, start, end in token_data
+        ]
+        lines.append(
+            LyricLine(
+                text=line_text,
+                start=line_start,
+                end=line_end,
+                tokens=tokens,
+            )
+        )
+    if not lines:
+        raise LyricsFormatError("No timed lyric lines were found in the YRC file.")
+    return LyricsDocument(
+        lines=lines,
+        metadata={"word_timing": "source"},
+        source_format="yrc",
+    )
+
+
 def parse_srt(text: str) -> LyricsDocument:
     normalized = text.replace("\r\n", "\n").strip()
     lines: list[LyricLine] = []
@@ -136,14 +206,22 @@ def parse_srt(text: str) -> LyricsDocument:
     if not lines:
         raise LyricsFormatError("No subtitle cues were found in the SRT file.")
     _hydrate_missing_tokens(lines)
-    return LyricsDocument(lines=lines, source_format="srt")
+    return LyricsDocument(
+        lines=lines,
+        metadata={"word_timing": "synthetic"},
+        source_format="srt",
+    )
 
 
 def parse_vtt(text: str) -> LyricsDocument:
     normalized = text.replace("\r\n", "\n").lstrip("\ufeff")
     if normalized.startswith("WEBVTT"):
         normalized = normalized.split("\n", 1)[1] if "\n" in normalized else ""
-    return LyricsDocument(lines=parse_srt(normalized).lines, source_format="vtt")
+    return LyricsDocument(
+        lines=parse_srt(normalized).lines,
+        metadata={"word_timing": "synthetic"},
+        source_format="vtt",
+    )
 
 
 def parse_ass(text: str) -> LyricsDocument:
@@ -168,7 +246,11 @@ def parse_ass(text: str) -> LyricsDocument:
     if not lines:
         raise LyricsFormatError("No Dialogue events were found in the ASS file.")
     _hydrate_missing_tokens(lines)
-    return LyricsDocument(lines=lines, source_format="ass")
+    return LyricsDocument(
+        lines=lines,
+        metadata={"word_timing": "synthetic"},
+        source_format="ass",
+    )
 
 
 def parse_json(text: str) -> LyricsDocument:
@@ -196,6 +278,8 @@ def parse_json(text: str) -> LyricsDocument:
                 start=item.get("start"),
                 end=item.get("end"),
                 tokens=tokens,
+                translation=item.get("translation"),
+                pronunciation=item.get("pronunciation"),
             )
         )
     document = LyricsDocument(
@@ -206,6 +290,121 @@ def parse_json(text: str) -> LyricsDocument:
     if document.is_timed:
         _hydrate_missing_tokens(document.lines)
     return document
+
+
+def attach_lrc_translation(
+    document: LyricsDocument,
+    translated_lrc: str | None,
+    *,
+    tolerance: float = 0.5,
+) -> int:
+    """Attach translated LRC lines to the nearest original line timestamp."""
+
+    if not translated_lrc or not document.is_timed:
+        return 0
+    translated = parse_lrc(translated_lrc)
+    candidates = [
+        line
+        for line in translated.lines
+        if line.start is not None and line.text.strip()
+    ]
+    if not candidates:
+        return 0
+
+    attached = 0
+    cursor = 0
+    for line in document.lines:
+        if line.start is None:
+            continue
+        while (
+            cursor + 1 < len(candidates)
+            and candidates[cursor + 1].start is not None
+            and abs(candidates[cursor + 1].start - line.start)
+            <= abs((candidates[cursor].start or 0.0) - line.start)
+        ):
+            cursor += 1
+        candidate = candidates[cursor]
+        if (
+            candidate.start is not None
+            and abs(candidate.start - line.start) <= tolerance
+            and candidate.text.strip() != line.text.strip()
+        ):
+            line.translation = candidate.text.strip()
+            attached += 1
+    return attached
+
+
+def attach_reference_translation(
+    document: LyricsDocument,
+    original_lrc: str | None,
+    translated_lrc: str | None,
+) -> int:
+    """Attach translations by fuzzy-aligning YRC text to the original LRC text."""
+
+    if not original_lrc or not translated_lrc:
+        return attach_lrc_translation(document, translated_lrc)
+    reference = parse_lrc(original_lrc)
+    attach_lrc_translation(reference, translated_lrc)
+    target_lines = [line for line in document.lines if alignment_key(line.text)]
+    reference_lines = [line for line in reference.lines if alignment_key(line.text)]
+    if not target_lines or not reference_lines:
+        return 0
+
+    rows = len(target_lines) + 1
+    columns = len(reference_lines) + 1
+    gap = -0.35
+    previous = [column * gap for column in range(columns)]
+    trace = [bytearray(columns) for _ in range(rows)]
+    for column in range(1, columns):
+        trace[0][column] = 2
+    similarities: dict[tuple[int, int], float] = {}
+    for row in range(1, rows):
+        trace[row][0] = 1
+        current = [row * gap] + [0.0] * (columns - 1)
+        target = target_lines[row - 1]
+        target_key = alignment_key(target.text)
+        for column in range(1, columns):
+            source = reference_lines[column - 1]
+            source_key = alignment_key(source.text)
+            similarity = SequenceMatcher(None, target_key, source_key).ratio()
+            if target.start is not None and source.start is not None:
+                similarity += max(0.0, 1.0 - abs(target.start - source.start) / 3.0) * 0.15
+            similarities[(row - 1, column - 1)] = similarity
+            diagonal = previous[column - 1] + similarity
+            skip_target = previous[column] + gap
+            skip_reference = current[column - 1] + gap
+            if diagonal >= skip_target and diagonal >= skip_reference:
+                current[column] = diagonal
+                trace[row][column] = 0
+            elif skip_target >= skip_reference:
+                current[column] = skip_target
+                trace[row][column] = 1
+            else:
+                current[column] = skip_reference
+                trace[row][column] = 2
+        previous = current
+
+    mapping: dict[int, int] = {}
+    row, column = len(target_lines), len(reference_lines)
+    while row > 0 or column > 0:
+        direction = trace[row][column]
+        if row > 0 and column > 0 and direction == 0:
+            if similarities[(row - 1, column - 1)] >= 0.45:
+                mapping[row - 1] = column - 1
+            row -= 1
+            column -= 1
+        elif row > 0 and (column == 0 or direction == 1):
+            row -= 1
+        else:
+            column -= 1
+
+    attached = 0
+    for target_index, reference_index in mapping.items():
+        translation = reference_lines[reference_index].translation
+        if translation:
+            target_lines[target_index].translation = translation
+            attached += 1
+    return attached
 
 
 def _fill_line_ends(lines: list[LyricLine]) -> None:
@@ -260,6 +459,8 @@ def write_lrc(document: LyricsDocument, enhanced: bool = False) -> str:
         else:
             content = line.text
         output.append(f"{line_tag}{content}")
+        if line.translation:
+            output.append(f"{line_tag}{line.translation}")
     return "\n".join(output) + "\n"
 
 
@@ -268,7 +469,8 @@ def write_srt(document: LyricsDocument) -> str:
     blocks: list[str] = []
     for index, line in enumerate(document.lines, 1):
         assert line.start is not None and line.end is not None
-        blocks.append(f"{index}\n{srt_clock(line.start)} --> {srt_clock(line.end)}\n{line.text}")
+        text = f"{line.translation}\n{line.text}" if line.translation else line.text
+        blocks.append(f"{index}\n{srt_clock(line.start)} --> {srt_clock(line.end)}\n{text}")
     return "\n\n".join(blocks) + "\n"
 
 
@@ -277,7 +479,8 @@ def write_vtt(document: LyricsDocument) -> str:
     blocks = ["WEBVTT"]
     for line in document.lines:
         assert line.start is not None and line.end is not None
-        blocks.append(f"{vtt_clock(line.start)} --> {vtt_clock(line.end)}\n{line.text}")
+        text = f"{line.translation}\n{line.text}" if line.translation else line.text
+        blocks.append(f"{vtt_clock(line.start)} --> {vtt_clock(line.end)}\n{text}")
     return "\n\n".join(blocks) + "\n"
 
 

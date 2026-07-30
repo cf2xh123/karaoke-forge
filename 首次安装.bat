@@ -29,7 +29,7 @@ if not exist ".venv\Scripts\python.exe" (
 echo [2/3] 正在安装网页和歌词对齐组件，首次安装需要一些时间...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :failed
-".venv\Scripts\python.exe" -m pip install -e ".[web,align,netease]"
+".venv\Scripts\python.exe" -m pip install -e ".[web,align,netease,pronunciation]"
 if errorlevel 1 goto :failed
 
 echo [3/3] 正在检查 FFmpeg...

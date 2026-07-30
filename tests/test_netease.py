@@ -9,7 +9,9 @@ from karaoke_forge.netease import (
     NeteaseLinkError,
     NeteaseSongInfo,
     align_netease_song,
+    download_netease_track,
     download_public_netease_track,
+    fetch_public_netease_info,
     resolve_netease_song_url,
 )
 
@@ -25,6 +27,40 @@ def test_resolve_direct_netease_song_links() -> None:
         "https://y.music.163.com/m/song?app_version=9&id=95670&uct2=example"
     )
     assert mobile_id == "95670"
+
+
+def test_public_info_prefers_available_yrc_word_timing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "karaoke_forge.netease.resolve_netease_song_url",
+        lambda *_args, **_kwargs: ("42", "https://music.163.com/song?id=42"),
+    )
+    responses = iter(
+        [
+            {
+                "songs": [
+                    {
+                        "name": "Example",
+                        "duration": 5000,
+                        "artists": [{"name": "Artist"}],
+                    }
+                ]
+            },
+            {
+                "lrc": {"lyric": "[00:01.00]Hello"},
+                "yrc": {"lyric": "[1000,500](1000,500,0)Hello"},
+                "tlyric": {"lyric": "[00:01.00]你好"},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease._download_public_json",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    info = fetch_public_netease_info("song 42")
+
+    assert info.word_lyrics == "[1000,500](1000,500,0)Hello\n"
+    assert info.page_lyrics == "[00:01.00]Hello\n"
 
 
 def test_rejects_non_song_netease_links() -> None:
@@ -81,7 +117,7 @@ def test_local_audio_uses_public_page_lrc_without_downloading_audio(
         None,
         tmp_path / "output",
         local_audio_path=audio,
-        options=NeteaseAlignOptions(rights_confirmed=True),
+        options=NeteaseAlignOptions(rights_confirmed=True, refine_word_timing=False),
     )
 
     assert result.alignment_skipped
@@ -152,3 +188,141 @@ def test_public_download_uses_anonymous_session_without_cookies(
     assert track.audio_path.is_file()
     assert observed_options["usenetrc"] is False
     assert "cookiefile" not in observed_options
+
+
+def test_browser_session_detects_vip_access_and_uses_browser_cookies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="VIP Song",
+        artists=("Example Artist",),
+        canonical_url="https://music.163.com/song?id=42",
+        page_lyrics="[00:01.00]Hello\n",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.fetch_public_netease_info",
+        lambda _link: info,
+    )
+    observed_options: dict[str, object] = {}
+
+    class FakeDownloadError(Exception):
+        pass
+
+    class FakeCookie:
+        name = "MUSIC_U"
+        domain = ".music.163.com"
+
+        def is_expired(self) -> bool:
+            return False
+
+    class FakeYoutubeDL:
+        def __init__(self, options: dict[str, object]) -> None:
+            observed_options.update(options)
+            self.options = options
+            self.cookiejar = [FakeCookie()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def extract_info(self, _url: str, *, download: bool):
+            assert download
+            extracted = {
+                "formats": [
+                    {"format_id": "standard"},
+                    {"format_id": "exhigh"},
+                    {"format_id": "lossless"},
+                    {"format_id": "hires"},
+                ],
+            }
+            self.options["match_filter"](extracted, incomplete=False)  # type: ignore[operator]
+            target = Path(str(self.options["outtmpl"]).replace("%(ext)s", "flac"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"authorized vip audio")
+            return {
+                "id": "42",
+                "title": "VIP Song",
+                "creators": ["Example Artist"],
+                **extracted,
+                "requested_downloads": [
+                    {"filepath": str(target), "format_id": "hires"},
+                ],
+            }
+
+        def prepare_filename(self, _info: dict[str, object]) -> str:
+            return str(Path(str(self.options["outtmpl"]).replace("%(ext)s", "flac")))
+
+    yt_dlp_module = ModuleType("yt_dlp")
+    yt_dlp_module.YoutubeDL = FakeYoutubeDL  # type: ignore[attr-defined]
+    utils_module = ModuleType("yt_dlp.utils")
+    utils_module.DownloadError = FakeDownloadError  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", yt_dlp_module)
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp.utils", utils_module)
+
+    progress: list[str] = []
+    track = download_netease_track(
+        info.canonical_url,
+        tmp_path / "source",
+        cookie_browser="edge",
+        cookie_browser_profile="Profile 1",
+        progress=progress.append,
+    )
+
+    assert observed_options["cookiesfrombrowser"] == ("edge", "Profile 1", None, None)
+    assert track.authenticated
+    assert track.quality_level == "hires"
+    assert track.access_tier == "vip"
+    assert any("VIP 音质权限" in message for message in progress)
+    assert all("MUSIC_U" not in message for message in progress)
+
+
+def test_browser_session_requires_netease_login_cookie(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="VIP Song",
+        artists=(),
+        canonical_url="https://music.163.com/song?id=42",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.fetch_public_netease_info",
+        lambda _link: info,
+    )
+
+    class FakeDownloadError(Exception):
+        pass
+
+    class FakeYoutubeDL:
+        cookiejar: list[object] = []
+
+        def __init__(self, _options: dict[str, object]) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def extract_info(self, _url: str, *, download: bool):
+            raise AssertionError("download must not start without a login cookie")
+
+    yt_dlp_module = ModuleType("yt_dlp")
+    yt_dlp_module.YoutubeDL = FakeYoutubeDL  # type: ignore[attr-defined]
+    utils_module = ModuleType("yt_dlp.utils")
+    utils_module.DownloadError = FakeDownloadError  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", yt_dlp_module)
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp.utils", utils_module)
+
+    with pytest.raises(NeteaseAccessError, match="登录会话"):
+        download_netease_track(
+            info.canonical_url,
+            tmp_path / "source",
+            cookie_browser="chrome",
+        )

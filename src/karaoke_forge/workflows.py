@@ -7,9 +7,9 @@ from pathlib import Path
 from .align import AlignmentReport
 from .ass import AssStyle
 from .formats import export_formats, read_lyrics
-from .media import render_karaoke_video
+from .media import AudioSyncResult, detect_audio_sync, render_karaoke_video
 from .models import LyricsDocument
-from .pipeline import AlignOptions, align_audio_and_lyrics
+from .pipeline import AlignOptions, align_audio_and_lyrics, refine_audio_word_timing
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,8 @@ class MakeOptions:
     preset: str = "medium"
     audio_bitrate: str = "320k"
     overwrite: bool = False
+    auto_sync: bool = False
+    refine_word_timing: bool = True
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,8 @@ class MakeResult:
     video: Path
     alignment_report: AlignmentReport | None
     alignment_skipped: bool
+    audio_offset: float
+    sync_result: AudioSyncResult | None
 
 
 def make_karaoke_video(
@@ -58,13 +62,54 @@ def make_karaoke_video(
         raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
     assets.mkdir(parents=True, exist_ok=True)
 
+    effective_offset = options.audio_offset
+    sync_result: AudioSyncResult | None = None
+    if options.auto_sync:
+        if audio.resolve() == video_source.resolve():
+            if progress:
+                progress("正在使用 MV 内嵌完整音轨，无需额外偏移")
+        else:
+            sync_result = detect_audio_sync(audio, video_source, progress=progress)
+            if not sync_result.reliable:
+                raise ValueError(
+                    "歌曲音频与 MV 音轨无法可靠匹配："
+                    f"仅命中 {sync_result.matched_windows}/{sync_result.total_windows} 个指纹窗口，"
+                    f"置信度 {sync_result.confidence:.0%}。请确认歌曲和 MV 是同一版本，"
+                    "或关闭自动定位后手动设置偏移。"
+                )
+            effective_offset += sync_result.offset
+            if progress:
+                progress(
+                    f"已定位歌曲开始位置：MV 第 {sync_result.offset:.2f} 秒"
+                    f"（置信度 {sync_result.confidence:.0%}）"
+                )
+
     source_document = read_lyrics(lyrics_path)
     report: AlignmentReport | None = None
     alignment_skipped = source_document.is_timed
-    if alignment_skipped:
-        document = source_document
-        if progress:
-            progress("Lyrics already contain a timeline; alignment was skipped.")
+    if source_document.is_timed:
+        needs_refinement = (
+            options.refine_word_timing
+            and source_document.metadata.get("word_timing") == "synthetic"
+        )
+        if needs_refinement:
+            refined = refine_audio_word_timing(
+                audio,
+                source_document,
+                options=options.align,
+                work_dir=assets / ".work",
+                progress=progress,
+            )
+            document = refined.document
+            report = refined.report
+            alignment_skipped = False
+        else:
+            document = source_document
+            if progress:
+                if source_document.metadata.get("word_timing") == "source":
+                    progress("歌词已包含真实逐字时间，直接用于卡拉 OK 扫色")
+                else:
+                    progress("歌词已有时间轴，已跳过语音识别")
     else:
         aligned = align_audio_and_lyrics(
             audio,
@@ -75,6 +120,10 @@ def make_karaoke_video(
         )
         document = aligned.document
         report = aligned.report
+    if effective_offset:
+        document = document.shifted(effective_offset)
+        if progress:
+            progress(f"已将歌词时间轴整体偏移 {effective_offset:+.2f} 秒")
 
     formats = list(dict.fromkeys([*options.formats, "ass"]))
     exports = export_formats(
@@ -89,7 +138,7 @@ def make_karaoke_video(
         exports["ass"],
         output,
         audio_path=audio,
-        audio_offset=options.audio_offset,
+        audio_offset=effective_offset,
         crf=options.crf,
         preset=options.preset,
         audio_bitrate=options.audio_bitrate,
@@ -102,4 +151,6 @@ def make_karaoke_video(
         video=video,
         alignment_report=report,
         alignment_skipped=alignment_skipped,
+        audio_offset=effective_offset,
+        sync_result=sync_result,
     )

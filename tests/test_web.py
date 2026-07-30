@@ -1,13 +1,15 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from karaoke_forge.netease import NeteaseSongInfo
+from karaoke_forge.netease import NeteaseSongInfo, NeteaseTrack
+from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
     _safe_stem,
     environment_markdown,
     run_align_job,
     run_convert_job,
     run_make_job,
+    subtitle_preview_html,
 )
 
 
@@ -62,6 +64,42 @@ def test_environment_report_mentions_local_processing() -> None:
     report = environment_markdown()
     assert "FFmpeg" in report
     assert "素材不会自动上传到公网" in report
+
+
+def test_subtitle_preview_reflects_translation_pronunciation_and_style(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "karaoke_forge.web.generate_pronunciation",
+        lambda text: PronunciationLine(
+            (PronunciationUnit(source=text, reading="サンプル"),),
+        ),
+    )
+    preview = subtitle_preview_html(
+        "Microsoft YaHei",
+        64,
+        "#FFFFFF",
+        "#FFD54A",
+        80,
+        True,
+        36,
+        "#EAF4FF",
+        True,
+        26,
+        "#FFFFFF",
+        "It's silence\nbeyond this ocean?",
+        "花园。",
+    )
+
+    assert "Microsoft YaHei" in preview
+    assert "#FFD54A" in preview
+    assert "花园。" in preview
+    assert "It&#x27;s silence" in preview
+    assert "beyond " in preview
+    assert "this ocean?" in preview
+    assert 'data-kf-layout="ktv-split"' in preview
+    assert "KTV 双行布局" in preview
+    assert "サンプル" in preview
 
 
 def test_make_job_can_use_netease_page_lyrics_with_local_audio(
@@ -132,3 +170,77 @@ def test_make_job_can_use_netease_page_lyrics_with_local_audio(
     assert result.video is not None
     assert "已生成" in result.status
     assert "仅从网易云读取" in result.log
+
+
+def test_make_job_falls_back_to_mv_audio_for_netease_preview(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    video = tmp_path / "mv.mp4"
+    preview = tmp_path / "preview.mp3"
+    video.write_bytes(b"video with complete audio")
+    preview.write_bytes(b"30 second preview")
+    track = NeteaseTrack(
+        song_id="1946664196",
+        title="garden.",
+        artists=("CVLTE",),
+        canonical_url="https://music.163.com/song?id=1946664196",
+        audio_path=preview,
+        duration=215.0,
+        page_lyrics="[00:01.00]Hello\n[00:03.00]World\n",
+        translated_lyrics="[00:01.00]你好\n[00:03.00]世界\n",
+        audio_duration=30.0,
+        is_preview=True,
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.download_netease_track",
+        lambda *_args, **_kwargs: track,
+    )
+
+    def fake_make(audio, _video, lyrics, output, assets, *, options, **_kwargs):
+        assert Path(audio) == video
+        assert options.auto_sync
+        assert options.style.show_translation
+        assert options.style.show_pronunciation
+        assert '"translation": "你好"' in Path(lyrics).read_text(encoding="utf-8")
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "lyrics.ass"
+        exported.write_text("subtitle", encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"ass": exported},
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        None,
+        str(video),
+        None,
+        "",
+        "garden-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        track.canonical_url,
+        True,
+        True,
+    )
+
+    assert result.video is not None
+    assert "MV 内嵌的完整音轨" in result.log
+    assert "中文翻译" in result.log
+    assert not preview.exists()

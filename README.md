@@ -2,10 +2,10 @@
 
 把一首歌、对应歌词和 MV 变成带逐词高亮的卡拉 OK 视频。所有处理都可以在本地完成，音频和视频不会被上传到第三方服务。
 
-[English](README_EN.md) · [更新记录](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) ·
+[English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前版本：`0.1.0`（可用的 Alpha/MVP）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
+> 当前版本：`0.2.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
 
 ## 能做什么
 
@@ -14,6 +14,11 @@
 - 读取 TXT、LRC、增强 LRC、SRT、VTT、ASS 和项目 JSON；
 - 导出 LRC、增强 LRC、SRT、VTT、逐词高亮 ASS 和 JSON；
 - 把字幕烧录进 MV，并可用高质量歌曲音轨替换 MV 原音轨；
+- 自动定位 MV 中歌曲真正开始的位置，跳过片头或片尾剧情；
+- 优先采用网易云 YRC 真实逐字时间，并可根据演唱速度精修普通行级歌词；
+- 显示顶部中文翻译和左上、右下交替的传统 KTV 双行歌词；
+- 为日语汉字添加振假名、为英文单词添加片假名读音；
+- 在网页中实时预览字幕字体、字号、颜色和布局；
 - 可选用 Demucs 先分离人声，改善复杂伴奏中的识别效果；
 - Windows、macOS、Linux 均可使用。
 
@@ -51,9 +56,9 @@ Windows 用户可以完全通过双击操作：
 
 网页包含五个功能区：
 
-- **制作卡拉 OK MV**：一次完成歌词对齐、格式导出和视频生成；
+- **制作卡拉 OK MV**：自动定位 MV 中歌曲开始位置，一次完成歌词对齐、格式导出和视频生成；
 - **只生成时间轴歌词**：输出 LRC、增强 LRC、SRT、VTT、ASS 和 JSON；
-- **网易云链接生成歌词**：解析公开单曲信息/LRC，可配合本地会员音频；
+- **网易云链接生成歌词**：解析原文/中文翻译 LRC，可配合本地会员音频；
 - **歌词格式转换**：已有时间轴歌词无需 AI 模型即可转换；
 - **环境检查与帮助**：查看 FFmpeg、Whisper 和可选人声分离是否就绪。
 
@@ -62,7 +67,7 @@ Windows 用户可以完全通过双击操作：
 macOS/Linux 或希望手动启动的用户：
 
 ```bash
-pip install -e ".[web,align,netease]"
+pip install -e ".[web,align,netease,pronunciation]"
 karaoke-forge web
 ```
 
@@ -99,7 +104,7 @@ pip install -e ".[all]"
 如需同时安装本地网页和自动对齐：
 
 ```bash
-pip install -e ".[web,align,netease]"
+pip install -e ".[web,align,netease,pronunciation]"
 ```
 
 安装后检查运行环境：
@@ -135,30 +140,43 @@ karaoke-forge make song.flac mv.mp4 lyrics.txt -o output/song-karaoke.mp4 --lang
 网页版的“一键制作 MV”支持用网易云链接补充素材：
 
 - 已上传本地音频时，只读取公开的歌曲信息和 LRC，不请求网易云音频；
-- 没有本地音频时，只尝试获取匿名用户也能公开播放的音频；
-- 没有上传歌词时，可以直接采用网易云页面公开 LRC；
+- 没有本地音频时，默认只尝试获取匿名用户也能公开播放的音频；
+- 平台只返回 30 秒试听、但上传的 MV 带完整音轨时，会自动改用 MV 内嵌音频；
+- 选择本机已登录的 Chrome、Edge、Firefox 或 Brave 后，会检测登录状态和该歌曲
+  实际返回的 VIP/SVIP 音质权限，并获取账号有权播放的最高音质；
+- 没有上传歌词时，可以直接采用网易云页面原文和中文翻译 LRC；
 - 自己上传或粘贴的歌词始终优先于页面歌词。
 
-会员歌曲建议在网易云官方客户端中，按平台许可导出标准
-MP3、FLAC、WAV 或 M4A，然后上传到页面。本项目：
+会员歌曲可以在网页中选择已登录网易云的浏览器，也可以在网易云官方客户端中按平台
+许可导出标准 MP3、FLAC、WAV 或 M4A 后上传。本项目：
 
-- 不接收账号、密码或 Cookie；
-- 不模拟会员身份；
-- 不绕过地区、会员或 DRM 限制；
+- 不接收账号或密码；浏览器 Cookie 只在本机内存中按需读取，不写入项目或输出目录；
+- 只使用当前账号本来具有的播放和音质权限，不提升或模拟会员身份；
+- 不绕过地区、版权或 DRM 限制；
 - 不转换或解密 `.ncm` 文件。
 
 只生成时间轴歌词时，可以使用网页的“网易云链接生成歌词”，也可以运行：
 
 ```bash
 karaoke-forge netease "https://music.163.com/song?id=123456" lyrics.txt \
-  --audio authorized-song.flac \
+  --cookies-from-browser edge \
   --i-have-rights \
   -o build/netease
 ```
 
-省略 `lyrics.txt` 会尝试使用页面公开 LRC；省略 `--audio` 会尝试公开音频。
-网易云 LRC 通常只有行级时间，转换成卡拉 OK ASS 时会在行内均匀分配高亮；
-要得到更准确的逐词时间，应上传无时间轴歌词，让 Whisper 用音频重新对齐。
+浏览器中需要已经登录 `music.163.com`；非默认配置可加
+`--browser-profile "Profile 1"`。程序会记录检测到的登录状态、该曲最高可用音质以及
+VIP/SVIP 权限，但不会打印或保存 Cookie。省略 `lyrics.txt` 会优先使用页面公开的 YRC
+逐字时间歌词，没有 YRC 时再回退到 LRC；
+同时省略 `--audio` 和 `--cookies-from-browser` 时会尝试匿名公开音频。
+YRC 中每个字的真实开始时间和持续时间会直接用于扫色，能处理拖长音、抢拍和句中速度
+变化。普通 LRC/SRT 只有行级时间时，默认用音频识别结果精修句内逐字时间，同时固定原有
+行首和行尾，避免整句漂移；可用 `--no-refine-word-timing` 关闭。网页“高级选项”中也有
+对应开关。
+
+制作 MV 时默认启用音轨指纹匹配。它从歌曲和 MV 内嵌音轨提取多个短窗口，只有多个
+窗口以同一偏移量稳定匹配时才接受结果，因此可以跳过片头/片尾剧情，也能阻止错误歌曲
+和错误 MV 继续生成。命令行使用 `karaoke-forge make ... --auto-sync` 开启。
 
 输出包括：
 
@@ -257,14 +275,29 @@ karaoke-forge render mv.mp4 lyrics.ass \
 ```bash
 karaoke-forge make song.flac mv.mp4 lyrics.txt \
   -o karaoke.mp4 \
+  --auto-sync \
   --font "Noto Sans CJK SC" \
   --font-size 64 \
   --text-color "#FFFFFF" \
   --highlight-color "#FFD54A" \
   --outline-color "#111111" \
   --margin-v 80 \
+  --translation-font-size 38 \
+  --translation-color "#EAF4FF" \
+  --pronunciation-font-size 26 \
+  --pronunciation-color "#FFFFFF" \
   --resolution 1920x1080
 ```
+
+当歌词包含中文翻译时，ASS 会采用传统 KTV 分区布局：中文翻译固定在画面顶部居中，
+原文在底部按“左上行 + 右下行”成对显示，当前句逐字变色，另一句保持未唱颜色。
+可用 `--no-show-translation` 关闭翻译。网页版样式区域提供 16:9 实时字幕预览，
+字体、字号、颜色、翻译和底部位置都会立即反映在预览画面中。
+
+默认还会为含汉字的日语歌词生成平假名振假名，并为英语单词生成片假名读音；
+注音位于对应原文行上方，并跟随当前句逐段变色。可在网页中调整注音字号和颜色，
+或用 `--no-show-pronunciation` 关闭。自动读音可能遇到人名、造词或多音词，
+需要时可在歌词 JSON 的 `pronunciation` 字段中手动修正。
 
 字体必须已经安装在运行 FFmpeg 的系统中。不同平台可优先选择：
 

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .align import AlignmentReport, align_document
+from .align import AlignmentReport, align_document, refine_timed_document
 from .formats import read_lyrics
 from .media import separate_vocals
 from .models import LyricsDocument
@@ -75,6 +75,58 @@ def align_audio_and_lyrics(
         progress=progress,
     )
     document, report = align_document(
+        lyrics,
+        transcription.words,
+        minimum_coverage=options.minimum_coverage,
+    )
+    if transcription.detected_language:
+        document.metadata.setdefault("language", transcription.detected_language)
+    document.metadata["generator"] = "Karaoke Forge"
+    document.metadata["alignment_model"] = options.model
+    return AlignResult(
+        document=document,
+        report=report,
+        transcription=transcription,
+        alignment_audio=Path(alignment_audio),
+    )
+
+
+def refine_audio_word_timing(
+    audio_path: str | Path,
+    lyrics: LyricsDocument,
+    *,
+    options: AlignOptions | None = None,
+    work_dir: str | Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> AlignResult:
+    """Use timestamped ASR words to refine timing inside already-timed lines."""
+
+    options = options or AlignOptions()
+    lyrics.require_timed()
+    audio = Path(audio_path)
+    alignment_audio = audio
+    if options.separate_vocals:
+        if work_dir is None:
+            raise ValueError("A work directory is required when vocal separation is enabled.")
+        alignment_audio = separate_vocals(
+            audio,
+            Path(work_dir) / "separated",
+            model=options.demucs_model,
+            progress=progress,
+        )
+    if progress:
+        progress("普通歌词只有行级时间，正在根据演唱速度精修句内逐字时间")
+    transcription = transcribe_with_faster_whisper(
+        alignment_audio,
+        model=options.model,
+        language=options.language,
+        device=options.device,
+        compute_type=options.compute_type,
+        beam_size=options.beam_size,
+        initial_prompt="\n".join(line.text for line in lyrics.lines),
+        progress=progress,
+    )
+    document, report = refine_timed_document(
         lyrics,
         transcription.words,
         minimum_coverage=options.minimum_coverage,

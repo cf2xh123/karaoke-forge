@@ -260,6 +260,8 @@ def align_document(
                 start=tokens[0].start,
                 end=max(tokens[-1].end + 0.35, tokens[0].start + 0.5),
                 tokens=tokens,
+                translation=source_line.translation,
+                pronunciation=source_line.pronunciation,
             )
         )
 
@@ -287,6 +289,74 @@ def align_document(
             lines=aligned_lines,
             metadata=dict(lyrics.metadata),
             source_format="aligned",
+        ),
+        report,
+    )
+
+
+def refine_timed_document(
+    lyrics: LyricsDocument,
+    recognized_words: list[RecognizedWord],
+    *,
+    minimum_coverage: float = 0.2,
+) -> tuple[LyricsDocument, AlignmentReport]:
+    """Refine synthetic word timing while preserving every source line boundary."""
+
+    lyrics.require_timed()
+    aligned, report = align_document(
+        lyrics,
+        recognized_words,
+        minimum_coverage=minimum_coverage,
+    )
+    if len(aligned.lines) != len(lyrics.lines):
+        raise AlignmentError("Refined alignment did not preserve every timed lyric line.")
+
+    refined_lines: list[LyricLine] = []
+    for source, candidate in zip(lyrics.lines, aligned.lines):
+        assert source.start is not None and source.end is not None
+        if not candidate.tokens:
+            refined_lines.append(source)
+            continue
+        candidate_start = candidate.tokens[0].start
+        candidate_end = max(candidate.tokens[-1].end, candidate_start + 0.01)
+        source_duration = max(0.01, source.end - source.start)
+        candidate_duration = max(0.01, candidate_end - candidate_start)
+        scale = source_duration / candidate_duration
+        tokens: list[KaraokeToken] = []
+        for token in candidate.tokens:
+            start = source.start + (token.start - candidate_start) * scale
+            end = source.start + (token.end - candidate_start) * scale
+            tokens.append(
+                KaraokeToken(
+                    text=token.text,
+                    start=min(source.end - 0.01, max(source.start, start)),
+                    end=min(source.end, max(source.start + 0.01, end)),
+                    confidence=token.confidence,
+                )
+            )
+        for index in range(len(tokens) - 1):
+            tokens[index].end = max(
+                tokens[index].start + 0.01,
+                min(tokens[index].end, tokens[index + 1].start),
+            )
+        refined_lines.append(
+            LyricLine(
+                text=source.text,
+                start=source.start,
+                end=source.end,
+                tokens=tokens,
+                translation=source.translation,
+                pronunciation=source.pronunciation,
+            )
+        )
+
+    metadata = dict(lyrics.metadata)
+    metadata["word_timing"] = "audio-refined"
+    return (
+        LyricsDocument(
+            lines=refined_lines,
+            metadata=metadata,
+            source_format=lyrics.source_format,
         ),
         report,
     )

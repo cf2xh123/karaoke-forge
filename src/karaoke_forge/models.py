@@ -24,6 +24,8 @@ class LyricLine:
     start: float | None = None
     end: float | None = None
     tokens: list[KaraokeToken] = field(default_factory=list)
+    translation: str | None = None
+    pronunciation: str | None = None
 
     @property
     def is_timed(self) -> bool:
@@ -51,6 +53,8 @@ class LyricsDocument:
             "lines": [
                 {
                     "text": line.text,
+                    "translation": line.translation,
+                    "pronunciation": line.pronunciation,
                     "start": line.start,
                     "end": line.end,
                     "tokens": [
@@ -66,3 +70,35 @@ class LyricsDocument:
                 for line in self.lines
             ],
         }
+
+    def shifted(self, offset: float) -> LyricsDocument:
+        """Return a copy with line and token timing shifted by offset seconds."""
+
+        shifted_lines: list[LyricLine] = []
+        for line in self.lines:
+            start = max(0.0, line.start + offset) if line.start is not None else None
+            end = max((start or 0.0) + 0.01, line.end + offset) if line.end is not None else None
+            tokens = [
+                KaraokeToken(
+                    text=token.text,
+                    start=max(0.0, token.start + offset),
+                    end=max(0.01, token.end + offset),
+                    confidence=token.confidence,
+                )
+                for token in line.tokens
+            ]
+            shifted_lines.append(
+                LyricLine(
+                    text=line.text,
+                    start=start,
+                    end=end,
+                    tokens=tokens,
+                    translation=line.translation,
+                    pronunciation=line.pronunciation,
+                )
+            )
+        return LyricsDocument(
+            lines=shifted_lines,
+            metadata=dict(self.metadata),
+            source_format=self.source_format,
+        )

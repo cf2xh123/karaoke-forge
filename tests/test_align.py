@@ -1,5 +1,5 @@
-from karaoke_forge.align import RecognizedWord, align_document
-from karaoke_forge.formats import parse_plain
+from karaoke_forge.align import RecognizedWord, align_document, refine_timed_document
+from karaoke_forge.formats import parse_lrc, parse_plain
 
 
 def test_alignment_keeps_user_lyrics_and_builds_timeline() -> None:
@@ -36,3 +36,25 @@ def test_alignment_interpolates_a_missing_word() -> None:
     starts = [token.start for token in document.lines[0].tokens]
     assert starts == sorted(starts)
     assert 1.0 < starts[1] < 2.0
+
+
+def test_refinement_preserves_line_boundaries_but_follows_singing_speed() -> None:
+    lyrics = parse_lrc("[00:01.00]one two three\n[00:03.00]last line\n")
+    original_start = lyrics.lines[0].start
+    original_end = lyrics.lines[0].end
+    recognized = [
+        RecognizedWord("one", 1.0, 1.1),
+        RecognizedWord("two", 1.2, 1.4),
+        RecognizedWord("three", 2.5, 2.9),
+        RecognizedWord("last", 3.0, 3.2),
+        RecognizedWord("line", 3.5, 3.9),
+    ]
+
+    refined, report = refine_timed_document(lyrics, recognized)
+
+    line = refined.lines[0]
+    assert line.start == original_start
+    assert line.end == original_end
+    assert report.coverage == 1.0
+    assert line.tokens[2].start - line.tokens[1].start > 0.8
+    assert refined.metadata["word_timing"] == "audio-refined"
