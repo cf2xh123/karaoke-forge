@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "karaoke-forge"
+version = "0.1.0"
+description = "Turn a song, its lyrics, and an MV into a timed karaoke video."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Karaoke Forge contributors" }]
+keywords = ["karaoke", "lyrics", "lrc", "subtitle", "whisper", "ffmpeg"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = []
+
+[project.optional-dependencies]
+align = ["faster-whisper"]
+separate = ["demucs"]
+web = ["gradio>=6.15,<7"]
+netease = ["yt-dlp"]
+dev = ["pytest>=8", "ruff>=0.6"]
+all = ["faster-whisper", "demucs", "gradio>=6.15,<7", "yt-dlp"]
+
+[project.scripts]
+karaoke-forge = "karaoke_forge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/cf2xh123/karaoke-forge"
+Repository = "https://github.com/cf2xh123/karaoke-forge"
+Issues = "https://github.com/cf2xh123/karaoke-forge/issues"
+Changelog = "https://github.com/cf2xh123/karaoke-forge/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/karaoke_forge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+"src/karaoke_forge/web.py" = ["BLE001", "SIM117"]

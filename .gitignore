@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Models, media, and generated projects
+.cache/
+models/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.mp3
+*.m4a
+*.aac
+*.wav
+*.flac
+*.ogg
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.assets/
+.work/
+.smoke/
+outputs/
+.server/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
