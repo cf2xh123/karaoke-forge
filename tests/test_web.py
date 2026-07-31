@@ -1,9 +1,19 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from karaoke_forge.netease import NeteaseSongInfo, NeteaseTrack
+from karaoke_forge.editor import (
+    apply_pronunciation_rows,
+    document_to_editor_rows,
+    pronunciation_to_editor_rows,
+)
+from karaoke_forge.formats import parse_yrc
+from karaoke_forge.netease import NeteaseSongInfo
 from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
+    EDITOR_STOP_GATE_JS,
+    TOKEN_TIMELINE_JS,
+    _editor_clip_target,
+    _editor_document_with_pending_changes,
     _safe_stem,
     apply_editor_line_action,
     environment_markdown,
@@ -15,9 +25,35 @@ from karaoke_forge.web import (
     run_align_job,
     run_convert_job,
     run_make_job,
+    save_editor_pronunciation_workspace,
     subtitle_preview_html,
     undo_editor_line_action,
 )
+
+
+def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
+    assert "deleteTokenBlock" in TOKEN_TIMELINE_JS
+    assert 'tokenContextMenu.id = "kf-token-context-menu"' in TOKEN_TIMELINE_JS
+    assert 'document.querySelector("#editor-save-tokens")' in TOKEN_TIMELINE_JS
+    assert 'scrollArea.classList.add("is-panning")' in TOKEN_TIMELINE_JS
+    assert "seekFromTimelinePointer" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeDraggingPlayhead" in TOKEN_TIMELINE_JS
+    assert 'closest?.(".kf-token-playhead")' in TOKEN_TIMELINE_JS
+    assert "pauseForEditorMutation" in TOKEN_TIMELINE_JS
+    assert 'event.target.closest?.(".kf-token-text")' in TOKEN_TIMELINE_JS
+    assert '"#editor-save-tokens, #editor-save-tokens button' in TOKEN_TIMELINE_JS
+    assert "workspaceLinesMatch" in TOKEN_TIMELINE_JS
+    assert '"#editor-current-line input"' in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeTokenAuditionActive" in TOKEN_TIMELINE_JS
+    assert "capturedTimeline.isConnected" in TOKEN_TIMELINE_JS
+    assert "clearAuditionAfterLineChange" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeTokenAuditionGuardUntil" in EDITOR_STOP_GATE_JS
+    assert "__karaokeForgeSuppressAutoAdvanceUntil" not in EDITOR_STOP_GATE_JS
+    assert "const stoppedLine = Number(args[3])" in EDITOR_STOP_GATE_JS
+    assert "currentLine !== stoppedLine" in EDITOR_STOP_GATE_JS
+    assert "__karaokeForgeEditorMutationGuardLine" in EDITOR_STOP_GATE_JS
+    assert '"#editor-current-line input"' in EDITOR_STOP_GATE_JS
+    assert "window.setTimeout(resolve, 55)" in EDITOR_STOP_GATE_JS
 
 
 def test_safe_stem_removes_windows_path_characters() -> None:
@@ -127,6 +163,27 @@ def test_web_editor_all_hidden_still_exports_recoverable_json(
     assert "只导出了可恢复的 JSON" in status
 
 
+def test_export_saves_pending_token_edits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+
+    payload, rows, _status, _files, _directory = export_editor_project(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        "",
+        [],
+        "pending-token-edit",
+        '[{"text":"A","start":1.0,"end":2.0},{"text":"C","start":3.0,"end":4.0}]',
+    )
+
+    assert rows[0][4] == "AC"
+    assert [token["text"] for token in payload["lines"][0]["tokens"]] == ["A", "C"]
+
+
 def test_web_editor_right_click_actions_can_hide_delete_and_undo(
     tmp_path: Path,
 ) -> None:
@@ -185,6 +242,176 @@ def test_web_editor_right_click_actions_can_hide_delete_and_undo(
     assert "已撤销" in restored[8]
 
 
+def test_web_editor_empty_undo_is_a_safe_noop(tmp_path: Path) -> None:
+    source = tmp_path / "lyrics.lrc"
+    source.write_text("[00:01.00]First\n[00:03.00]Second\n", encoding="utf-8")
+    payload, rows, _status, line_number, *_rest = load_editor_project(str(source))
+
+    result = undo_editor_line_action(payload, rows, line_number, {})
+
+    assert result[0] == payload
+    assert "暂无可撤销修改" in result[8]
+    assert result[9] == {}
+
+
+def test_pending_token_edit_is_saved_before_navigation_and_can_be_undone(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "lyrics.lrc"
+    source.write_text("[00:01.00]A\n[00:03.00]B\n", encoding="utf-8")
+    payload, rows, _status, _line_number, *_rest = load_editor_project(str(source))
+    changed, snapshot = _editor_document_with_pending_changes(
+        payload,
+        rows,
+        1,
+        '[{"text":"改","start":1.0,"end":2.98}]',
+    )
+
+    assert changed.lines[0].text == "改"
+    assert snapshot is not None
+    undone = undo_editor_line_action(
+        changed.to_dict(),
+        [[1, "显示", 1.0, 2.98, "改", ""], [2, "显示", 3.0, 4.98, "B", ""]],
+        2,
+        snapshot,
+    )
+    assert undone[2] == 1
+    assert undone[1][0][4] == "A"
+
+
+def test_pending_pronunciation_is_saved_before_navigation_and_can_be_undone(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "lyrics.lrc"
+    source.write_text("[00:01.00]A\n[00:03.00]B\n", encoding="utf-8")
+    payload, rows, _status, _line_number, *_rest = load_editor_project(str(source))
+
+    changed, snapshot = _editor_document_with_pending_changes(
+        payload,
+        rows,
+        1,
+        None,
+        "ei",
+        [["A", "ei", 0, 1]],
+    )
+
+    assert changed.lines[0].pronunciation == "ei"
+    assert changed.lines[0].pronunciation_units[0].reading == "ei"
+    assert snapshot is not None
+    undone = undo_editor_line_action(
+        changed.to_dict(),
+        rows,
+        2,
+        snapshot,
+    )
+    assert undone[2] == 1
+    assert undone[3] == ""
+
+
+def test_pending_token_delete_remaps_the_existing_pronunciation_table() -> None:
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+    document = apply_pronunciation_rows(
+        document,
+        1,
+        [["A", "a", 0, 1], ["B", "b", 1, 2], ["C", "c", 2, 3]],
+        "",
+    )
+    pronunciation_rows = [
+        [unit.source, unit.reading, unit.start, unit.end]
+        for unit in document.lines[0].pronunciation_units
+    ]
+    pronunciation_rows[2][1] = "see"
+
+    changed, snapshot = _editor_document_with_pending_changes(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":2.0},{"text":"C","start":3.0,"end":4.0}]',
+        "",
+        pronunciation_rows,
+    )
+
+    assert snapshot is not None
+    assert changed.lines[0].text == "AC"
+    assert [
+        (unit.source, unit.reading, unit.start, unit.end)
+        for unit in changed.lines[0].pronunciation_units
+    ] == [("A", "a", 0, 1), ("C", "see", 1, 2)]
+
+
+def test_saving_pronunciation_after_pending_token_delete_does_not_reapply_old_spans() -> None:
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+    document = apply_pronunciation_rows(
+        document,
+        1,
+        [["A", "a", 0, 1], ["B", "b", 1, 2], ["C", "c", 2, 3]],
+        "",
+    )
+    pronunciation_rows = pronunciation_to_editor_rows(document.lines[0])
+    pronunciation_rows[2][1] = "see"
+
+    saved = save_editor_pronunciation_workspace(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":2.0},{"text":"C","start":3.0,"end":4.0}]',
+        "",
+        pronunciation_rows,
+        {},
+    )
+
+    assert saved[1][0][4] == "AC"
+    assert saved[3] == [["A", "a", 0, 1], ["C", "see", 1, 2]]
+    assert saved[-1]
+
+
+def test_pending_line_text_edit_ignores_an_unchanged_old_pronunciation_table() -> None:
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+    document = apply_pronunciation_rows(
+        document,
+        1,
+        [["A", "a", 0, 1], ["B", "b", 1, 2], ["C", "c", 2, 3]],
+        "",
+    )
+    rows = document_to_editor_rows(document)
+    rows[0][4] = "AC"
+    old_pronunciation_rows = [
+        [unit.source, unit.reading, unit.start, unit.end]
+        for unit in document.lines[0].pronunciation_units
+    ]
+
+    changed, snapshot = _editor_document_with_pending_changes(
+        document.to_dict(),
+        rows,
+        1,
+        None,
+        "",
+        old_pronunciation_rows,
+    )
+
+    assert snapshot is not None
+    assert changed.lines[0].text == "AC"
+    assert changed.lines[0].pronunciation_units == []
+
+
+def test_editor_clip_cache_distinguishes_same_named_audio_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_CACHE_DIR", str(tmp_path / "cache"))
+    first = tmp_path / "one" / "videoplayback.m4a"
+    second = tmp_path / "two" / "videoplayback.m4a"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    first_target = _editor_clip_target(first, 0, 1.0, 2.0)
+    second_target = _editor_clip_target(second, 0, 1.0, 2.0)
+
+    assert first_target != second_target
+
+
 def test_web_editor_previews_selected_line_audio(
     tmp_path: Path,
     monkeypatch,
@@ -198,7 +425,10 @@ def test_web_editor_previews_selected_line_audio(
     payload, rows, *_rest = load_editor_project(str(source))
     monkeypatch.setattr("karaoke_forge.web.shutil.which", lambda _name: "ffmpeg")
 
+    commands: list[list[str]] = []
+
     def fake_run(command, **_kwargs):
+        commands.append(command)
         Path(command[-1]).write_bytes(b"preview")
         return SimpleNamespace(returncode=0, stderr="")
 
@@ -207,8 +437,11 @@ def test_web_editor_previews_selected_line_audio(
     clip, status = preview_editor_audio_line(str(audio), payload, rows, 1)
 
     assert Path(clip).is_file()
-    assert "当前歌词应在 **1.00s → 2.98s**" in status
+    assert "当前歌词试听范围：**1.00s → 2.98s**" in status
     assert str(tmp_path / "cache") in clip
+    assert "clip-1.000-2.980" in Path(clip).name
+    assert commands[0][commands[0].index("-ss") + 1] == "1.000"
+    assert commands[0][commands[0].index("-t") + 1] == "1.980"
 
 
 def test_web_editor_handoff_populates_make_inputs(
@@ -306,6 +539,95 @@ def test_make_page_prepares_editor_without_reuploading_inputs(
     assert "无需重复上传" in result.log
     assert "不下载音频" in result.log
     assert "可校准 KTV 工程已生成" in result.status
+
+
+def test_make_page_keeps_line_timing_when_auto_refinement_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    audio = tmp_path / "song.m4a"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "karaoke_forge.web.refine_audio_word_timing_with_fallback",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = prepare_make_editor_job(
+        str(audio),
+        str(video),
+        str(lyrics),
+        "",
+        "fallback-rehearsal",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        timing_refinement="auto",
+        output_root=str(tmp_path / "custom-output"),
+    )
+
+    assert result.project is not None
+    assert "自动精修暂不可用" in result.status
+    assert "没有生成成功" not in result.status
+
+
+def test_make_page_uses_embedded_mv_audio_for_editor_preparation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    video = tmp_path / "mv-with-audio.webm"
+    lyrics = tmp_path / "lyrics.lrc"
+    video.write_bytes(b"video with audio")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+    monkeypatch.setattr("karaoke_forge.web.probe_media_has_audio", lambda _path: True)
+
+    result = prepare_make_editor_job(
+        None,
+        str(video),
+        str(lyrics),
+        "",
+        "embedded-audio-rehearsal",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        timing_refinement="off",
+        output_root=str(tmp_path / "custom-output"),
+    )
+
+    assert result.project is not None
+    assert result.audio == str(video)
+    assert "使用 MV 内嵌完整音轨进行校准" in result.log
+
+
+def test_make_page_explains_when_mv_has_no_audio(tmp_path: Path, monkeypatch) -> None:
+    video = tmp_path / "silent.webm"
+    lyrics = tmp_path / "lyrics.lrc"
+    video.write_bytes(b"silent video")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+    monkeypatch.setattr("karaoke_forge.web.probe_media_has_audio", lambda _path: False)
+
+    result = prepare_make_editor_job(
+        None,
+        str(video),
+        str(lyrics),
+        "",
+        "silent-rehearsal",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        timing_refinement="off",
+    )
+
+    assert result.project is None
+    assert "MV 不含可用音轨" in result.status
 
 
 def test_subtitle_preview_reflects_translation_pronunciation_and_style(
@@ -414,30 +736,32 @@ def test_make_job_can_use_netease_page_lyrics_with_local_audio(
     assert "仅从网易云读取" in result.log
 
 
-def test_make_job_falls_back_to_mv_audio_for_netease_preview(
+def test_make_job_uses_mv_audio_without_downloading_netease_audio(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
     video = tmp_path / "mv.mp4"
-    preview = tmp_path / "preview.mp3"
     video.write_bytes(b"video with complete audio")
-    preview.write_bytes(b"30 second preview")
-    track = NeteaseTrack(
+    info = NeteaseSongInfo(
         song_id="1946664196",
         title="garden.",
         artists=("CVLTE",),
         canonical_url="https://music.163.com/song?id=1946664196",
-        audio_path=preview,
         duration=215.0,
         page_lyrics="[00:01.00]Hello\n[00:03.00]World\n",
         translated_lyrics="[00:01.00]你好\n[00:03.00]世界\n",
-        audio_duration=30.0,
-        is_preview=True,
+    )
+    monkeypatch.setattr("karaoke_forge.web.probe_media_has_audio", lambda _path: True)
+    monkeypatch.setattr(
+        "karaoke_forge.web.fetch_public_netease_info",
+        lambda _link: info,
     )
     monkeypatch.setattr(
         "karaoke_forge.web.download_netease_track",
-        lambda *_args, **_kwargs: track,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("MV audio should avoid downloading NetEase audio")
+        ),
     )
 
     def fake_make(audio, _video, lyrics, output, assets, *, options, **_kwargs):
@@ -477,12 +801,11 @@ def test_make_job_falls_back_to_mv_audio_for_netease_preview(
         "#FFFFFF",
         "#FFD54A",
         72,
-        track.canonical_url,
+        info.canonical_url,
         True,
         True,
     )
 
     assert result.video is not None
-    assert "MV 内嵌的完整音轨" in result.log
+    assert "MV 内嵌完整音轨" in result.log
     assert "中文翻译" in result.log
-    assert not preview.exists()

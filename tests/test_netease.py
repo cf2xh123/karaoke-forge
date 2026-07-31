@@ -129,6 +129,38 @@ def test_local_audio_uses_public_page_lrc_without_downloading_audio(
     assert "Example Artist" in result.exports["lrc"].read_text(encoding="utf-8")
 
 
+def test_netease_auto_refinement_fallback_is_reported(tmp_path: Path, monkeypatch) -> None:
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"authorized local audio")
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="Example Song",
+        artists=("Example Artist",),
+        canonical_url="https://music.163.com/song?id=42",
+        page_lyrics="[00:01.00]Hello\n",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.fetch_public_netease_info",
+        lambda _link: info,
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.refine_audio_word_timing_with_fallback",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = align_netease_song(
+        info.canonical_url,
+        None,
+        tmp_path / "output",
+        local_audio_path=audio,
+        options=NeteaseAlignOptions(rights_confirmed=True, timing_refinement="auto"),
+    )
+
+    assert result.alignment_skipped
+    assert result.timing_refinement_warning is not None
+    assert "已保留原时间轴" in result.timing_refinement_warning
+
+
 def test_public_download_uses_anonymous_session_without_cookies(
     tmp_path: Path,
     monkeypatch,

@@ -141,8 +141,11 @@ def test_editor_applies_visual_per_token_timing() -> None:
 
     timeline = editor_token_timeline_html(edited, 1)
     assert timeline.count("kf-token-block") == 2
-    assert timeline.count("kf-token-boundary") == 3
-    assert "点击词块可单独试听" in timeline
+    assert timeline.count("kf-token-boundary") == 4
+    assert timeline.count("kf-token-text") == 2
+    assert "点击词块空白处可试听" in timeline
+    assert "右键词块可立即移除" in timeline
+    assert "按住时间轴空白处左右拖动" in timeline
     assert "kf-token-playhead" in timeline
     assert "前一段" in timeline
     assert "后一段" in timeline
@@ -152,6 +155,9 @@ def test_editor_applies_visual_per_token_timing() -> None:
     assert "data-base-width" in timeline
     assert "撤销拖动" in timeline
     assert "重做" in timeline
+    assert 'data-line-number="1"' in timeline
+    assert 'data-line-start="1.000"' in timeline
+    assert 'data-line-end="3.000"' in timeline
 
     preview = editor_preview_html(edited, 1)
     assert "kf-live-karaoke-current" in preview
@@ -162,3 +168,31 @@ def test_editor_applies_visual_per_token_timing() -> None:
     assert 'data-line-number="1"' in preview
     assert 'data-line-count="1"' in preview
     assert "--kf-preview-font-size" in preview
+
+
+def test_editor_deletes_token_text_without_changing_other_token_times() -> None:
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+    document = apply_pronunciation_rows(
+        document,
+        1,
+        [["A", "a", 0, 1], ["C", "c", 2, 3]],
+        "a b c",
+    )
+    rows = document_to_editor_rows(document)
+    timing = '[{"text":"A","start":1.0,"end":2.0},{"text":"C","start":3.0,"end":4.0}]'
+
+    edited = apply_token_timing(document, rows, 1, timing)
+
+    assert edited.lines[0].text == "AC"
+    assert [(token.text, token.start, token.end) for token in edited.lines[0].tokens] == [
+        ("A", 1.0, 2.0),
+        ("C", 3.0, 4.0),
+    ]
+    assert edited.lines[0].pronunciation is None
+    assert [
+        (unit.source, unit.reading, unit.start, unit.end)
+        for unit in edited.lines[0].pronunciation_units
+    ] == [("A", "a", 0, 1), ("C", "c", 1, 2)]
+    timeline = editor_token_timeline_html(edited, 1)
+    assert 'data-token-index="1" data-edge="start"' in timeline
+    assert 'value="3.000"' in timeline

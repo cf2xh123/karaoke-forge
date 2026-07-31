@@ -38,6 +38,7 @@ models/
 .work/
 .smoke/
 outputs/
+KaraokeForgeCache/
 .server/
 
 # IDE and operating system

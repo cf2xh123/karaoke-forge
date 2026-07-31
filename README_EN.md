@@ -22,7 +22,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.3.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.4.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -59,6 +59,10 @@ Each row keeps source text, translation, timing, pronunciation, and visibility t
 Hidden rows remain recoverable in JSON but are omitted from subtitle/video exports;
 deleted rows are removed permanently. A second editable table supports character-range
 pronunciation corrections with an immediate ruby-text preview.
+The per-token timeline also supports direct text edits: clearing and saving one token
+removes an unwanted character or space without changing the remaining token times.
+Current-line looping, automatic next-line playback, and Space-bar pause/resume are
+available while timing lyrics by ear.
 
 The NetEase tab accepts single-song links. It uses anonymous public access by default,
 or can read an existing NetEase login from a local Chrome, Edge, Firefox, or Brave
@@ -76,7 +80,8 @@ karaoke sweep directly. For ordinary line-timed LRC/SRT input, audio recognition
 the timing inside each line while preserving its original boundaries. Use
 `align`, `make`, and `netease` accept `--timing-refinement off|auto|force`: `off`
 preserves all input timing, `auto` refines only synthetic word timing, and `force`
-rechecks even trusted YRC/enhanced-LRC timing.
+rechecks even trusted YRC/enhanced-LRC timing but adopts only high-confidence,
+line-local changes that do not substantially disagree with trusted source timing.
 The legacy `--no-refine-word-timing` flag remains accepted for compatibility.
 Cookies stay in local process memory and are never written to project outputs; the app
 does not accept passwords, elevate membership access, bypass regional/DRM restrictions,

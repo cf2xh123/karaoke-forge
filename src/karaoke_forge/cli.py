@@ -14,7 +14,7 @@ from .media import MediaError, find_ffmpeg, render_karaoke_video
 from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
-    refine_audio_word_timing,
+    refine_audio_word_timing_with_fallback,
     should_refine_timing,
 )
 from .workflows import MakeOptions, make_karaoke_video
@@ -284,14 +284,15 @@ def _handle_align(args: argparse.Namespace) -> int:
     if source.is_timed:
         timing_mode = _timing_refinement_from_args(args)
         if should_refine_timing(source, timing_mode):
-            result = refine_audio_word_timing(
+            result = refine_audio_word_timing_with_fallback(
                 args.audio,
                 source,
+                timing_mode=timing_mode,
                 options=_alignment_options(args),
                 work_dir=args.output_dir / ".work",
                 progress=_progress,
             )
-            document = result.document
+            document = result.document if result is not None else source
         else:
             document = source
             detail = (
@@ -403,7 +404,9 @@ def _handle_make(args: argparse.Namespace) -> int:
         ),
         progress=_progress,
     )
-    if result.alignment_skipped:
+    if result.timing_refinement_warning:
+        print(f"Warning: {result.timing_refinement_warning}")
+    elif result.alignment_skipped:
         print("Lyrics already contain a timeline; alignment was skipped.")
     elif result.alignment_report:
         print(
@@ -493,7 +496,9 @@ def _handle_netease(args: argparse.Namespace) -> int:
     print(f"Track: {result.track.title} — {result.track.artist_text}")
     if result.track.access_text:
         print(f"Access: {result.track.access_text}")
-    if result.alignment_report:
+    if result.timing_refinement_warning:
+        print(f"Warning: {result.timing_refinement_warning}")
+    elif result.alignment_report:
         print(
             f"Alignment: {result.alignment_report.matched_units}/"
             f"{result.alignment_report.target_units} units "

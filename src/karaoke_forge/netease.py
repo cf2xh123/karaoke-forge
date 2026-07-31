@@ -17,7 +17,7 @@ from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
     normalize_timing_refinement,
-    refine_audio_word_timing,
+    refine_audio_word_timing_with_fallback,
     should_refine_timing,
 )
 
@@ -140,6 +140,7 @@ class NeteaseAlignResult:
     alignment_report: AlignmentReport | None
     alignment_skipped: bool
     kept_audio: Path | None
+    timing_refinement_warning: str | None = None
 
 
 def _extract_shared_url(value: str) -> str:
@@ -660,6 +661,7 @@ def align_netease_song(
 
     source = read_lyrics(effective_lyrics)
     report: AlignmentReport | None = None
+    timing_refinement_warning: str | None = None
     alignment_skipped = source.is_timed
     if source.is_timed:
         timing_mode = normalize_timing_refinement(
@@ -671,16 +673,23 @@ def align_netease_song(
             if progress:
                 detail = "强制" if timing_mode == "force" else "自动"
                 progress(f"逐字时间精修策略：{detail}，将使用演唱音频重新检查时间")
-            refined = refine_audio_word_timing(
+            refined = refine_audio_word_timing_with_fallback(
                 track.audio_path,
                 source,
+                timing_mode=timing_mode,
                 options=options.align,
                 work_dir=directory / ".work",
                 progress=progress,
             )
-            document = refined.document
-            report = refined.report
-            alignment_skipped = False
+            if refined is None:
+                document = source
+                timing_refinement_warning = (
+                    "Whisper 暂不可用，自动逐字时间精修未完成；已保留原时间轴。"
+                )
+            else:
+                document = refined.document
+                report = refined.report
+                alignment_skipped = False
         else:
             document = source
             if progress:
@@ -739,6 +748,7 @@ def align_netease_song(
         alignment_report=report,
         alignment_skipped=alignment_skipped,
         kept_audio=kept_audio,
+        timing_refinement_warning=timing_refinement_warning,
     )
 
 

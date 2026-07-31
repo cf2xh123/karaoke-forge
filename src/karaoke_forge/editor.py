@@ -4,6 +4,7 @@ import copy
 import html
 import json
 from collections.abc import Iterable, Sequence
+from difflib import SequenceMatcher
 from itertools import pairwise
 from typing import Any
 
@@ -261,6 +262,45 @@ def token_timing_to_json(line: LyricLine) -> str:
     )
 
 
+def _remap_pronunciation_after_text_edit(
+    line: LyricLine,
+    old_text: str,
+    new_text: str,
+) -> None:
+    if old_text == new_text:
+        return
+    equal_ranges = [
+        (old_start, old_end, new_start)
+        for tag, old_start, old_end, new_start, _new_end in SequenceMatcher(
+            None,
+            old_text,
+            new_text,
+            autojunk=False,
+        ).get_opcodes()
+        if tag == "equal"
+    ]
+    remapped: list[PronunciationSpan] = []
+    for span in line.pronunciation_units:
+        for old_start, old_end, new_start in equal_ranges:
+            if span.start < old_start or span.end > old_end:
+                continue
+            shift = new_start - old_start
+            start = span.start + shift
+            end = span.end + shift
+            remapped.append(
+                PronunciationSpan(
+                    source=new_text[start:end],
+                    reading=span.reading,
+                    start=start,
+                    end=end,
+                )
+            )
+            break
+    line.pronunciation_units = remapped
+    if "".join(old_text.split()) != "".join(new_text.split()):
+        line.pronunciation = None
+
+
 def apply_token_timing(
     document: LyricsDocument,
     table: object,
@@ -301,7 +341,11 @@ def apply_token_timing(
         tokens.append(KaraokeToken(text=text, start=start, end=end))
         previous_end = end
 
+    old_text = line.text
+    new_text = "".join(token.text for token in tokens)
+    _remap_pronunciation_after_text_edit(line, old_text, new_text)
     line.tokens = tokens
+    line.text = new_text
     line.start = tokens[0].start
     line.end = tokens[-1].end
     result.metadata["word_timing"] = "manual"
@@ -368,45 +412,52 @@ def editor_token_timeline_html(document: LyricsDocument, line_number: int) -> st
     clip_start = max(0.0, line.start - 1.0)
     clip_end = line.end + 1.0
     duration = max(0.01, clip_end - clip_start)
-    boundaries = [tokens[0].start]
-    for token in tokens[1:]:
-        boundaries.append(token.start)
-    boundaries.append(tokens[-1].end)
     minimum_width = max(760, len(tokens) * 76)
 
     blocks: list[str] = []
     for token_index, token in enumerate(tokens):
-        start = boundaries[token_index]
-        end = boundaries[token_index + 1]
+        start = token.start
+        end = token.end
         left = (start - clip_start) / duration * 100
         width = max(0.35, (end - start) / duration * 100)
         blocks.append(
-            '<button type="button" class="kf-token-block" '
+            '<div class="kf-token-block" role="button" tabindex="0" '
             f'data-token-index="{token_index}" '
             f'data-token="{html.escape(token.text, quote=True)}" '
             f'data-start="{start:.3f}" data-end="{end:.3f}" '
             f'style="left:{left:.5f}%;width:{width:.5f}%;" '
-            'title="点击试听这个词；拖动两侧黄色边界调整快慢">'
-            f'<span class="kf-token-label">{html.escape(token.text) or "空格"}</span>'
+            'title="点击空白处试听；可直接修改文字；清空后保存即可删除">'
+            '<input class="kf-token-text" type="text" '
+            f'value="{html.escape(token.text, quote=True)}" '
+            f'aria-label="第 {token_index + 1} 个词的文字" placeholder="删除" '
+            'title="直接修改；清空后保存即可删除这个词，其他词时间不变">'
             f'<span class="kf-token-time">{start:.2f}–{end:.2f}s</span>'
-            "</button>"
+            "</div>"
         )
 
     handles: list[str] = []
-    for boundary_index, value in enumerate(boundaries):
-        handles.append(
-            '<input class="kf-token-boundary" type="range" '
-            f'data-boundary-index="{boundary_index}" '
-            f'min="{clip_start:.3f}" max="{clip_end:.3f}" step="0.01" '
-            f'value="{value:.3f}" aria-label="第 {boundary_index + 1} 个时间边界">'
-        )
+    for token_index, token in enumerate(tokens):
+        for edge_index, (edge, value) in enumerate((("start", token.start), ("end", token.end))):
+            boundary_index = token_index * 2 + edge_index
+            edge_label = "开始" if edge == "start" else "结束"
+            handles.append(
+                '<input class="kf-token-boundary" type="range" '
+                f'data-boundary-index="{boundary_index}" '
+                f'data-token-index="{token_index}" data-edge="{edge}" '
+                f'min="{clip_start:.3f}" max="{clip_end:.3f}" step="0.01" '
+                f'value="{value:.3f}" '
+                f'aria-label="第 {token_index + 1} 个词{edge_label}时间">'
+            )
 
     return (
         '<div class="kf-token-editor" '
+        f'data-line-number="{int(line_number)}" '
+        f'data-line-start="{line.start:.3f}" data-line-end="{line.end:.3f}" '
         f'data-clip-start="{clip_start:.3f}" data-clip-end="{clip_end:.3f}">'
         '<div class="kf-token-toolbar"><div class="kf-token-help"><b>逐词时间：</b>'
-        "点击词块可单独试听；拖动黄色竖线调整相邻词的快慢，"
-        "首尾竖线可以调整整句开始/结束。</div>"
+        "直接修改词块文字；右键词块可立即移除，其他词时间不变。"
+        "点击词块空白处可试听，拖动黄色竖线调整词块；拖动红线可跳到对应时间；"
+        "放大后可按住时间轴空白处左右拖动。</div>"
         '<div class="kf-token-actions">'
         '<button type="button" class="kf-token-zoom-out">− 缩小</button>'
         '<button type="button" class="kf-token-zoom-fit">适应全句</button>'
@@ -423,7 +474,8 @@ def editor_token_timeline_html(document: LyricsDocument, line_number: int) -> st
         f'<span>{clip_start:.2f}s</span><b class="kf-token-playtime">'
         f"{clip_start:.2f}s</b><span>{clip_end:.2f}s</span></div>"
         '<div class="kf-token-track">'
-        '<div class="kf-token-playhead" style="left:0%" aria-hidden="true"></div>'
+        '<div class="kf-token-playhead" style="left:0%" role="slider" '
+        'aria-label="当前播放时间；可左右拖动定位" tabindex="0"></div>'
         f"{''.join(blocks)}{''.join(handles)}"
         "</div></div></div></div>"
     )

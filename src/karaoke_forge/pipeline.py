@@ -10,7 +10,7 @@ from .align import AlignmentReport, align_document, refine_timed_document
 from .formats import read_lyrics
 from .media import separate_vocals
 from .models import LyricsDocument
-from .transcribe import TranscriptionResult, transcribe_with_faster_whisper
+from .transcribe import TranscriptionError, TranscriptionResult, transcribe_with_faster_whisper
 
 TimingRefinement = Literal["off", "auto", "force"]
 TIMING_REFINEMENT_MODES = ("off", "auto", "force")
@@ -125,6 +125,7 @@ def refine_audio_word_timing(
     options: AlignOptions | None = None,
     work_dir: str | Path | None = None,
     progress: Callable[[str], None] | None = None,
+    protect_existing_word_timing: bool = False,
 ) -> AlignResult:
     """Use timestamped ASR words to refine timing inside already-timed lines."""
 
@@ -162,7 +163,18 @@ def refine_audio_word_timing(
         visible_lyrics,
         transcription.words,
         minimum_coverage=options.minimum_coverage,
+        protect_existing_word_timing=protect_existing_word_timing,
     )
+    if progress:
+        refined_lines = int(document.metadata.get("audio_refined_lines", "0"))
+        preserved_lines = int(document.metadata.get("audio_preserved_lines", "0"))
+        if protect_existing_word_timing:
+            progress(
+                f"强制检查完成：采纳 {refined_lines} 行可靠修正，"
+                f"保留 {preserved_lines} 行原逐字时间"
+            )
+        else:
+            progress(f"逐字时间精修完成：已处理 {refined_lines} 行")
     if any(line.hidden for line in lyrics.lines):
         refined_visible = iter(document.lines)
         merged_lines = [
@@ -183,3 +195,34 @@ def refine_audio_word_timing(
         transcription=transcription,
         alignment_audio=Path(alignment_audio),
     )
+
+
+def refine_audio_word_timing_with_fallback(
+    audio_path: str | Path,
+    lyrics: LyricsDocument,
+    *,
+    timing_mode: str,
+    options: AlignOptions | None = None,
+    work_dir: str | Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> AlignResult | None:
+    """Refine timed lyrics, preserving them when optional recognition is unavailable."""
+
+    normalized_mode = normalize_timing_refinement(timing_mode)
+    try:
+        return refine_audio_word_timing(
+            audio_path,
+            lyrics,
+            options=options,
+            work_dir=work_dir,
+            progress=progress,
+            protect_existing_word_timing=(
+                normalized_mode == "force" and lyrics.metadata.get("word_timing") != "synthetic"
+            ),
+        )
+    except TranscriptionError as exc:
+        if normalized_mode != "auto":
+            raise
+        if progress:
+            progress(f"自动逐字时间精修暂不可用，已保留原时间轴并继续：{exc}")
+        return None

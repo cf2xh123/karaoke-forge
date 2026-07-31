@@ -49,3 +49,37 @@ def test_make_skips_auto_sync_when_video_has_no_audio(tmp_path, monkeypatch) -> 
     assert result.sync_result is None
     assert any("MV 没有内嵌音轨" in message for message in messages)
     assert any("保留 +0.35 秒手动偏移" in message for message in messages)
+
+
+def test_make_reports_auto_refinement_fallback(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.m4a"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    output = tmp_path / "karaoke.mp4"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    lyrics.write_text("[00:01.00]Hello\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "karaoke_forge.workflows.refine_audio_word_timing_with_fallback",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_render(_video, _ass, target, **_kwargs):
+        target = Path(target)
+        target.write_bytes(b"rendered")
+        return target
+
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", fake_render)
+
+    result = make_karaoke_video(
+        audio,
+        video,
+        lyrics,
+        output,
+        tmp_path / "assets",
+    )
+
+    assert result.video == output
+    assert result.alignment_skipped
+    assert result.timing_refinement_warning is not None
+    assert "已保留原时间轴" in result.timing_refinement_warning

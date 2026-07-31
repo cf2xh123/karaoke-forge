@@ -18,7 +18,7 @@ from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
     normalize_timing_refinement,
-    refine_audio_word_timing,
+    refine_audio_word_timing_with_fallback,
     should_refine_timing,
 )
 
@@ -47,6 +47,7 @@ class MakeResult:
     alignment_skipped: bool
     audio_offset: float
     sync_result: AudioSyncResult | None
+    timing_refinement_warning: str | None = None
 
 
 def make_karaoke_video(
@@ -104,6 +105,7 @@ def make_karaoke_video(
 
     source_document = read_lyrics(lyrics_path)
     report: AlignmentReport | None = None
+    timing_refinement_warning: str | None = None
     alignment_skipped = source_document.is_timed
     if source_document.is_timed:
         timing_mode = normalize_timing_refinement(
@@ -115,16 +117,23 @@ def make_karaoke_video(
             if progress:
                 detail = "强制" if timing_mode == "force" else "自动"
                 progress(f"逐字时间精修策略：{detail}，将使用演唱音频重新检查时间")
-            refined = refine_audio_word_timing(
+            refined = refine_audio_word_timing_with_fallback(
                 audio,
                 source_document,
+                timing_mode=timing_mode,
                 options=options.align,
                 work_dir=assets / ".work",
                 progress=progress,
             )
-            document = refined.document
-            report = refined.report
-            alignment_skipped = False
+            if refined is None:
+                document = source_document
+                timing_refinement_warning = (
+                    "Whisper 暂不可用，自动逐字时间精修未完成；已保留原时间轴。"
+                )
+            else:
+                document = refined.document
+                report = refined.report
+                alignment_skipped = False
         else:
             document = source_document
             if progress:
@@ -177,4 +186,5 @@ def make_karaoke_video(
         alignment_skipped=alignment_skipped,
         audio_offset=effective_offset,
         sync_result=sync_result,
+        timing_refinement_warning=timing_refinement_warning,
     )

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from karaoke_forge.cli import build_parser, main
 
@@ -79,3 +80,62 @@ def test_align_off_preserves_timed_lyrics_without_whisper(tmp_path: Path) -> Non
 
     assert result == 0
     assert (output / "lyrics.lrc").read_text(encoding="utf-8").startswith("[00:01.00]")
+
+
+def test_make_summary_reports_timing_refinement_fallback(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "karaoke_forge.cli.make_karaoke_video",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            timing_refinement_warning="自动精修未完成；已保留原时间轴。",
+            alignment_skipped=True,
+            alignment_report=None,
+            exports={},
+            video=Path("out.mp4"),
+        ),
+    )
+
+    result = main(
+        [
+            "make",
+            "song.mp3",
+            "mv.mp4",
+            "lyrics.lrc",
+            "-o",
+            "out.mp4",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Warning: 自动精修未完成" in output
+    assert "alignment was skipped" not in output
+
+
+def test_netease_summary_reports_timing_refinement_fallback(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "karaoke_forge.netease.align_netease_song",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            track=SimpleNamespace(
+                title="Song",
+                artist_text="Artist",
+                access_text=None,
+            ),
+            timing_refinement_warning="自动精修未完成；已保留原时间轴。",
+            alignment_report=None,
+            exports={},
+            kept_audio=None,
+        ),
+    )
+
+    result = main(
+        [
+            "netease",
+            "https://music.163.com/song?id=1",
+            "--i-have-rights",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Warning: 自动精修未完成" in output
+    assert "alignment was skipped" not in output

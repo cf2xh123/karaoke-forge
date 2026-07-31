@@ -302,46 +302,132 @@ def refine_timed_document(
     recognized_words: list[RecognizedWord],
     *,
     minimum_coverage: float = 0.2,
+    protect_existing_word_timing: bool = False,
 ) -> tuple[LyricsDocument, AlignmentReport]:
-    """Refine synthetic word timing while preserving every source line boundary."""
+    """Refine inside each source line without moving its trusted boundaries."""
 
     lyrics.require_timed()
-    aligned, report = align_document(
-        lyrics,
-        recognized_words,
-        minimum_coverage=minimum_coverage,
+    target = _flatten_target(lyrics)
+    recognized = _expand_recognized(recognized_words)
+    if not target:
+        raise AlignmentError("The lyrics contain no alignable words.")
+    if not recognized:
+        raise AlignmentError("Speech recognition returned no timestamped words.")
+
+    global_mapping, global_exact = _sequence_alignment(target, recognized)
+    global_coverage = len(global_mapping) / len(target)
+    global_similarities = [value[1] for value in global_mapping.values()]
+    report = AlignmentReport(
+        target_units=len(target),
+        recognized_units=len(recognized),
+        matched_units=len(global_mapping),
+        exact_units=global_exact,
+        coverage=global_coverage,
+        mean_similarity=(
+            sum(global_similarities) / len(global_similarities) if global_similarities else 0.0
+        ),
     )
-    if len(aligned.lines) != len(lyrics.lines):
-        raise AlignmentError("Refined alignment did not preserve every timed lyric line.")
+    if global_coverage < minimum_coverage and not protect_existing_word_timing:
+        raise AlignmentError(
+            f"Alignment coverage is only {global_coverage:.1%}; expected at least "
+            f"{minimum_coverage:.1%}. Check the lyrics, language, or use vocal separation."
+        )
 
     refined_lines: list[LyricLine] = []
-    for source, candidate in zip(lyrics.lines, aligned.lines):
+    refined_count = 0
+    for source in lyrics.lines:
         assert source.start is not None and source.end is not None
-        if not candidate.tokens:
-            refined_lines.append(source)
+        display_units = split_display_units(source.text)
+        if not display_units:
+            # Timed LRC files commonly use an empty timestamped row to mark an
+            # instrumental break. It has no words to align, but its boundary is
+            # still part of the source timeline and must survive refinement.
+            refined_lines.append(copy.deepcopy(source))
             continue
-        candidate_start = candidate.tokens[0].start
-        candidate_end = max(candidate.tokens[-1].end, candidate_start + 0.01)
-        source_duration = max(0.01, source.end - source.start)
-        candidate_duration = max(0.01, candidate_end - candidate_start)
-        scale = source_duration / candidate_duration
+
+        # Restrict recognition to this known line window. This prevents repeated
+        # choruses from being matched against an identical phrase elsewhere.
+        window_margin = min(0.35, max(0.08, (source.end - source.start) * 0.08))
+        candidates = [
+            unit
+            for unit in recognized
+            if unit.end >= source.start - window_margin and unit.start <= source.end + window_margin
+        ]
+        if not candidates:
+            refined_lines.append(copy.deepcopy(source))
+            continue
+
+        line_target = [_TargetUnit(line_index=0, unit=unit) for unit in display_units]
+        line_mapping, line_exact = _sequence_alignment(line_target, candidates)
+        if not line_mapping:
+            refined_lines.append(copy.deepcopy(source))
+            continue
+        line_similarities = [value[1] for value in line_mapping.values()]
+        line_coverage = len(line_mapping) / len(line_target)
+        mean_similarity = sum(line_similarities) / len(line_similarities)
+        exact_coverage = line_exact / len(line_target)
+        reliable = (
+            line_coverage >= max(0.70, minimum_coverage)
+            and mean_similarity >= 0.86
+            and (exact_coverage >= 0.50 or line_coverage >= 0.90)
+        )
+        if protect_existing_word_timing and not reliable:
+            refined_lines.append(copy.deepcopy(source))
+            continue
+
+        timings = _interpolate_timings(len(line_target), line_mapping, candidates)
         tokens: list[KaraokeToken] = []
-        for token in candidate.tokens:
-            start = source.start + (token.start - candidate_start) * scale
-            end = source.start + (token.end - candidate_start) * scale
+        cursor = source.start
+        minimum_token_duration = 0.01
+        if source.end - source.start < len(display_units) * minimum_token_duration:
+            refined_lines.append(copy.deepcopy(source))
+            continue
+        for token_index, (display_unit, timing) in enumerate(zip(display_units, timings)):
+            raw_start, raw_end, confidence = timing
+            remaining = len(display_units) - token_index
+            latest_start = source.end - remaining * minimum_token_duration
+            latest_end = source.end - (remaining - 1) * minimum_token_duration
+            start = min(latest_start, max(cursor, source.start, raw_start))
+            end = min(latest_end, max(start + minimum_token_duration, raw_end))
             tokens.append(
                 KaraokeToken(
-                    text=token.text,
-                    start=min(source.end - 0.01, max(source.start, start)),
-                    end=min(source.end, max(source.start + 0.01, end)),
-                    confidence=token.confidence,
+                    text=display_unit.text,
+                    start=start,
+                    end=end,
+                    confidence=confidence,
                 )
             )
-        for index in range(len(tokens) - 1):
-            tokens[index].end = max(
-                tokens[index].start + 0.01,
-                min(tokens[index].end, tokens[index + 1].start),
+            cursor = end
+
+        if any(right.start < left.end - 1e-9 for left, right in pairwise(tokens)):
+            refined_lines.append(copy.deepcopy(source))
+            continue
+
+        if protect_existing_word_timing and source.tokens:
+            same_tokenization = len(source.tokens) == len(tokens) and all(
+                original.text == candidate.text
+                for original, candidate in zip(source.tokens, tokens)
             )
+            if not same_tokenization:
+                refined_lines.append(copy.deepcopy(source))
+                continue
+            boundary_shifts = [
+                abs(original.start - candidate.start)
+                for original, candidate in zip(source.tokens, tokens)
+            ] + [
+                abs(original.end - candidate.end)
+                for original, candidate in zip(source.tokens, tokens)
+            ]
+            # One badly displaced word can crush every remaining token even
+            # when the median shift looks harmless. Trusted/manual timing wins
+            # unless every proposed boundary stays inside the safe envelope.
+            if max(boundary_shifts, default=0.0) > min(
+                0.25,
+                (source.end - source.start) * 0.12,
+            ):
+                refined_lines.append(copy.deepcopy(source))
+                continue
+
         refined_lines.append(
             LyricLine(
                 text=source.text,
@@ -354,9 +440,13 @@ def refine_timed_document(
                 hidden=source.hidden,
             )
         )
+        refined_count += 1
 
     metadata = dict(lyrics.metadata)
-    metadata["word_timing"] = "audio-refined"
+    if refined_count:
+        metadata["word_timing"] = "audio-refined"
+    metadata["audio_refined_lines"] = str(refined_count)
+    metadata["audio_preserved_lines"] = str(len(lyrics.lines) - refined_count)
     return (
         LyricsDocument(
             lines=refined_lines,
