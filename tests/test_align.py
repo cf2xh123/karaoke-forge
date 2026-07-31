@@ -1,3 +1,5 @@
+from itertools import pairwise
+
 from karaoke_forge.align import RecognizedWord, align_document, refine_timed_document
 from karaoke_forge.formats import parse_lrc, parse_plain, parse_yrc
 from karaoke_forge.models import LyricLine, LyricsDocument
@@ -133,7 +135,7 @@ def test_refinement_keeps_crowded_tokens_strictly_monotonic() -> None:
     tokens = refined.lines[0].tokens
 
     assert len(tokens) == 3
-    assert all(right.start >= left.end for left, right in zip(tokens, tokens[1:]))
+    assert all(right.start >= left.end for left, right in pairwise(tokens))
     assert tokens[-1].end <= 1.0
 
 

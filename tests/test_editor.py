@@ -1,3 +1,5 @@
+import json
+
 from karaoke_forge.ass import write_ass
 from karaoke_forge.editor import (
     LINE_STATUS_DELETED,
@@ -195,4 +197,36 @@ def test_editor_deletes_token_text_without_changing_other_token_times() -> None:
     ] == [("A", "a", 0, 1), ("C", "c", 1, 2)]
     timeline = editor_token_timeline_html(edited, 1)
     assert 'data-token-index="1" data-edge="start"' in timeline
-    assert 'value="3.000"' in timeline
+    assert 'value="3.0"' in timeline
+
+
+def test_editor_deletion_preserves_untouched_submillisecond_times() -> None:
+    document = parse_yrc("[1000,3000](1000,1000,0)A(2000,1000,0)B(3000,1000,0)C\n")
+    document.lines[0].tokens[0].start = 1.123456789
+    document.lines[0].tokens[0].end = 1.987654321
+    document.lines[0].tokens[2].start = 3.111111111
+    document.lines[0].tokens[2].end = 4.222222222
+    rows = document_to_editor_rows(document)
+    entries = json.loads(token_timing_to_json(document.lines[0]))
+    entries.pop(1)
+
+    edited = apply_token_timing(document, rows, 1, json.dumps(entries))
+
+    assert (edited.lines[0].tokens[0].start, edited.lines[0].tokens[0].end) == (
+        1.123456789,
+        1.987654321,
+    )
+    assert (edited.lines[0].tokens[1].start, edited.lines[0].tokens[1].end) == (
+        3.111111111,
+        4.222222222,
+    )
+
+
+def test_editor_rows_do_not_retime_tokens_when_line_bounds_are_unchanged() -> None:
+    document = parse_yrc("[70,6390](70,477,0)A(547,478,0)B(1025,477,0)C\n")
+    document.lines[0].tokens[1].start = 0.5476030927834948
+    document.lines[0].tokens[1].end = 1.0252061855669896
+
+    edited = apply_editor_rows(document, document_to_editor_rows(document))
+
+    assert edited.lines[0].tokens == document.lines[0].tokens

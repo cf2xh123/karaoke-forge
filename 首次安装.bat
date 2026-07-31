@@ -44,6 +44,8 @@ if errorlevel 1 (
 
 echo.
 echo 安装完成！以后直接双击“启动网页版.bat”即可。
+echo 如需改善复杂伴奏下的识别，可另行双击“安装人声分离（Demucs）.bat”。
+echo Demucs 不默认安装，是因为 NVIDIA 显卡版还需下载约 1.9 GB 的 Torch。
 pause
 exit /b 0
 

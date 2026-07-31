@@ -5,7 +5,7 @@
 [English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前版本：`0.4.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
+> 当前版本：`0.5.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
 
 ## 能做什么
 
@@ -111,9 +111,19 @@ pip install -e ".[align]"
 
 如需人声分离：
 
+Windows 推荐直接双击根目录的 **“安装人声分离（Demucs）.bat”**。脚本会让你选择 CPU
+版（推荐，Torch 约 120 MB）或 NVIDIA 版（另需约 1.9 GB）。CPU 版在测试机器上分离一首
+218 秒歌曲约用 57 秒，通常已经够用。因此 Demucs 没有塞进“首次安装”：多数带可靠
+YRC/增强 LRC 的歌曲用不到它，而显卡运行库明显更大。
+
+也可以手动安装：
+
 ```bash
-pip install -e ".[all]"
+pip install -e ".[separate]"
 ```
+
+首次真正分离时还会联网下载所选模型，之后会使用本机缓存。`karaoke-forge doctor` 会显示
+Demucs 实际使用 NVIDIA 还是 CPU；网页的“先分离人声”旁也会显示同样状态。
 
 如需同时安装本地网页和自动对齐：
 
@@ -396,7 +406,8 @@ karaoke-forge make song.flac mv.mp4 lyrics.txt \
 2. 删除歌词中的段落名，如 `[Verse]`、`【副歌】`；本项目会自动忽略常见方括号段落名。
 3. 明确传入语言，例如中文用 `--language zh`，日语用 `--language ja`。
 4. 先用 `small` 试跑；咬字复杂时再换 `medium` 或更大模型。
-5. 覆盖率低时安装 Demucs 并使用 `--separate-vocals`。
+5. 复杂伴奏导致识别漏字、覆盖率低时，再安装 Demucs 并使用 `--separate-vocals`；已有
+   可靠网易云 YRC/增强 LRC 时通常无需分离。
 6. 最后用 Aegisub、Subtitle Edit 或文本编辑器微调导出的 ASS/增强 LRC。
 
 终端会打印匹配覆盖率。覆盖率高只代表歌词字词找到了对应位置，不等于每个音节都达到录音棚级精度。
@@ -411,7 +422,20 @@ python -m pip install --upgrade -e ".[align]"
 karaoke-forge doctor
 ```
 
-安装了人声分离依赖时，把 `.[align]` 换成 `.[all]`。升级前请看 [CHANGELOG.md](CHANGELOG.md)，其中会标注破坏性变更和迁移方式。
+安装了人声分离依赖时，再运行一次“安装人声分离（Demucs）.bat”或安装 `.[separate]`。
+升级前请看 [CHANGELOG.md](CHANGELOG.md)，其中会标注破坏性变更和迁移方式。
+
+维护者或测试人员可用真实本机素材完整验证编辑流程，不会覆盖原文件：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_editor_workflow.py 歌词项目.json 歌曲音频.m4a
+```
+
+网页版正在运行时，还可以从另一个终端验证真实 Gradio 会话：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_web_session.py 歌词项目.json 歌曲音频.m4a
+```
 
 未来若发布到 PyPI，可使用：
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import html
 import hashlib
+import html
 import importlib.util
 import json
 import os
@@ -53,8 +53,8 @@ from .pipeline import (
     should_refine_timing,
 )
 from .pronunciation import generate_pronunciation
+from .runtime import inspect_demucs_runtime
 from .workflows import MakeOptions, make_karaoke_video
-
 
 _EDITOR_CLIP_LOCKS_GUARD = threading.Lock()
 _EDITOR_CLIP_LOCKS: dict[str, threading.Lock] = {}
@@ -921,8 +921,8 @@ TOKEN_TIMELINE_JS = r"""
       const end = Number(endHandle?.value ?? block.dataset.end);
       block.style.left = `${((start - clipStart) / duration) * 100}%`;
       block.style.width = `${Math.max(0.35, ((end - start) / duration) * 100)}%`;
-      block.dataset.start = start.toFixed(3);
-      block.dataset.end = end.toFixed(3);
+      block.dataset.start = String(start);
+      block.dataset.end = String(end);
       const textInput = block.querySelector(".kf-token-text");
       const tokenText = textInput?.value ?? block.dataset.token ?? "";
       block.dataset.token = tokenText;
@@ -2934,7 +2934,7 @@ def _pronunciation_draft_signature(value: object) -> tuple[tuple[str, int, int],
     if hasattr(value, "values") and hasattr(value.values, "tolist"):
         value = value.values.tolist()
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError("逐词注音表格格式无效，请重新载入当前行。")
+        raise TypeError("逐词注音表格格式无效，请重新载入当前行。")
     signature: list[tuple[str, int, int]] = []
     for row_number, row in enumerate(value, 1):
         if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
@@ -3308,7 +3308,7 @@ def _editor_clip_target(
     clip_dir.mkdir(parents=True, exist_ok=True)
     stat = audio.stat()
     identity = hashlib.sha256(
-        f"{audio.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+        f"{audio.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()
     ).hexdigest()[:12]
     return clip_dir / (
         f"{_safe_stem(audio.stem)}-{identity}-line-{line_index + 1}-"
@@ -3523,6 +3523,7 @@ def handoff_editor_to_make(
 
 
 def environment_markdown() -> str:
+    demucs_runtime = inspect_demucs_runtime()
     checks = [
         ("Python 3.10+", sys.version_info >= (3, 10), sys.version.split()[0]),
         ("FFmpeg", shutil.which("ffmpeg") is not None, shutil.which("ffmpeg") or "未找到"),
@@ -3533,8 +3534,8 @@ def environment_markdown() -> str:
         ),
         (
             "Demucs（可选）",
-            importlib.util.find_spec("demucs") is not None,
-            "已安装" if importlib.util.find_spec("demucs") else "未安装",
+            demucs_runtime.ready,
+            demucs_runtime.detail_zh,
         ),
         (
             "Gradio 网页",
@@ -3564,7 +3565,8 @@ def environment_markdown() -> str:
             "",
             (
                 "> faster-whisper 用于从无时间轴歌词生成时间；Demucs 只在勾选"
-                "“先分离人声”时需要；yt-dlp 用于获取当前匿名或已登录账号有权播放的"
+                "“先分离人声”时需要。首次分离会下载模型；Windows 可双击独立的 Demucs "
+                "安装脚本。yt-dlp 用于获取当前匿名或已登录账号有权播放的"
                 "网易云音频；pykakasi 与 alkana 用于离线生成日语和英语注音。"
             ),
             "",
@@ -3572,6 +3574,10 @@ def environment_markdown() -> str:
         ]
     )
     return "\n".join(rows)
+
+
+def _demucs_option_label(prefix: str = "先分离人声") -> str:
+    return f"{prefix} · {inspect_demucs_runtime().short_label_zh}"
 
 
 def _open_output_directory(path: str | None) -> str:
@@ -3835,7 +3841,7 @@ def create_web_app() -> object:
                                 )
                             with gr.Row():
                                 make_separate = gr.Checkbox(
-                                    label="先分离人声（更慢，复杂伴奏可尝试）",
+                                    label=_demucs_option_label("先分离人声（复杂伴奏可尝试）"),
                                     value=False,
                                 )
                                 make_auto_sync = gr.Checkbox(
@@ -3948,7 +3954,7 @@ def create_web_app() -> object:
                             value="auto",
                         )
                         align_separate = gr.Checkbox(
-                            label="先分离人声",
+                            label=_demucs_option_label(),
                             value=False,
                         )
                         align_timing_refinement = gr.Dropdown(
@@ -4055,7 +4061,10 @@ def create_web_app() -> object:
                             ],
                             value="auto",
                         )
-                        netease_separate = gr.Checkbox(label="先分离人声", value=False)
+                        netease_separate = gr.Checkbox(
+                            label=_demucs_option_label(),
+                            value=False,
+                        )
                         netease_keep_audio = gr.Checkbox(
                             label="保留本次获取的音频文件",
                             value=False,

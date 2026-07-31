@@ -87,6 +87,7 @@ def align_audio_and_lyrics(
             audio,
             Path(work_dir) / "separated",
             model=options.demucs_model,
+            device=options.device,
             progress=progress,
         )
 
@@ -145,6 +146,7 @@ def refine_audio_word_timing(
             audio,
             Path(work_dir) / "separated",
             model=options.demucs_model,
+            device=options.device,
             progress=progress,
         )
     if progress:

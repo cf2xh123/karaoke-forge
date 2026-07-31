@@ -17,6 +17,7 @@ from .pipeline import (
     refine_audio_word_timing_with_fallback,
     should_refine_timing,
 )
+from .runtime import inspect_demucs_runtime
 from .workflows import MakeOptions, make_karaoke_video
 
 DEFAULT_FORMATS = "lrc,elrc,srt,vtt,ass,json"
@@ -420,6 +421,7 @@ def _handle_make(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(_args: argparse.Namespace) -> int:
+    demucs_runtime = inspect_demucs_runtime()
     checks = [
         ("Python >= 3.10", sys.version_info >= (3, 10), sys.version.split()[0]),
         ("FFmpeg", shutil.which("ffmpeg") is not None, shutil.which("ffmpeg") or "not found"),
@@ -432,8 +434,8 @@ def _handle_doctor(_args: argparse.Namespace) -> int:
         ),
         (
             "Demucs",
-            importlib.util.find_spec("demucs") is not None,
-            "installed" if importlib.util.find_spec("demucs") else "optional, not installed",
+            demucs_runtime.ready,
+            demucs_runtime.detail_zh,
         ),
         (
             "Gradio web UI",

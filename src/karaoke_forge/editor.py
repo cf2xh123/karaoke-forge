@@ -146,13 +146,16 @@ def apply_editor_rows(
                 and source.start is not None
                 and source.end is not None
             ):
-                tokens = _retime_existing_tokens(
-                    source.tokens,
-                    source.start,
-                    source.end,
-                    start,
-                    end,
-                )
+                if start == source.start and end == source.end:
+                    tokens = copy.deepcopy(source.tokens)
+                else:
+                    tokens = _retime_existing_tokens(
+                        source.tokens,
+                        source.start,
+                        source.end,
+                        start,
+                        end,
+                    )
             else:
                 tokens = _synthetic_tokens(text, start, end)
                 generated_timing = True
@@ -253,8 +256,10 @@ def token_timing_to_json(line: LyricLine) -> str:
         [
             {
                 "text": token.text,
-                "start": round(token.start, 3),
-                "end": round(token.end, 3),
+                # Keep untouched tokens bit-for-bit stable when another token is
+                # edited or removed. Formatting belongs in the visible labels.
+                "start": token.start,
+                "end": token.end,
             }
             for token in tokens
         ],
@@ -424,7 +429,7 @@ def editor_token_timeline_html(document: LyricsDocument, line_number: int) -> st
             '<div class="kf-token-block" role="button" tabindex="0" '
             f'data-token-index="{token_index}" '
             f'data-token="{html.escape(token.text, quote=True)}" '
-            f'data-start="{start:.3f}" data-end="{end:.3f}" '
+            f'data-start="{start!r}" data-end="{end!r}" '
             f'style="left:{left:.5f}%;width:{width:.5f}%;" '
             'title="点击空白处试听；可直接修改文字；清空后保存即可删除">'
             '<input class="kf-token-text" type="text" '
@@ -445,7 +450,7 @@ def editor_token_timeline_html(document: LyricsDocument, line_number: int) -> st
                 f'data-boundary-index="{boundary_index}" '
                 f'data-token-index="{token_index}" data-edge="{edge}" '
                 f'min="{clip_start:.3f}" max="{clip_end:.3f}" step="0.01" '
-                f'value="{value:.3f}" '
+                f'value="{value!r}" '
                 f'aria-label="第 {token_index + 1} 个词{edge_label}时间">'
             )
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,9 +14,132 @@ from math import log1p, sqrt
 from pathlib import Path
 from statistics import median
 
+from .runtime import inspect_demucs_runtime
+
 
 class MediaError(RuntimeError):
     pass
+
+
+def _demucs_legacy_model_files(model: str) -> list[tuple[str, str, str]]:
+    """Resolve an official Demucs model name to its legacy mirror files."""
+
+    try:
+        import demucs
+        import yaml
+    except ImportError:
+        return []
+    remote_root = Path(demucs.__file__).resolve().parent / "remote"
+    file_list = remote_root / "files.txt"
+    if not file_list.is_file():
+        return []
+    root = ""
+    models: dict[str, tuple[str, str, str]] = {}
+    for raw_line in file_list.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("root:"):
+            root = line.split(":", 1)[1].strip()
+            continue
+        signature = line.split("-", 1)[0]
+        checksum = Path(line).stem.rsplit("-", 1)[-1]
+        models[signature] = (
+            f"https://dl.fbaipublicfiles.com/demucs/{root}{line}",
+            line,
+            checksum,
+        )
+    bag_file = remote_root / f"{model}.yaml"
+    if bag_file.is_file():
+        bag = yaml.safe_load(bag_file.read_text(encoding="utf-8")) or {}
+        signatures = [str(value) for value in bag.get("models", [])]
+    else:
+        signatures = [model]
+    return [models[signature] for signature in signatures if signature in models]
+
+
+def _file_checksum_prefix(path: Path, length: int) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()[:length]
+
+
+def _ensure_demucs_legacy_model(
+    model: str,
+    environment: dict[str, str],
+    progress: Callable[[str], None] | None,
+) -> None:
+    """Download model weights with httpx to avoid broken Windows cert stores."""
+
+    model_files = _demucs_legacy_model_files(model)
+    if not model_files:
+        return
+    torch_home = environment.get("TORCH_HOME")
+    if torch_home:
+        checkpoint_dir = Path(torch_home) / "hub" / "checkpoints"
+    else:
+        import torch
+
+        checkpoint_dir = Path(torch.hub.get_dir()) / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import certifi
+        import httpx
+    except ImportError:
+        return
+    for url, filename, checksum in model_files:
+        target = checkpoint_dir / filename
+        if target.is_file() and target.stat().st_size > 0:
+            continue
+        if progress:
+            progress(f"正在下载 Demucs 模型 {filename}（首次仅需一次）")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f"{target.stem}-",
+                suffix=".partial",
+                dir=checkpoint_dir,
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                with httpx.stream(
+                    "GET",
+                    url,
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(60.0, connect=15.0),
+                    verify=certifi.where(),
+                ) as response:
+                    response.raise_for_status()
+                    total = int(response.headers.get("content-length") or 0)
+                    downloaded = 0
+                    last_percent = -10
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        temporary.write(chunk)
+                        downloaded += len(chunk)
+                        if progress and total > 0:
+                            percent = int(downloaded * 100 / total)
+                            if percent >= last_percent + 10:
+                                progress(f"Demucs 模型下载：{min(100, percent)}%")
+                                last_percent = percent
+            if temporary_path is None or temporary_path.stat().st_size <= 0:
+                raise MediaError("Demucs 模型下载结果为空。")
+            actual_checksum = _file_checksum_prefix(temporary_path, len(checksum))
+            if actual_checksum != checksum:
+                raise MediaError(
+                    f"Demucs 模型校验失败：期望 {checksum}，实际 {actual_checksum}。"
+                )
+            temporary_path.replace(target)
+            temporary_path = None
+            if progress:
+                progress("Demucs 模型下载：100%（校验通过）")
+        except Exception as exc:
+            raise MediaError(f"Demucs 模型下载失败：{exc}。请检查网络后重试。") from exc
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -429,19 +554,31 @@ def separate_vocals(
     output_dir: str | Path,
     *,
     model: str = "htdemucs",
+    device: str = "auto",
     progress: Callable[[str], None] | None = None,
 ) -> Path:
     audio = Path(audio_path).resolve()
     directory = Path(output_dir).resolve()
     if not audio.is_file():
         raise FileNotFoundError(f"Audio file not found: {audio}")
-    try:
-        import demucs  # noqa: F401
-    except ImportError as exc:
+    runtime = inspect_demucs_runtime()
+    if not runtime.installed:
         raise MediaError(
-            "Vocal separation requires Demucs. Run "
-            '`pip install -e ".[separate]"` (or `pip install karaoke-forge[separate]`).'
-        ) from exc
+            "尚未安装 Demucs 人声分离。Windows 请双击“安装人声分离（Demucs）.bat”，"
+            '或运行 `pip install -e ".[separate]"`。'
+        )
+    if runtime.error:
+        raise MediaError(f"Demucs/Torch 安装异常：{runtime.error}。请重新运行 Demucs 安装脚本。")
+    if device == "cuda" and runtime.device != "cuda":
+        detail = (
+            "检测到了 NVIDIA 显卡，但当前 Torch 是 CPU 版。"
+            if runtime.nvidia_detected
+            else "没有检测到可用的 NVIDIA CUDA 环境。"
+        )
+        raise MediaError(
+            f"已选择 NVIDIA 显卡，但 Demucs 无法使用 CUDA：{detail}"
+            "请双击“安装人声分离（Demucs）.bat”，或把运行设备改为“自动选择/只用 CPU”。"
+        )
 
     directory.mkdir(parents=True, exist_ok=True)
     command = [
@@ -456,22 +593,65 @@ def separate_vocals(
         str(directory),
         str(audio),
     ]
+    if device in {"cpu", "cuda"}:
+        command[3:3] = ["-d", device]
     if progress:
-        progress(f"Separating vocals with Demucs model: {model}")
-    completed = subprocess.run(
+        target = runtime.device_name if runtime.device == "cuda" else "CPU"
+        progress(f"正在用 Demucs {model} 分离人声（{target}）")
+        progress("首次使用该模型会联网下载；下载完成后会保存在本机，后续无需重复下载")
+    process_environment = os.environ.copy()
+    cache_root = process_environment.get("KARAOKE_FORGE_CACHE_DIR") or process_environment.get(
+        "GRADIO_TEMP_DIR"
+    )
+    if cache_root:
+        process_environment.setdefault("TORCH_HOME", str(Path(cache_root) / "demucs-torch"))
+    try:
+        import certifi
+
+        certificate_bundle = certifi.where()
+        process_environment.setdefault("SSL_CERT_FILE", certificate_bundle)
+        process_environment.setdefault("REQUESTS_CA_BUNDLE", certificate_bundle)
+    except ImportError:
+        pass
+    # Demucs 4.1 tries Hugging Face first and then its official model mirror.
+    # An offline lookup still reuses a local HF cache, but avoids minutes of
+    # retries on networks where huggingface.co is blocked.
+    process_environment.setdefault("HF_HUB_OFFLINE", "1")
+    _ensure_demucs_legacy_model(model, process_environment, progress)
+    process = subprocess.Popen(
         command,
-        check=False,
         text=True,
         encoding="utf-8",
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        bufsize=1,
+        env=process_environment,
     )
-    if completed.returncode != 0:
-        tail = "\n".join(completed.stdout.splitlines()[-30:])
-        raise MediaError(f"Demucs failed with exit code {completed.returncode}:\n{tail}")
+    output_lines: list[str] = []
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        output_lines.append(line)
+        if progress:
+            progress(f"Demucs：{line[-240:]}")
+    return_code = process.wait()
+    if return_code != 0:
+        tail = "\n".join(output_lines[-30:])
+        lowered = tail.lower()
+        if "out of memory" in lowered or "cuda out of memory" in lowered:
+            hint = "\n显存不足；可把运行设备改为 CPU 后重试。"
+        elif any(word in lowered for word in ("download", "connection", "timeout")):
+            hint = "\n模型下载失败；请检查网络，稍后重试会继续使用已下载的缓存。"
+        else:
+            hint = ""
+        raise MediaError(f"Demucs 运行失败（退出码 {return_code}）：\n{tail}{hint}")
 
     candidates = sorted(directory.rglob("vocals.wav"), key=lambda path: path.stat().st_mtime)
     if not candidates:
-        raise MediaError("Demucs completed, but vocals.wav could not be found.")
+        raise MediaError("Demucs 已结束，但没有找到 vocals.wav 人声文件。")
+    if progress:
+        progress("Demucs 人声分离完成，接下来使用人声轨进行歌词识别")
     return candidates[-1]

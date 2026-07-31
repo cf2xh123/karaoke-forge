@@ -10,6 +10,7 @@ from karaoke_forge.media import (
     match_audio_envelopes,
     probe_media_has_audio,
     render_karaoke_video,
+    separate_vocals,
 )
 
 
@@ -87,3 +88,66 @@ def test_render_reports_disk_full_and_removes_new_partial_output(tmp_path, monke
         render_karaoke_video(video, subtitles, output)
 
     assert not output.exists()
+
+
+def test_separate_vocals_rejects_cuda_when_torch_is_cpu_only(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.m4a"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(
+        "karaoke_forge.media.inspect_demucs_runtime",
+        lambda: SimpleNamespace(
+            installed=True,
+            error=None,
+            device="cpu",
+            device_name=None,
+            nvidia_detected=True,
+        ),
+    )
+
+    with pytest.raises(MediaError, match="Torch 是 CPU 版"):
+        separate_vocals(audio, tmp_path / "separated", device="cuda")
+
+
+def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.m4a"
+    audio.write_bytes(b"audio")
+    output_dir = tmp_path / "separated"
+    vocals = output_dir / "htdemucs" / "song" / "vocals.wav"
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        stdout = iter(["Downloading model\n", "100% separated\n"])
+
+        def wait(self) -> int:
+            vocals.parent.mkdir(parents=True)
+            vocals.write_bytes(b"vocals")
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "karaoke_forge.media.inspect_demucs_runtime",
+        lambda: SimpleNamespace(
+            installed=True,
+            error=None,
+            device="cpu",
+            device_name=None,
+            nvidia_detected=False,
+        ),
+    )
+    monkeypatch.setattr("karaoke_forge.media.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("karaoke_forge.media._ensure_demucs_legacy_model", lambda *_args: None)
+    messages: list[str] = []
+
+    result = separate_vocals(audio, output_dir, device="cpu", progress=messages.append)
+
+    assert result == vocals
+    command = captured["command"]
+    assert command[3:5] == ["-d", "cpu"]
+    assert captured["environment"]["HF_HUB_OFFLINE"] == "1"
+    assert captured["environment"]["SSL_CERT_FILE"]
+    assert any("Downloading model" in message for message in messages)
+    assert messages[-1].startswith("Demucs 人声分离完成")
