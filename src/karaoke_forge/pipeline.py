@@ -1,14 +1,41 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .align import AlignmentReport, align_document, refine_timed_document
 from .formats import read_lyrics
 from .media import separate_vocals
 from .models import LyricsDocument
 from .transcribe import TranscriptionResult, transcribe_with_faster_whisper
+
+TimingRefinement = Literal["off", "auto", "force"]
+TIMING_REFINEMENT_MODES = ("off", "auto", "force")
+
+
+def normalize_timing_refinement(
+    value: str | None,
+    *,
+    legacy_refine_word_timing: bool | None = None,
+) -> TimingRefinement:
+    if legacy_refine_word_timing is not None:
+        return "auto" if legacy_refine_word_timing else "off"
+    normalized = (value or "auto").strip().lower()
+    if normalized not in TIMING_REFINEMENT_MODES:
+        raise ValueError(f"逐字时间精修策略必须是 off、auto 或 force，当前值为 {value!r}。")
+    return normalized  # type: ignore[return-value]
+
+
+def should_refine_timing(document: LyricsDocument, mode: str) -> bool:
+    normalized = normalize_timing_refinement(mode)
+    if not document.is_timed or normalized == "off":
+        return False
+    if normalized == "force":
+        return True
+    return document.metadata.get("word_timing") == "synthetic"
 
 
 @dataclass(frozen=True)
@@ -103,6 +130,11 @@ def refine_audio_word_timing(
 
     options = options or AlignOptions()
     lyrics.require_timed()
+    visible_lyrics = LyricsDocument(
+        lines=copy.deepcopy(lyrics.visible_lines),
+        metadata=dict(lyrics.metadata),
+        source_format=lyrics.source_format,
+    )
     audio = Path(audio_path)
     alignment_audio = audio
     if options.separate_vocals:
@@ -115,7 +147,7 @@ def refine_audio_word_timing(
             progress=progress,
         )
     if progress:
-        progress("普通歌词只有行级时间，正在根据演唱速度精修句内逐字时间")
+        progress("正在根据演唱音频精修句内逐字时间")
     transcription = transcribe_with_faster_whisper(
         alignment_audio,
         model=options.model,
@@ -123,14 +155,24 @@ def refine_audio_word_timing(
         device=options.device,
         compute_type=options.compute_type,
         beam_size=options.beam_size,
-        initial_prompt="\n".join(line.text for line in lyrics.lines),
+        initial_prompt="\n".join(line.text for line in visible_lyrics.lines),
         progress=progress,
     )
     document, report = refine_timed_document(
-        lyrics,
+        visible_lyrics,
         transcription.words,
         minimum_coverage=options.minimum_coverage,
     )
+    if any(line.hidden for line in lyrics.lines):
+        refined_visible = iter(document.lines)
+        merged_lines = [
+            copy.deepcopy(line) if line.hidden else next(refined_visible) for line in lyrics.lines
+        ]
+        document = LyricsDocument(
+            lines=merged_lines,
+            metadata=dict(document.metadata),
+            source_format=lyrics.source_format,
+        )
     if transcription.detected_language:
         document.metadata.setdefault("language", transcription.detected_language)
     document.metadata["generator"] = "Karaoke Forge"

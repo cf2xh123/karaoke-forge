@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from itertools import pairwise
@@ -262,6 +263,8 @@ def align_document(
                 tokens=tokens,
                 translation=source_line.translation,
                 pronunciation=source_line.pronunciation,
+                pronunciation_units=copy.deepcopy(source_line.pronunciation_units),
+                hidden=source_line.hidden,
             )
         )
 
@@ -347,6 +350,8 @@ def refine_timed_document(
                 tokens=tokens,
                 translation=source.translation,
                 pronunciation=source.pronunciation,
+                pronunciation_units=copy.deepcopy(source.pronunciation_units),
+                hidden=source.hidden,
             )
         )
 

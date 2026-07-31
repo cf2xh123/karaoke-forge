@@ -45,6 +45,17 @@ JSON 是无损项目格式：
   "lines": [
     {
       "text": "你好",
+      "translation": "Hello",
+      "pronunciation": null,
+      "pronunciation_units": [
+        {
+          "source": "你",
+          "reading": "nǐ",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "hidden": false,
       "start": 1.0,
       "end": 2.0,
       "tokens": [
@@ -60,4 +71,6 @@ JSON 是无损项目格式：
 }
 ```
 
+`pronunciation_units` 的 `start`/`end` 是原文中的字符区间，不是时间；逐词字幕时间仍由
+`tokens` 保存。`hidden: true` 的行会保留在 JSON 中，但其他字幕格式和视频会跳过该行。
 后续手工修订时间轴时建议保留一份 JSON，再从它导出其他格式。

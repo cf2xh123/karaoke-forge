@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, Iterable, Mapping
 
 _KANJI_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF々〆ヵヶ]")
 _KANA_RE = re.compile(r"[\u3040-\u30FF]")

@@ -13,7 +13,13 @@ from .align import AlignmentReport
 from .ass import AssStyle
 from .formats import attach_reference_translation, export_formats, read_lyrics
 from .media import probe_media_duration
-from .pipeline import AlignOptions, align_audio_and_lyrics, refine_audio_word_timing
+from .pipeline import (
+    AlignOptions,
+    align_audio_and_lyrics,
+    normalize_timing_refinement,
+    refine_audio_word_timing,
+    should_refine_timing,
+)
 
 
 class NeteaseLinkError(ValueError):
@@ -123,7 +129,8 @@ class NeteaseAlignOptions:
     rights_confirmed: bool = False
     cookie_browser: str | None = None
     cookie_browser_profile: str | None = None
-    refine_word_timing: bool = True
+    timing_refinement: str = "auto"
+    refine_word_timing: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -227,8 +234,7 @@ def fetch_public_netease_info(
     duration = float(duration_value) / 1000 if isinstance(duration_value, (int, float)) else None
 
     lyric_info = _download_public_json(
-        f"https://music.163.com/api/song/lyric?"
-        f"id={song_id}&lv=-1&kv=-1&tv=-1&rv=-1&yv=-1",
+        f"https://music.163.com/api/song/lyric?id={song_id}&lv=-1&kv=-1&tv=-1&rv=-1&yv=-1",
         timeout=timeout,
     )
     original = lyric_info.get("lrc")
@@ -440,7 +446,7 @@ def download_netease_track(
     ) -> None:
         nonlocal quality_level, access_tier, access_reported
         if incomplete or access_reported:
-            return None
+            return
         quality_level, access_tier = _quality_access(info)
         if quality_level:
             _report_access(
@@ -451,7 +457,6 @@ def download_netease_track(
                 access_tier=access_tier,
             )
             access_reported = True
-        return None
 
     class QuietLogger:
         def debug(self, _message: str) -> None:
@@ -657,10 +662,15 @@ def align_netease_song(
     report: AlignmentReport | None = None
     alignment_skipped = source.is_timed
     if source.is_timed:
-        needs_refinement = (
-            options.refine_word_timing and source.metadata.get("word_timing") == "synthetic"
+        timing_mode = normalize_timing_refinement(
+            options.timing_refinement,
+            legacy_refine_word_timing=options.refine_word_timing,
         )
+        needs_refinement = should_refine_timing(source, timing_mode)
         if needs_refinement:
+            if progress:
+                detail = "强制" if timing_mode == "force" else "自动"
+                progress(f"逐字时间精修策略：{detail}，将使用演唱音频重新检查时间")
             refined = refine_audio_word_timing(
                 track.audio_path,
                 source,
@@ -674,7 +684,9 @@ def align_netease_song(
         else:
             document = source
             if progress:
-                if source.metadata.get("word_timing") == "source":
+                if timing_mode == "off":
+                    progress("逐字时间精修已关闭，完全保留输入文件时间")
+                elif source.metadata.get("word_timing") == "source":
                     progress("歌词已包含真实逐字时间，直接用于卡拉 OK 扫色")
                 else:
                     progress("歌词已有时间轴，跳过语音识别")

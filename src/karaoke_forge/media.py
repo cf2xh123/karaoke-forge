@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
-import json
 from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -65,8 +65,7 @@ def probe_media_duration(media_path: str | Path) -> float | None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if completed.returncode != 0:
         return None
@@ -75,6 +74,41 @@ def probe_media_duration(media_path: str | Path) -> float | None:
         return float(value)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def probe_media_has_audio(media_path: str | Path) -> bool | None:
+    """Return whether a media file has an audio stream, or None when probing fails."""
+
+    executable = find_ffprobe()
+    media = Path(media_path)
+    if not executable or not media.is_file():
+        return None
+    completed = subprocess.run(
+        [
+            executable,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "json",
+            str(media),
+        ],
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        streams = json.loads(completed.stdout)["streams"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return None
+    return isinstance(streams, list) and bool(streams)
 
 
 def _audio_envelope(
@@ -107,8 +141,7 @@ def _audio_envelope(
     completed = subprocess.run(
         command,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if completed.returncode != 0:
         message = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -204,28 +237,18 @@ def match_audio_envelopes(
             separation=max(1, round(1.5 / frame_seconds)),
         )
         candidate_groups.append(
-            [
-                (score, video_start - reference_start)
-                for score, video_start in matches
-            ]
+            [(score, video_start - reference_start) for score, video_start in matches]
         )
 
     tolerance = max(1, round(0.8 / frame_seconds))
-    all_offsets = [
-        offset
-        for group in candidate_groups
-        for score, offset in group
-        if score >= 0.18
-    ]
+    all_offsets = [offset for group in candidate_groups for score, offset in group if score >= 0.18]
     best_cluster: list[tuple[float, int]] = []
     best_key = (-1, -1.0)
     for center in all_offsets:
         cluster: list[tuple[float, int]] = []
         for group_index, group in enumerate(candidate_groups):
             nearby = [
-                (score, offset)
-                for score, offset in group
-                if abs(offset - center) <= tolerance
+                (score, offset) for score, offset in group if abs(offset - center) <= tolerance
             ]
             if nearby:
                 score, offset = max(nearby)
@@ -314,6 +337,7 @@ def render_karaoke_video(
     output = Path(output_path).resolve()
     external_audio = Path(audio_path).resolve() if audio_path else None
     use_external_audio = external_audio is not None and external_audio != video
+    output_was_new = not output.exists()
 
     if not video.is_file():
         raise FileNotFoundError(f"Video file not found: {video}")
@@ -374,6 +398,28 @@ def render_karaoke_video(
         )
         if completed.returncode != 0:
             tail = "\n".join(completed.stdout.splitlines()[-30:])
+            disk_full = (
+                "no space left on device" in completed.stdout.lower()
+                or "error code: -28" in completed.stdout.lower()
+            )
+            removed_partial = False
+            if output_was_new and output.is_file():
+                try:
+                    output.unlink()
+                    removed_partial = True
+                except OSError:
+                    pass
+            if disk_full:
+                cleanup = (
+                    "本次未完成的视频已自动清理。"
+                    if removed_partial
+                    else "本次未完成的视频无法自动清理，请手动删除后再试。"
+                )
+                raise MediaError(
+                    "输出磁盘空间不足，FFmpeg 无法继续写入视频。\n"
+                    f"输出目录：{output.parent}\n"
+                    f"{cleanup} 请更换到空间更充足的输出目录，建议至少预留 2 GB。"
+                )
             raise MediaError(f"FFmpeg failed with exit code {completed.returncode}:\n{tail}")
     return output
 

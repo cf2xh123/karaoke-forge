@@ -2,6 +2,7 @@ from karaoke_forge.ass import AssStyle, write_ass
 from karaoke_forge.formats import (
     attach_lrc_translation,
     attach_reference_translation,
+    parse_ass,
     parse_lrc,
     parse_srt,
     parse_yrc,
@@ -84,6 +85,18 @@ def test_ass_has_karaoke_tags_and_style() -> None:
     assert r"{\kf67}你" in output
 
 
+def test_generated_ass_round_trip_ignores_preview_and_pronunciation_events() -> None:
+    document = parse_lrc("[00:01.00]Hello world\n[00:03.00]Next line\n")
+    document.lines[0].translation = "你好，世界"
+    document.lines[0].pronunciation = "ハロー ワールド"
+
+    restored = parse_ass(write_ass(document))
+
+    assert [line.text for line in restored.lines] == ["Hello world", "Next line"]
+    assert restored.lines[0].translation == "你好，世界"
+    assert restored.lines[0].pronunciation == "ハロー ワールド"
+
+
 def test_translation_uses_top_center_split_ktv_layout() -> None:
     document = parse_lrc("[00:01.00]Hello world\n[00:03.00]Next line\n")
     document.lines[0].pronunciation = "ハロー　ワールド"
@@ -103,7 +116,8 @@ def test_translation_uses_top_center_split_ktv_layout() -> None:
     assert ",8,60,60,54,1" in output
     assert "Style: KaraokeLower,Microsoft YaHei" in output
     assert "Style: KaraokeInactive,Microsoft YaHei" in output
-    assert "Dialogue: 0,0:00:01.00,0:00:07.00,KaraokeInactive" in output
+    assert "Dialogue: 0,0:00:01.00,0:00:03.00,KaraokeInactive" in output
+    assert "Dialogue: 0,0:00:01.00,0:00:07.00,KaraokeLowerInactive" in output
     assert "Dialogue: 3,0:00:01.00" in output
     assert "你好，世界" in output
     assert "Dialogue: 1,0:00:01.00" in output
@@ -114,3 +128,23 @@ def test_translation_uses_top_center_split_ktv_layout() -> None:
     assert '"translation": "你好，世界"' in write_json(document)
     assert '"pronunciation": "ハロー　ワールド"' in write_json(document)
     assert "你好，世界\nHello world" in write_srt(document)
+
+
+def test_ass_rolls_one_ktv_row_at_each_new_line() -> None:
+    document = parse_srt(
+        "1\n00:00:01,000 --> 00:00:02,000\nA\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nB\n\n"
+        "3\n00:00:05,000 --> 00:00:06,000\nC\n\n"
+        "4\n00:00:07,000 --> 00:00:08,000\nD\n"
+    )
+
+    output = write_ass(document, AssStyle(show_pronunciation=False))
+
+    assert "Dialogue: 0,0:00:01.00,0:00:03.00,KaraokeInactive" in output
+    assert r"{\fad(120,180)}A" in output
+    assert "Dialogue: 0,0:00:01.00,0:00:05.00,KaraokeLowerInactive" in output
+    assert r"{\fad(120,180)}B" in output
+    assert "Dialogue: 0,0:00:03.00,0:00:07.00,KaraokeInactive" in output
+    assert r"{\fad(120,180)}C" in output
+    assert "Dialogue: 0,0:00:05.00,0:00:08.00,KaraokeLowerInactive" in output
+    assert r"{\fad(120,180)}D" in output

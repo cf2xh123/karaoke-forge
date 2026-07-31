@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import ModuleType
+from typing import ClassVar
 
 import pytest
 
@@ -299,7 +300,7 @@ def test_browser_session_requires_netease_login_cookie(
         pass
 
     class FakeYoutubeDL:
-        cookiejar: list[object] = []
+        cookiejar: ClassVar[list[object]] = []
 
         def __init__(self, _options: dict[str, object]) -> None:
             return None

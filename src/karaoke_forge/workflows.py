@@ -7,9 +7,20 @@ from pathlib import Path
 from .align import AlignmentReport
 from .ass import AssStyle
 from .formats import export_formats, read_lyrics
-from .media import AudioSyncResult, detect_audio_sync, render_karaoke_video
+from .media import (
+    AudioSyncResult,
+    detect_audio_sync,
+    probe_media_has_audio,
+    render_karaoke_video,
+)
 from .models import LyricsDocument
-from .pipeline import AlignOptions, align_audio_and_lyrics, refine_audio_word_timing
+from .pipeline import (
+    AlignOptions,
+    align_audio_and_lyrics,
+    normalize_timing_refinement,
+    refine_audio_word_timing,
+    should_refine_timing,
+)
 
 
 @dataclass(frozen=True)
@@ -23,7 +34,8 @@ class MakeOptions:
     audio_bitrate: str = "320k"
     overwrite: bool = False
     auto_sync: bool = False
-    refine_word_timing: bool = True
+    timing_refinement: str = "auto"
+    refine_word_timing: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,12 @@ def make_karaoke_video(
         if audio.resolve() == video_source.resolve():
             if progress:
                 progress("正在使用 MV 内嵌完整音轨，无需额外偏移")
+        elif probe_media_has_audio(video_source) is False:
+            if progress:
+                progress(
+                    "MV 没有内嵌音轨，已跳过音轨指纹自动同步；"
+                    f"将使用上传音频并保留 {effective_offset:+.2f} 秒手动偏移"
+                )
         else:
             sync_result = detect_audio_sync(audio, video_source, progress=progress)
             if not sync_result.reliable:
@@ -88,11 +106,15 @@ def make_karaoke_video(
     report: AlignmentReport | None = None
     alignment_skipped = source_document.is_timed
     if source_document.is_timed:
-        needs_refinement = (
-            options.refine_word_timing
-            and source_document.metadata.get("word_timing") == "synthetic"
+        timing_mode = normalize_timing_refinement(
+            options.timing_refinement,
+            legacy_refine_word_timing=options.refine_word_timing,
         )
+        needs_refinement = should_refine_timing(source_document, timing_mode)
         if needs_refinement:
+            if progress:
+                detail = "强制" if timing_mode == "force" else "自动"
+                progress(f"逐字时间精修策略：{detail}，将使用演唱音频重新检查时间")
             refined = refine_audio_word_timing(
                 audio,
                 source_document,
@@ -106,7 +128,9 @@ def make_karaoke_video(
         else:
             document = source_document
             if progress:
-                if source_document.metadata.get("word_timing") == "source":
+                if timing_mode == "off":
+                    progress("逐字时间精修已关闭，完全保留输入文件时间")
+                elif source_document.metadata.get("word_timing") == "source":
                     progress("歌词已包含真实逐字时间，直接用于卡拉 OK 扫色")
                 else:
                     progress("歌词已有时间轴，已跳过语音识别")
