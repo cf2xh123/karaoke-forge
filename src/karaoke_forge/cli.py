@@ -11,7 +11,12 @@ from . import __version__
 from .ass import AssStyle
 from .formats import export_formats, read_lyrics, write_format
 from .media import MediaError, find_ffmpeg, render_karaoke_video
-from .pipeline import AlignOptions, align_audio_and_lyrics
+from .pipeline import (
+    AlignOptions,
+    align_audio_and_lyrics,
+    refine_audio_word_timing,
+    should_refine_timing,
+)
 from .workflows import MakeOptions, make_karaoke_video
 
 DEFAULT_FORMATS = "lrc,elrc,srt,vtt,ass,json"
@@ -96,6 +101,31 @@ def _add_alignment_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--demucs-model", default="htdemucs")
 
 
+def _add_timing_refinement_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--timing-refinement",
+        choices=["off", "auto", "force"],
+        default="auto",
+        help=(
+            "word timing policy: off preserves input, auto refines synthetic "
+            "timing, force rechecks all timed lyrics"
+        ),
+    )
+    parser.add_argument(
+        "--refine-word-timing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
+
+def _timing_refinement_from_args(args: argparse.Namespace) -> str:
+    legacy = getattr(args, "refine_word_timing", None)
+    if legacy is not None:
+        return "auto" if legacy else "off"
+    return str(getattr(args, "timing_refinement", "auto"))
+
+
 def _alignment_options(args: argparse.Namespace) -> AlignOptions:
     return AlignOptions(
         model=args.model,
@@ -124,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     align.add_argument("--name", help="output basename (defaults to the lyrics filename)")
     align.add_argument("--formats", type=_formats, default=_formats(DEFAULT_FORMATS))
     _add_alignment_arguments(align)
+    _add_timing_refinement_arguments(align)
     _add_style_arguments(align)
     align.set_defaults(handler=_handle_align)
 
@@ -177,12 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="locate the reference song inside the MV audio before rendering",
     )
-    make.add_argument(
-        "--refine-word-timing",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="refine synthetic LRC/SRT word timing from the singing audio",
-    )
+    _add_timing_refinement_arguments(make)
     make.add_argument("--crf", type=int, default=18)
     make.add_argument("--preset", default="medium")
     make.add_argument("--audio-bitrate", default="320k")
@@ -221,12 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
     )
     netease.add_argument("--keep-audio", action="store_true")
-    netease.add_argument(
-        "--refine-word-timing",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="refine synthetic LRC word timing from the singing audio",
-    )
+    _add_timing_refinement_arguments(netease)
     netease.add_argument(
         "--cookies-from-browser",
         choices=["brave", "chrome", "edge", "firefox"],
@@ -258,30 +279,54 @@ def _print_exports(paths: dict[str, Path]) -> None:
 
 def _handle_align(args: argparse.Namespace) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    result = align_audio_and_lyrics(
-        args.audio,
-        args.lyrics,
-        options=_alignment_options(args),
-        work_dir=args.output_dir / ".work",
-        progress=_progress,
-    )
+    source = read_lyrics(args.lyrics)
+    result = None
+    if source.is_timed:
+        timing_mode = _timing_refinement_from_args(args)
+        if should_refine_timing(source, timing_mode):
+            result = refine_audio_word_timing(
+                args.audio,
+                source,
+                options=_alignment_options(args),
+                work_dir=args.output_dir / ".work",
+                progress=_progress,
+            )
+            document = result.document
+        else:
+            document = source
+            detail = (
+                "timing refinement disabled; preserved input timing"
+                if timing_mode == "off"
+                else "trusted word timing detected; skipped recognition"
+            )
+            print(detail)
+    else:
+        result = align_audio_and_lyrics(
+            args.audio,
+            args.lyrics,
+            options=_alignment_options(args),
+            work_dir=args.output_dir / ".work",
+            progress=_progress,
+        )
+        document = result.document
     basename = args.name or args.lyrics.stem
     paths = export_formats(
-        result.document,
+        document,
         args.output_dir,
         basename,
         args.formats,
         ass_style=_style_from_args(args),
     )
-    print(
-        f"Alignment: {result.report.matched_units}/{result.report.target_units} units "
-        f"({result.report.coverage:.1%}), exact {result.report.exact_units}, "
-        f"mean similarity {result.report.mean_similarity:.2f}"
-    )
-    if result.transcription.detected_language:
-        probability = result.transcription.language_probability
-        suffix = f" ({probability:.1%})" if probability is not None else ""
-        print(f"Language: {result.transcription.detected_language}{suffix}")
+    if result is not None:
+        print(
+            f"Alignment: {result.report.matched_units}/{result.report.target_units} units "
+            f"({result.report.coverage:.1%}), exact {result.report.exact_units}, "
+            f"mean similarity {result.report.mean_similarity:.2f}"
+        )
+        if result.transcription.detected_language:
+            probability = result.transcription.language_probability
+            suffix = f" ({probability:.1%})" if probability is not None else ""
+            print(f"Language: {result.transcription.detected_language}{suffix}")
     _print_exports(paths)
     return 0
 
@@ -354,7 +399,7 @@ def _handle_make(args: argparse.Namespace) -> int:
             audio_bitrate=args.audio_bitrate,
             overwrite=args.overwrite,
             auto_sync=args.auto_sync,
-            refine_word_timing=args.refine_word_timing,
+            timing_refinement=_timing_refinement_from_args(args),
         ),
         progress=_progress,
     )
@@ -441,7 +486,7 @@ def _handle_netease(args: argparse.Namespace) -> int:
             rights_confirmed=args.i_have_rights,
             cookie_browser=args.cookies_from_browser,
             cookie_browser_profile=args.browser_profile,
-            refine_word_timing=args.refine_word_timing,
+            timing_refinement=_timing_refinement_from_args(args),
         ),
         progress=_progress,
     )

@@ -50,6 +50,20 @@ def _escape_ass_text(value: str) -> str:
 
 
 def _line_pronunciation(line: LyricLine) -> PronunciationLine | None:
+    if line.pronunciation_units:
+        return PronunciationLine(
+            tuple(
+                PronunciationUnit(
+                    source=unit.source,
+                    reading=unit.reading,
+                    start=unit.start,
+                    end=unit.end,
+                )
+                for unit in line.pronunciation_units
+                if unit.reading.strip()
+            ),
+            separator="",
+        )
     if line.pronunciation:
         return PronunciationLine(
             (
@@ -159,6 +173,7 @@ def _pronunciation_karaoke(
 
 def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
     document.require_timed()
+    lines = document.visible_lines
     style = style or AssStyle()
     width, height = style.resolution
     primary = _ass_color(style.highlight_color)
@@ -192,40 +207,45 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events: list[str] = []
     pronunciations = [
-        _line_pronunciation(line) if style.show_pronunciation else None
-        for line in document.lines
+        _line_pronunciation(line) if style.show_pronunciation else None for line in lines
     ]
 
-    # A traditional KTV page keeps two adjacent lines visible. The inactive
-    # copies stay white underneath the timed karaoke overlay.
-    for pair_start in range(0, len(document.lines), 2):
-        pair = document.lines[pair_start : pair_start + 2]
-        first = pair[0]
-        last = pair[-1]
-        assert first.start is not None and last.end is not None
-        for row, line in enumerate(pair):
-            inactive_style = "KaraokeInactive" if row == 0 else "KaraokeLowerInactive"
-            events.append(
-                "Dialogue: 0,"
-                f"{ass_clock(first.start)},{ass_clock(last.end)},"
-                f"{inactive_style},,0,0,0,,"
-                f"{{\\fad(120,180)}}{_escape_ass_text(line.text)}"
-            )
-            pronunciation = pronunciations[pair_start + row]
-            if pronunciation is not None:
-                for unit in pronunciation.units:
-                    if not unit.reading.strip():
-                        continue
-                    x, y = _pronunciation_position(line, unit, row, style)
-                    events.append(
-                        "Dialogue: 0,"
-                        f"{ass_clock(first.start)},{ass_clock(last.end)},"
-                        "PronunciationInactive,,0,0,0,,"
-                        f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
-                        f"{_escape_ass_text(unit.reading)}"
-                    )
+    # Keep the current line and the next line visible, then roll one row at a
+    # time. While B is active on the lower row, A has already been replaced by
+    # the C preview on the upper row; the layout never waits for an A/B page to
+    # finish before revealing C/D.
+    for index, line in enumerate(lines):
+        assert line.start is not None and line.end is not None
+        previous = lines[index - 1] if index else None
+        following = lines[index + 1] if index + 1 < len(lines) else None
+        display_start = previous.start if previous is not None else line.start
+        display_end = following.start if following is not None else line.end
+        assert display_start is not None and display_end is not None
+        if display_end <= display_start:
+            display_end = max(line.end, display_start + 0.01)
+        row = index % 2
+        inactive_style = "KaraokeInactive" if row == 0 else "KaraokeLowerInactive"
+        events.append(
+            "Dialogue: 0,"
+            f"{ass_clock(display_start)},{ass_clock(display_end)},"
+            f"{inactive_style},,0,0,0,,"
+            f"{{\\fad(120,180)}}{_escape_ass_text(line.text)}"
+        )
+        pronunciation = pronunciations[index]
+        if pronunciation is not None:
+            for unit in pronunciation.units:
+                if not unit.reading.strip():
+                    continue
+                x, y = _pronunciation_position(line, unit, row, style)
+                events.append(
+                    "Dialogue: 0,"
+                    f"{ass_clock(display_start)},{ass_clock(display_end)},"
+                    "PronunciationInactive,,0,0,0,,"
+                    f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
+                    f"{_escape_ass_text(unit.reading)}"
+                )
 
-    for index, line in enumerate(document.lines):
+    for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
         if style.show_translation and line.translation:
             events.append(

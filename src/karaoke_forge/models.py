@@ -19,6 +19,20 @@ class KaraokeToken:
 
 
 @dataclass
+class PronunciationSpan:
+    """A manually editable reading attached to a character range."""
+
+    source: str
+    reading: str
+    start: int = 0
+    end: int = 0
+
+    def __post_init__(self) -> None:
+        self.start = max(0, int(self.start))
+        self.end = max(self.start, int(self.end))
+
+
+@dataclass
 class LyricLine:
     text: str
     start: float | None = None
@@ -26,6 +40,8 @@ class LyricLine:
     tokens: list[KaraokeToken] = field(default_factory=list)
     translation: str | None = None
     pronunciation: str | None = None
+    pronunciation_units: list[PronunciationSpan] = field(default_factory=list)
+    hidden: bool = False
 
     @property
     def is_timed(self) -> bool:
@@ -39,8 +55,13 @@ class LyricsDocument:
     source_format: str = "txt"
 
     @property
+    def visible_lines(self) -> list[LyricLine]:
+        return [line for line in self.lines if not line.hidden]
+
+    @property
     def is_timed(self) -> bool:
-        return bool(self.lines) and all(line.is_timed for line in self.lines)
+        lines = self.visible_lines
+        return bool(lines) and all(line.is_timed for line in lines)
 
     def require_timed(self) -> None:
         if not self.is_timed:
@@ -55,6 +76,16 @@ class LyricsDocument:
                     "text": line.text,
                     "translation": line.translation,
                     "pronunciation": line.pronunciation,
+                    "pronunciation_units": [
+                        {
+                            "source": unit.source,
+                            "reading": unit.reading,
+                            "start": unit.start,
+                            "end": unit.end,
+                        }
+                        for unit in line.pronunciation_units
+                    ],
+                    "hidden": line.hidden,
                     "start": line.start,
                     "end": line.end,
                     "tokens": [
@@ -95,6 +126,16 @@ class LyricsDocument:
                     tokens=tokens,
                     translation=line.translation,
                     pronunciation=line.pronunciation,
+                    pronunciation_units=[
+                        PronunciationSpan(
+                            source=unit.source,
+                            reading=unit.reading,
+                            start=unit.start,
+                            end=unit.end,
+                        )
+                        for unit in line.pronunciation_units
+                    ],
+                    hidden=line.hidden,
                 )
             )
         return LyricsDocument(
