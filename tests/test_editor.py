@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from karaoke_forge.ass import write_ass
 from karaoke_forge.editor import (
     LINE_STATUS_DELETED,
@@ -45,6 +47,41 @@ def test_editor_hides_and_deletes_complete_lyric_rows() -> None:
     restored = document_from_payload(edited.to_dict())
     assert restored.lines[0].hidden
     assert '"hidden": true' in write_json(restored)
+
+
+def test_token_delete_preserves_an_untouched_source_overlap() -> None:
+    document = parse_yrc(
+        "[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n"
+    )
+    entries = json.loads(token_timing_to_json(document.lines[0]))
+    entries.pop(0)
+
+    edited = apply_token_timing(
+        document,
+        document_to_editor_rows(document),
+        1,
+        json.dumps(entries),
+    )
+
+    assert edited.lines[0].text == ",B"
+    assert edited.lines[0].tokens[0].end == 2.01
+    assert edited.lines[0].tokens[1].start == 2.0
+
+
+def test_token_edit_still_rejects_a_new_overlap() -> None:
+    document = parse_yrc(
+        "[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n"
+    )
+    entries = json.loads(token_timing_to_json(document.lines[0]))
+    entries[-1]["start"] = 1.98
+
+    with pytest.raises(ValueError, match="时间发生重叠"):
+        apply_token_timing(
+            document,
+            document_to_editor_rows(document),
+            1,
+            json.dumps(entries),
+        )
 
 
 def test_editor_scales_existing_tokens_when_line_time_changes() -> None:

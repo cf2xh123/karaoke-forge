@@ -326,8 +326,28 @@ def apply_token_timing(
     if not isinstance(entries, list) or not entries:
         raise ValueError("当前行没有可保存的逐词时间。")
 
+    source_pairs = [
+        (left, right)
+        for left, right in pairwise(line.tokens)
+        if right.start < left.end - 0.001
+    ]
+
+    def was_existing_overlap(left: KaraokeToken, right: KaraokeToken) -> bool:
+        """Allow an untouched source overlap while still rejecting a new one."""
+
+        def same(submitted: KaraokeToken, source: KaraokeToken) -> bool:
+            return (
+                submitted.text == source.text
+                and abs(submitted.start - source.start) <= 1e-9
+                and abs(submitted.end - source.end) <= 1e-9
+            )
+
+        return any(
+            same(left, source_left) and same(right, source_right)
+            for source_left, source_right in source_pairs
+        )
+
     tokens: list[KaraokeToken] = []
-    previous_end: float | None = None
     for position, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
             raise TypeError(f"第 {position} 个词的时间数据无效。")
@@ -341,10 +361,14 @@ def apply_token_timing(
             raise ValueError(f"第 {position} 个词缺少有效开始/结束时间。") from exc
         if end <= start:
             raise ValueError(f"第 {position} 个词结束时间必须晚于开始时间。")
-        if previous_end is not None and start < previous_end - 0.001:
+        token = KaraokeToken(text=text, start=start, end=end)
+        if (
+            tokens
+            and start < tokens[-1].end - 0.001
+            and not was_existing_overlap(tokens[-1], token)
+        ):
             raise ValueError(f"第 {position} 个词与前一个词的时间发生重叠。")
-        tokens.append(KaraokeToken(text=text, start=start, end=end))
-        previous_end = end
+        tokens.append(token)
 
     old_text = line.text
     new_text = "".join(token.text for token in tokens)

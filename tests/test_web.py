@@ -14,11 +14,16 @@ from karaoke_forge.web import (
     TOKEN_TIMELINE_JS,
     _editor_clip_target,
     _editor_document_with_pending_changes,
+    _file_path,
+    _prepare_lyrics,
+    _record_web_error,
     _safe_stem,
     apply_editor_line_action,
     environment_markdown,
     export_editor_project,
+    exported_project_for_make,
     handoff_editor_to_make,
+    handoff_make_readiness,
     load_editor_project,
     prepare_make_editor_job,
     preview_editor_audio_line,
@@ -59,6 +64,52 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
 def test_safe_stem_removes_windows_path_characters() -> None:
     assert _safe_stem("  my:karaoke*video?.mp4  ") == "my-karaoke-video"
     assert _safe_stem("", fallback="song") == "song"
+
+
+def test_file_path_accepts_gradio_file_data_dict() -> None:
+    assert _file_path({"path": "C:/temp/lyrics.json"}) == Path("C:/temp/lyrics.json")
+
+
+def test_uploaded_lyrics_take_priority_over_stale_pasted_text(tmp_path: Path) -> None:
+    source = tmp_path / "edited.json"
+    source.write_text('{"version":1,"metadata":{},"lines":[]}', encoding="utf-8")
+
+    selected = _prepare_lyrics(str(source), "旧的粘贴歌词", tmp_path)
+
+    assert selected == source
+    assert not (tmp_path / "lyrics.txt").exists()
+
+
+def test_exported_json_is_selected_and_inspected_for_make(tmp_path: Path) -> None:
+    source = tmp_path / "edited.json"
+    source.write_text(
+        '{"version":1,"metadata":{"word_timing":"manual"},"lines":['
+        '{"text":"AB","start":1.0,"end":2.0,"tokens":['
+        '{"text":"A","start":1.0,"end":1.5},'
+        '{"text":"B","start":1.5,"end":2.0}]}]}',
+        encoding="utf-8",
+    )
+
+    selected, status = exported_project_for_make([str(tmp_path / "edited.ass"), str(source)])
+
+    assert selected == str(source)
+    assert "已载入 edited.json" in status
+    assert "1 行含逐词时间" in status
+
+
+def test_web_errors_are_written_to_a_persistent_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path))
+    try:
+        raise ValueError("example export failure")
+    except ValueError as exc:
+        target = _record_web_error("editor-export", exc)
+
+    assert target == tmp_path / "karaoke-forge-errors.log"
+    assert "editor-export" in target.read_text(encoding="utf-8")
+    assert "example export failure" in target.read_text(encoding="utf-8")
 
 
 def test_web_convert_job_exports_downloadable_file(
@@ -474,6 +525,30 @@ def test_web_editor_handoff_populates_make_inputs(
     assert make_audio == str(audio)
 
 
+def test_editor_handoff_waits_for_a_missing_mv_without_losing_project(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "confirmed.json"
+    project.write_text('{"version":1,"metadata":{},"lines":[]}', encoding="utf-8")
+
+    result = handoff_make_readiness(None, str(project))
+
+    assert result is not None
+    assert "校准歌词已载入制作页" in result.status
+    assert "请上传对应 MV" in result.status
+    assert "无需重复上传" in result.status
+    assert result.video is None
+
+
+def test_editor_handoff_is_ready_to_render_with_project_and_mv(tmp_path: Path) -> None:
+    project = tmp_path / "confirmed.json"
+    video = tmp_path / "mv.webm"
+    project.write_text('{"version":1,"metadata":{},"lines":[]}', encoding="utf-8")
+    video.write_bytes(b"video")
+
+    assert handoff_make_readiness(str(video), str(project)) is None
+
+
 def test_make_page_prepares_editor_without_reuploading_inputs(
     tmp_path: Path,
     monkeypatch,
@@ -734,6 +809,63 @@ def test_make_job_can_use_netease_page_lyrics_with_local_audio(
     assert result.video is not None
     assert "已生成" in result.status
     assert "仅从网易云读取" in result.log
+
+
+def test_make_job_prefers_an_uploaded_edited_project_over_stale_pasted_lyrics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    audio = tmp_path / "song.m4a"
+    video = tmp_path / "mv.webm"
+    project = tmp_path / "edited.json"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    project.write_text(
+        '{"version":1,"metadata":{"word_timing":"manual"},"lines":['
+        '{"text":"EDITED","start":1.0,"end":2.0,"tokens":['
+        '{"text":"EDITED","start":1.0,"end":2.0}]}]}',
+        encoding="utf-8",
+    )
+
+    def fake_make(_audio, _video, lyrics, output, assets, **_kwargs):
+        assert Path(lyrics) == project
+        assert "EDITED" in Path(lyrics).read_text(encoding="utf-8")
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "edited.json"
+        exported.write_text(project.read_text(encoding="utf-8"), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        str(video),
+        str(project),
+        "这是制作页以前残留的原歌词",
+        "edited-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+    )
+
+    assert result.video is not None
+    assert "已生成" in result.status
 
 
 def test_make_job_uses_mv_audio_without_downloading_netease_audio(

@@ -95,6 +95,10 @@ def test_generated_ass_round_trip_ignores_preview_and_pronunciation_events() -> 
     assert [line.text for line in restored.lines] == ["Hello world", "Next line"]
     assert restored.lines[0].translation == "你好，世界"
     assert restored.lines[0].pronunciation == "ハロー ワールド"
+    assert restored.metadata["word_timing"] == "source"
+    assert [token.text for token in restored.lines[0].tokens] == ["Hello ", "world"]
+    assert restored.lines[0].tokens[0].start == 1.0
+    assert restored.lines[0].tokens[1].start == 1.99
 
 
 def test_translation_uses_top_center_split_ktv_layout() -> None:

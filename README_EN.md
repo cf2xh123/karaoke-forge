@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> Version 0.5.0 keeps Demucs optional. On Windows, run
+> Version 0.7.0 keeps Demucs optional. On Windows, run
 > `安装人声分离（Demucs）.bat` and choose the recommended CPU build or the optional NVIDIA
 > build. The CUDA Torch download is about 1.9 GB.
 
@@ -26,7 +26,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.5.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.7.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 

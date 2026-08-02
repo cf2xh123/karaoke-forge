@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -64,6 +65,7 @@ _EDITOR_PREFETCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="karaoke-forge-prefetch",
 )
+_WEB_ERROR_LOG_LOCK = threading.Lock()
 
 WEB_CSS = """
 :root {
@@ -1907,6 +1909,10 @@ def _file_path(value: object | None) -> Path | None:
         return None
     if isinstance(value, (str, os.PathLike)):
         return Path(value)
+    if isinstance(value, dict):
+        candidate = value.get("path") or value.get("name")
+        if candidate:
+            return Path(candidate)
     for attribute in ("path", "name"):
         candidate = getattr(value, attribute, None)
         if candidate:
@@ -1935,19 +1941,75 @@ def _new_job_dir(kind: str, output_root: str | Path | None = None) -> Path:
     return directory.resolve()
 
 
+def _record_web_error(action: str, exc: BaseException) -> Path | None:
+    """Persist callback failures that Gradio would otherwise only show as a popup."""
+
+    try:
+        root = _default_output_root()
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / "karaoke-forge-errors.log"
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        with _WEB_ERROR_LOG_LOCK, target.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{timestamp}] {action}\n{details}\n")
+        return target
+    except OSError:
+        return None
+
+
 def _prepare_lyrics(
     lyrics_file: object | None,
     pasted_lyrics: str | None,
     job_dir: Path,
 ) -> Path:
+    source = _file_path(lyrics_file)
+    if source is not None and source.is_file():
+        return source
     if pasted_lyrics and pasted_lyrics.strip():
         target = job_dir / "lyrics.txt"
         target.write_text(pasted_lyrics.strip() + "\n", encoding="utf-8")
         return target
+    raise ValueError("请上传歌词文件，或在歌词框中直接粘贴歌词。")
+
+
+def inspect_make_lyrics(lyrics_file: object | None) -> str:
+    """Describe a selected subtitle/project without starting an expensive render."""
+
     source = _file_path(lyrics_file)
-    if source is None or not source.is_file():
-        raise ValueError("请上传歌词文件，或在歌词框中直接粘贴歌词。")
-    return source
+    if source is None:
+        return "尚未选择歌词文件。"
+    if not source.is_file():
+        return f"### ⚠️ 无法载入歌词\n找不到文件：{source}"
+    try:
+        document = read_lyrics(source)
+    except Exception as exc:
+        return f"### ⚠️ 无法载入歌词\n{exc}"
+    visible = document.visible_lines
+    timed_lines = sum(line.start is not None and line.end is not None for line in visible)
+    word_timed_lines = sum(bool(line.tokens) for line in visible)
+    if document.is_timed:
+        timing = f"{timed_lines} 行有时间轴，其中 {word_timed_lines} 行含逐词时间"
+        recommendation = (
+            "；这是可直接制作的 Karaoke Forge JSON 工程"
+            if source.suffix.lower() == ".json"
+            else "；可直接制作，若有同批 JSON 建议优先选择 JSON 以保留最多编辑信息"
+        )
+        return f"### ✅ 已载入 {source.name}\n共 {len(visible)} 行，{timing}{recommendation}。"
+    return (
+        f"### ✅ 已载入 {source.name}\n共 {len(visible)} 行，但尚无完整时间轴；"
+        "制作时会根据歌曲音频自动校准。"
+    )
+
+
+def exported_project_for_make(files: object) -> tuple[str | None, str]:
+    """Select the recoverable JSON from one editor export for the make page."""
+
+    values = files if isinstance(files, Sequence) and not isinstance(files, (str, bytes)) else [files]
+    for value in values:
+        path = _file_path(value)
+        if path is not None and path.suffix.lower() == ".json" and path.is_file():
+            return str(path), inspect_make_lyrics(path)
+    return None, "### ⚠️ 导出完成，但没有找到可交给制作页的 JSON 工程。"
 
 
 def _quality_settings(label: str) -> tuple[int, str]:
@@ -3476,6 +3538,39 @@ def export_editor_project(
     )
 
 
+def export_editor_project_for_web(
+    payload: dict[str, Any],
+    line_table: object,
+    line_number: int,
+    whole_line: str,
+    pronunciation_table: object,
+    output_name: str,
+    token_timing_json: str | None = None,
+) -> tuple[dict[str, Any], object, str, list[str], str]:
+    """Keep editor export errors visible in-page and persist their traceback."""
+
+    try:
+        return export_editor_project(
+            payload,
+            line_table,
+            line_number,
+            whole_line,
+            pronunciation_table,
+            output_name,
+            token_timing_json,
+        )
+    except Exception as exc:
+        log_path = _record_web_error("editor-export", exc)
+        log_note = f"\n\n详细记录：`{log_path}`" if log_path else ""
+        return (
+            payload,
+            line_table,
+            f"### ⚠️ 导出失败\n{exc}{log_note}",
+            [],
+            str(_default_output_root()),
+        )
+
+
 def handoff_editor_to_make(
     payload: dict[str, Any],
     line_table: object,
@@ -3520,6 +3615,43 @@ def handoff_editor_to_make(
         project,
         audio_value,
     )
+
+
+def handoff_make_readiness(
+    video_file: object | None,
+    lyrics_file: object | None,
+) -> UiJobResult | None:
+    """Return a user-facing stop result when an editor handoff cannot render yet."""
+
+    lyrics = _file_path(lyrics_file)
+    if lyrics is None or not lyrics.is_file():
+        return UiJobResult(
+            status=(
+                "### ⚠️ 校准歌词没有成功载入制作页\n"
+                "请重新点击“确认校准并开始制作 MV”；如果仍然失败，请查看页面上的错误详情。"
+            ),
+            video=None,
+            files=[],
+            log="编辑器交接完成后没有找到可供最终制作使用的歌词工程。",
+            output_dir=None,
+        )
+
+    video = _file_path(video_file)
+    if video is None or not video.is_file():
+        return UiJobResult(
+            status=(
+                "### ✅ 校准歌词已载入制作页\n"
+                f"已采用 `{lyrics.name}`，编辑结果不会丢失。\n\n"
+                "### 下一步：请上传对应 MV\n"
+                "选择 MV 后点击“生成卡拉 OK 视频”即可继续；校准音频和歌词无需重复上传。"
+            ),
+            video=None,
+            files=[],
+            log="已保留校准歌词和音频；制作页尚未选择 MV，因此没有启动最终渲染。",
+            output_dir=None,
+        )
+
+    return None
 
 
 def environment_markdown() -> str:
@@ -3621,6 +3753,7 @@ def create_web_app() -> object:
         editor_payload = gr.State({})
         editor_line_undo_payload = gr.State({})
         editor_output_directory = gr.State()
+        editor_handoff_ready = gr.State(False)
         gr.HTML(
             """
             <div class="kf-shell">
@@ -3660,10 +3793,14 @@ def create_web_app() -> object:
                                 type="filepath",
                             )
                             make_lyrics = gr.File(
-                                label="③ 歌词文件",
+                                label=(
+                                    "③ 已生成歌词/字幕项目"
+                                    "（推荐 JSON，也支持 ASS/LRC/SRT/VTT）"
+                                ),
                                 file_types=[".txt", ".lrc", ".srt", ".vtt", ".ass", ".json"],
                                 type="filepath",
                             )
+                        make_lyrics_status = gr.Markdown("尚未选择歌词文件。")
                         with gr.Accordion("没有歌词文件？直接粘贴歌词", open=False):
                             make_pasted = gr.Textbox(
                                 label="一行一句",
@@ -4177,12 +4314,12 @@ def create_web_app() -> object:
                                     value="编辑后的歌词",
                                 )
                                 editor_export = gr.Button(
-                                    "保存并导出全部格式",
+                                    "保存并导出全部格式（同时载入制作页）",
                                     variant="primary",
                                     elem_classes="kf-primary",
                                 )
                                 editor_handoff = gr.Button(
-                                    "确认校准，交给 MV 制作",
+                                    "确认校准并开始制作 MV",
                                     variant="primary",
                                     elem_classes="kf-primary",
                                 )
@@ -5715,8 +5852,8 @@ def create_web_app() -> object:
                 editor_auto_advance_event,
             ],
         )
-        editor_export.click(
-            export_editor_project,
+        editor_export_event = editor_export.click(
+            export_editor_project_for_web,
             inputs=[
                 editor_payload,
                 editor_lines,
@@ -5733,6 +5870,13 @@ def create_web_app() -> object:
                 editor_downloads,
                 editor_output_directory,
             ],
+            api_name="export_editor_project",
+        )
+        editor_export_event.then(
+            exported_project_for_make,
+            inputs=editor_downloads,
+            outputs=[make_lyrics, make_lyrics_status],
+            queue=False,
         )
 
         def handoff_editor_wrapper(
@@ -5745,29 +5889,45 @@ def create_web_app() -> object:
             audio_file: object | None,
             token_timing_json: str,
         ) -> tuple[object, ...]:
-            timed_document, _snapshot = _editor_document_with_pending_changes(
-                payload,
-                line_table,
-                int(line_number),
-                token_timing_json,
-                whole_line,
-                pronunciation_table,
-            )
-            timed_payload = timed_document.to_dict()
-            timed_rows = document_to_editor_rows(timed_document)
-            timed_line = timed_document.lines[int(line_number) - 1]
-            result = handoff_editor_to_make(
-                timed_payload,
-                timed_rows,
-                line_number,
-                timed_line.pronunciation or "",
-                pronunciation_to_editor_rows(timed_line),
-                output_name,
-                audio_file,
-            )
-            return (*result, gr.update(selected="make"))
+            try:
+                timed_document, _snapshot = _editor_document_with_pending_changes(
+                    payload,
+                    line_table,
+                    int(line_number),
+                    token_timing_json,
+                    whole_line,
+                    pronunciation_table,
+                )
+                timed_payload = timed_document.to_dict()
+                timed_rows = document_to_editor_rows(timed_document)
+                selected = min(max(1, int(line_number)), len(timed_document.lines))
+                timed_line = timed_document.lines[selected - 1]
+                result = handoff_editor_to_make(
+                    timed_payload,
+                    timed_rows,
+                    selected,
+                    timed_line.pronunciation or "",
+                    pronunciation_to_editor_rows(timed_line),
+                    output_name,
+                    audio_file,
+                )
+                return (*result, gr.update(selected="make"), True)
+            except Exception as exc:
+                log_path = _record_web_error("editor-handoff", exc)
+                log_note = f"\n\n详细记录：`{log_path}`" if log_path else ""
+                return (
+                    payload,
+                    line_table,
+                    f"### ⚠️ 无法交给制作页\n{exc}{log_note}",
+                    [],
+                    str(_default_output_root()),
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    False,
+                )
 
-        editor_handoff.click(
+        editor_handoff_event = editor_handoff.click(
             handoff_editor_wrapper,
             inputs=[
                 editor_payload,
@@ -5788,7 +5948,135 @@ def create_web_app() -> object:
                 make_lyrics,
                 make_audio,
                 main_tabs,
+                editor_handoff_ready,
             ],
+        )
+
+        def make_after_editor_handoff(
+            handoff_ready: bool,
+            audio: object,
+            video: object,
+            lyrics: object,
+            pasted: str,
+            name: str,
+            language: str,
+            model: str,
+            device: str,
+            separate: bool,
+            quality: str,
+            offset: float,
+            font: str,
+            font_size: int,
+            text_color: str,
+            highlight_color: str,
+            margin: int,
+            netease_link: str,
+            use_netease_lyrics: bool,
+            rights_confirmed: bool,
+            cookie_browser: str,
+            cookie_browser_profile: str,
+            auto_sync: bool,
+            timing_refinement: str,
+            show_translation: bool,
+            translation_font_size: float,
+            translation_color: str,
+            show_pronunciation: bool,
+            pronunciation_font_size: float,
+            pronunciation_color: str,
+            output_root: str,
+            progress: object = gr.Progress(),
+        ) -> tuple[object, ...]:
+            if not handoff_ready:
+                return tuple(gr.skip() for _ in range(5))
+
+            stop_result = handoff_make_readiness(video, lyrics)
+            if stop_result is not None:
+                progress(1.0, desc="等待上传 MV")
+                return (
+                    stop_result.status,
+                    stop_result.video,
+                    stop_result.files,
+                    stop_result.log,
+                    stop_result.output_dir,
+                )
+
+            return make_wrapper(
+                audio,
+                video,
+                lyrics,
+                pasted,
+                name,
+                language,
+                model,
+                device,
+                separate,
+                quality,
+                offset,
+                font,
+                font_size,
+                text_color,
+                highlight_color,
+                margin,
+                netease_link,
+                use_netease_lyrics,
+                rights_confirmed,
+                cookie_browser,
+                cookie_browser_profile,
+                auto_sync,
+                timing_refinement,
+                show_translation,
+                translation_font_size,
+                translation_color,
+                show_pronunciation,
+                pronunciation_font_size,
+                pronunciation_color,
+                output_root,
+                progress=progress,
+            )
+
+        editor_handoff_event.then(
+            make_after_editor_handoff,
+            inputs=[
+                editor_handoff_ready,
+                make_audio,
+                make_video,
+                make_lyrics,
+                make_pasted,
+                make_name,
+                make_language,
+                make_model,
+                make_device,
+                make_separate,
+                make_quality,
+                make_offset,
+                make_font,
+                make_font_size,
+                make_text_color,
+                make_highlight_color,
+                make_margin,
+                make_netease_link,
+                make_use_netease_lyrics,
+                make_rights,
+                make_cookie_browser,
+                make_cookie_profile,
+                make_auto_sync,
+                make_timing_refinement,
+                make_show_translation,
+                make_translation_size,
+                make_translation_color,
+                make_show_pronunciation,
+                make_pronunciation_size,
+                make_pronunciation_color,
+                make_output_root,
+            ],
+            outputs=[
+                make_status,
+                make_preview,
+                make_downloads,
+                make_log,
+                make_output_directory,
+            ],
+            show_progress="full",
         )
 
         def convert_wrapper(
@@ -5802,6 +6090,12 @@ def create_web_app() -> object:
             convert_wrapper,
             inputs=[convert_source, convert_format],
             outputs=[convert_status, convert_download, convert_log],
+        )
+        make_lyrics.change(
+            inspect_make_lyrics,
+            inputs=make_lyrics,
+            outputs=make_lyrics_status,
+            queue=False,
         )
         refresh_environment.click(
             environment_markdown,
