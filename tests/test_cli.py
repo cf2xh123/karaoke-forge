@@ -57,6 +57,19 @@ def test_align_make_and_netease_share_timing_refinement_choices() -> None:
     assert netease.timing_refinement == "off"
 
 
+def test_qqmusic_command_accepts_single_song_links() -> None:
+    args = build_parser().parse_args(
+        [
+            "qqmusic",
+            "https://y.qq.com/n/ryqq_v2/songDetail/001gQnW91BEDaN",
+            "--i-have-rights",
+        ]
+    )
+
+    assert args.command == "qqmusic"
+    assert args.i_have_rights
+
+
 def test_align_off_preserves_timed_lyrics_without_whisper(tmp_path: Path) -> None:
     audio = tmp_path / "song.wav"
     lyrics = tmp_path / "lyrics.lrc"

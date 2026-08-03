@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .align import AlignmentReport, align_document, refine_timed_document
+from .align import AlignmentError, AlignmentReport, align_document, refine_timed_document
 from .formats import read_lyrics
 from .media import separate_vocals
 from .models import LyricsDocument
@@ -48,6 +48,7 @@ class AlignOptions:
     minimum_coverage: float = 0.2
     separate_vocals: bool = False
     demucs_model: str = "htdemucs"
+    recover_low_coverage: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class AlignResult:
     report: AlignmentReport
     transcription: TranscriptionResult
     alignment_audio: Path
+    recovered: bool = False
 
 
 def _build_initial_prompt(lyrics_path: Path, lyrics: LyricsDocument) -> str:
@@ -106,16 +108,25 @@ def align_audio_and_lyrics(
         lyrics,
         transcription.words,
         minimum_coverage=options.minimum_coverage,
+        allow_low_coverage=options.recover_low_coverage,
     )
+    recovered = report.coverage < options.minimum_coverage
     if transcription.detected_language:
         document.metadata.setdefault("language", transcription.detected_language)
     document.metadata["generator"] = "Karaoke Forge"
     document.metadata["alignment_model"] = options.model
+    document.metadata["alignment_coverage"] = f"{report.coverage:.6f}"
+    if recovered:
+        document.metadata["alignment_status"] = "low_coverage_recovery"
+        document.metadata["unmatched_lyric_lines"] = ",".join(
+            str(index + 1) for index in report.unmatched_line_indexes
+        )
     return AlignResult(
         document=document,
         report=report,
         transcription=transcription,
         alignment_audio=Path(alignment_audio),
+        recovered=recovered,
     )
 
 
@@ -222,9 +233,9 @@ def refine_audio_word_timing_with_fallback(
                 normalized_mode == "force" and lyrics.metadata.get("word_timing") != "synthetic"
             ),
         )
-    except TranscriptionError as exc:
+    except (AlignmentError, TranscriptionError) as exc:
         if normalized_mode != "auto":
             raise
         if progress:
-            progress(f"自动逐字时间精修暂不可用，已保留原时间轴并继续：{exc}")
+            progress(f"自动逐字时间精修覆盖率不足或暂不可用，已保留原时间轴并继续：{exc}")
         return None

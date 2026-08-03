@@ -30,6 +30,7 @@ class AlignmentReport:
     exact_units: int
     coverage: float
     mean_similarity: float
+    unmatched_line_indexes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -207,11 +208,42 @@ def _interpolate_timings(
     return [value for value in values if value is not None]
 
 
+def _uniform_fallback_timings(
+    count: int,
+    recognized: list[_RecognizedUnit],
+) -> list[tuple[float, float, float | None]]:
+    """Spread unmatched lyrics across the detected singing span for manual recovery."""
+
+    if count <= 0:
+        return []
+    first_start = max(0.0, recognized[0].start)
+    detected_end = max(unit.end for unit in recognized)
+    end = max(detected_end, first_start + count * 0.08)
+    step = (end - first_start) / count
+    return [
+        (first_start + index * step, first_start + (index + 1) * step, None)
+        for index in range(count)
+    ]
+
+
+def _unmatched_line_indexes(
+    lyrics: LyricsDocument,
+    target: list[_TargetUnit],
+    mapping: dict[int, tuple[int, float]],
+) -> tuple[int, ...]:
+    alignable = {unit.line_index for unit in target}
+    matched = {target[index].line_index for index in mapping}
+    return tuple(
+        index for index, _line in enumerate(lyrics.lines) if index in alignable - matched
+    )
+
+
 def align_document(
     lyrics: LyricsDocument,
     recognized_words: list[RecognizedWord],
     *,
     minimum_coverage: float = 0.2,
+    allow_low_coverage: bool = False,
 ) -> tuple[LyricsDocument, AlignmentReport]:
     """Force-align the user's exact lyrics to timestamped ASR words."""
 
@@ -224,13 +256,17 @@ def align_document(
 
     mapping, exact = _sequence_alignment(target, recognized)
     coverage = len(mapping) / len(target)
-    if coverage < minimum_coverage:
+    if coverage < minimum_coverage and not allow_low_coverage:
         raise AlignmentError(
             f"Alignment coverage is only {coverage:.1%}; expected at least "
             f"{minimum_coverage:.1%}. Check the lyrics, language, or use vocal separation."
         )
 
-    timings = _interpolate_timings(len(target), mapping, recognized)
+    timings = (
+        _interpolate_timings(len(target), mapping, recognized)
+        if mapping
+        else _uniform_fallback_timings(len(target), recognized)
+    )
     line_tokens: list[list[KaraokeToken]] = [[] for _ in lyrics.lines]
     similarities: list[float] = []
     for index, (target_unit, timing) in enumerate(zip(target, timings)):
@@ -286,6 +322,7 @@ def align_document(
         exact_units=exact,
         coverage=coverage,
         mean_similarity=sum(similarities) / len(similarities) if similarities else 0.0,
+        unmatched_line_indexes=_unmatched_line_indexes(lyrics, target, mapping),
     )
     return (
         LyricsDocument(

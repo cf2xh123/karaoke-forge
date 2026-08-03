@@ -54,6 +54,7 @@ from .pipeline import (
     should_refine_timing,
 )
 from .pronunciation import generate_pronunciation
+from .qqmusic import QQMusicSongInfo, fetch_public_qqmusic_info
 from .runtime import inspect_demucs_runtime
 from .workflows import MakeOptions, make_karaoke_video
 
@@ -2066,6 +2067,26 @@ def _lyrics_with_translation(
     return target
 
 
+def _lyrics_with_qqmusic_source(
+    lyrics_path: Path,
+    info: QQMusicSongInfo,
+    job_dir: Path,
+) -> Path:
+    document = read_lyrics(lyrics_path)
+    document.metadata.update(
+        {
+            "source": "QQ Music",
+            "source_url": info.canonical_url,
+            "source_id": info.song_mid,
+            "ti": info.title,
+            "ar": info.artist_text,
+        }
+    )
+    target = job_dir / "lyrics-qqmusic.json"
+    target.write_text(write_format(document, "json"), encoding="utf-8")
+    return target
+
+
 def subtitle_preview_html(
     font: str,
     font_size: float,
@@ -2183,6 +2204,8 @@ def _build_align_options(
     model: str,
     device: str,
     separate_vocals: bool,
+    *,
+    recover_low_coverage: bool = False,
 ) -> AlignOptions:
     return AlignOptions(
         model=model,
@@ -2190,6 +2213,7 @@ def _build_align_options(
         device=device,
         compute_type="int8" if device == "cpu" else "default",
         separate_vocals=separate_vocals,
+        recover_low_coverage=recover_low_coverage,
     )
 
 
@@ -2197,6 +2221,40 @@ def _web_timing_refinement(value: str | bool | None) -> str:
     if isinstance(value, bool):
         return "auto" if value else "off"
     return normalize_timing_refinement(value)
+
+
+def _low_coverage_summary(
+    result: object,
+    source: LyricsDocument,
+    *,
+    model: str,
+    separate_vocals: bool,
+) -> str:
+    report = result.report  # type: ignore[attr-defined]
+    transcription = result.transcription  # type: ignore[attr-defined]
+    language = transcription.detected_language or "未识别"
+    probability = transcription.language_probability
+    language_detail = (
+        f"{language}（置信度 {probability:.0%}）" if probability is not None else language
+    )
+    unmatched: list[str] = []
+    for index in report.unmatched_line_indexes[:10]:
+        if 0 <= index < len(source.lines):
+            text = source.lines[index].text.strip() or "（空白行）"
+            unmatched.append(f"- 第 {index + 1} 行：{text[:80]}")
+    remaining = len(report.unmatched_line_indexes) - len(unmatched)
+    if remaining > 0:
+        unmatched.append(f"- 另有 {remaining} 行未匹配，请在歌词总览中检查。")
+    unmatched_text = "\n".join(unmatched) if unmatched else "- 没有定位到具体未匹配行。"
+    vocal_state = "已开启" if separate_vocals else "未开启"
+    return (
+        f"⚠️ 匹配覆盖率只有 **{report.coverage:.1%}**，低于安全阈值；"
+        "已保留歌词并生成可编辑的保底时间轴，没有终止任务。\n\n"
+        f"识别语言：**{language_detail}**；模型：**{model}**；人声分离：**{vocal_state}**。\n\n"
+        f"未匹配歌词：\n{unmatched_text}\n\n"
+        "建议先确认歌词与音频版本和语言；仍不理想时可开启人声分离，"
+        "或改用 medium / large-v3 模型后重试。"
+    )
 
 
 def _materialize_auto_pronunciation(document: LyricsDocument) -> int:
@@ -2239,6 +2297,8 @@ def prepare_make_editor_job(
     rights_confirmed: bool = False,
     timing_refinement: str | bool = "auto",
     output_root: str = "",
+    qqmusic_link: str = "",
+    use_qqmusic_lyrics: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2283,21 +2343,41 @@ def prepare_make_editor_job(
             report("已沿用制作页上传的音频和 MV，无需重复上传")
 
         netease_info = None
+        qqmusic_info = None
         link = (netease_link or "").strip()
+        qq_link = (qqmusic_link or "").strip()
+        if link and qq_link:
+            raise ValueError("网易云和 QQ 音乐链接一次只能填写一个，请保留本次要使用的来源。")
         if link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
             netease_info = fetch_public_netease_info(link)
             report("仅从网易云读取公开歌曲信息、歌词和翻译，不下载音频")
+        elif qq_link:
+            if not rights_confirmed:
+                raise PermissionError("请勾选版权与使用权确认后再使用 QQ 音乐链接。")
+            qqmusic_info = fetch_public_qqmusic_info(qq_link)
+            report("仅从 QQ 音乐读取公开歌曲信息、行级 LRC 和翻译，不下载音频")
+
+        translated_lyrics = (
+            netease_info.translated_lyrics
+            if netease_info is not None
+            else qqmusic_info.translated_lyrics if qqmusic_info is not None else None
+        )
+        reference_lyrics = (
+            netease_info.page_lyrics
+            if netease_info is not None
+            else qqmusic_info.page_lyrics if qqmusic_info is not None else None
+        )
 
         if lyrics_file is not None or (pasted_lyrics and pasted_lyrics.strip()):
             lyrics_path = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
-            if netease_info is not None:
+            if netease_info is not None or qqmusic_info is not None:
                 lyrics_path = _lyrics_with_translation(
                     lyrics_path,
-                    netease_info.translated_lyrics,
+                    translated_lyrics,
                     job_dir,
-                    netease_info.page_lyrics,
+                    reference_lyrics,
                 )
         elif (
             link
@@ -2321,9 +2401,30 @@ def prepare_make_editor_job(
             )
             if netease_info.translated_lyrics and lyrics_path.suffix == ".json":
                 report("已附加网易云中文翻译")
+        elif (
+            qq_link
+            and use_qqmusic_lyrics
+            and qqmusic_info is not None
+            and qqmusic_info.page_lyrics
+        ):
+            lyrics_path = job_dir / "qqmusic-lyrics.lrc"
+            lyrics_path.write_text(qqmusic_info.page_lyrics, encoding="utf-8")
+            report("已使用 QQ 音乐公开的行级 LRC 时间轴")
+            lyrics_path = _lyrics_with_translation(
+                lyrics_path,
+                qqmusic_info.translated_lyrics,
+                job_dir,
+                qqmusic_info.page_lyrics,
+            )
+            if qqmusic_info.translated_lyrics and lyrics_path.suffix == ".json":
+                report("已附加 QQ 音乐翻译")
         else:
-            raise ValueError("请上传/粘贴歌词，或填写网易云链接并勾选使用公开歌词。")
+            raise ValueError(
+                "请上传/粘贴歌词，或填写网易云/QQ 音乐链接并勾选使用公开歌词。"
+            )
 
+        if qqmusic_info is not None:
+            lyrics_path = _lyrics_with_qqmusic_source(lyrics_path, qqmusic_info, job_dir)
         source = read_lyrics(lyrics_path)
         if source.is_timed:
             timing_mode = _web_timing_refinement(timing_refinement)
@@ -2356,23 +2457,42 @@ def prepare_make_editor_job(
             aligned = align_audio_and_lyrics(
                 audio,
                 lyrics_path,
-                options=_build_align_options(language, model, device, separate_vocals),
+                options=_build_align_options(
+                    language,
+                    model,
+                    device,
+                    separate_vocals,
+                    recover_low_coverage=True,
+                ),
                 work_dir=job_dir / ".work",
                 progress=report,
             )
             document = aligned.document
-            timing_summary = (
-                f"已按上传音频生成时间轴，匹配覆盖率 **{aligned.report.coverage:.1%}**。"
-            )
+            if aligned.recovered:
+                timing_summary = _low_coverage_summary(
+                    aligned,
+                    source,
+                    model=model,
+                    separate_vocals=separate_vocals,
+                )
+                report(
+                    f"匹配覆盖率 {aligned.report.coverage:.1%}，"
+                    "已生成可恢复的保底校准工程"
+                )
+            else:
+                timing_summary = (
+                    f"已按上传音频生成时间轴，匹配覆盖率 **{aligned.report.coverage:.1%}**。"
+                )
 
         generated_count = _materialize_auto_pronunciation(document)
         report(f"已为 {generated_count} 行歌词生成可编辑注音")
         document.require_timed()
-        fallback_stem = (
-            f"{netease_info.title}-校准工程"
+        source_title = (
+            netease_info.title
             if netease_info is not None
-            else f"{video.stem}-校准工程"
+            else qqmusic_info.title if qqmusic_info is not None else video.stem
         )
+        fallback_stem = f"{source_title}-校准工程"
         stem = _safe_stem(output_name, fallback=fallback_stem)
         exports = export_formats(
             document,
@@ -2454,6 +2574,8 @@ def run_make_job(
     pronunciation_font_size: float = 26,
     pronunciation_color: str = "#FFFFFF",
     output_root: str = "",
+    qqmusic_link: str = "",
+    use_qqmusic_lyrics: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2483,7 +2605,11 @@ def run_make_job(
 
         job_dir = _new_job_dir("mv", output_root.strip() or None)
         netease_info = None
+        qqmusic_info = None
         link = (netease_link or "").strip()
+        qq_link = (qqmusic_link or "").strip()
+        if link and qq_link:
+            raise ValueError("网易云和 QQ 音乐链接一次只能填写一个，请保留本次要使用的来源。")
         if link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
@@ -2519,31 +2645,56 @@ def run_make_job(
                     report("已使用 MV 内嵌完整音轨，仅从网易云读取公开歌曲信息和歌词")
                 else:
                     report("已使用本地音频，仅从网易云读取公开歌曲信息和歌词")
+        elif qq_link:
+            if not rights_confirmed:
+                raise PermissionError("请勾选版权与使用权确认后再使用 QQ 音乐链接。")
+            qqmusic_info = fetch_public_qqmusic_info(qq_link)
+            if audio is not None and audio.resolve() == video.resolve():
+                report("已使用 MV 内嵌完整音轨，仅从 QQ 音乐读取公开歌词")
+            elif audio is not None:
+                report("已使用本地音频，仅从 QQ 音乐读取公开歌词")
+            else:
+                report("QQ 音乐链接只提供公开歌词，不下载歌曲音频")
 
         if audio is None or not audio.is_file():
             if video_audio_state is False:
                 raise ValueError(
                     "未上传独立歌曲音频，而且该 MV 不含可用音轨；"
-                    "请上传歌曲音频，或提供可公开播放的网易云单曲链接。"
+                    "请上传歌曲音频，或提供可公开播放的网易云单曲链接；"
+                    "QQ 音乐链接只用于读取歌词。"
                 )
             if video_audio_state is None:
                 raise ValueError(
                     "无法检测该 MV 是否含音轨；请确认 FFmpeg/FFprobe 可用，或上传歌曲音频。"
                 )
-            raise ValueError("请上传歌曲音频，或提供可公开播放的网易云单曲链接。")
+            raise ValueError(
+                "请上传歌曲音频，或提供可公开播放的网易云单曲链接；"
+                "QQ 音乐链接只用于读取歌词。"
+            )
         if audio.suffix.lower() == ".ncm":
             raise ValueError(
                 "不支持转换或解密 NCM 文件；请上传官方允许导出的 MP3、FLAC、WAV 或 M4A。"
             )
 
+        translated_lyrics = (
+            netease_info.translated_lyrics
+            if netease_info is not None
+            else qqmusic_info.translated_lyrics if qqmusic_info is not None else None
+        )
+        reference_lyrics = (
+            netease_info.page_lyrics
+            if netease_info is not None
+            else qqmusic_info.page_lyrics if qqmusic_info is not None else None
+        )
+
         if lyrics_file is not None or (pasted_lyrics and pasted_lyrics.strip()):
             lyrics = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
-            if netease_info is not None:
+            if netease_info is not None or qqmusic_info is not None:
                 lyrics = _lyrics_with_translation(
                     lyrics,
-                    netease_info.translated_lyrics,
+                    translated_lyrics,
                     job_dir,
-                    netease_info.page_lyrics,
+                    reference_lyrics,
                 )
         elif (
             link
@@ -2567,12 +2718,35 @@ def run_make_job(
             report(f"已使用网易云页面公开歌词和{timing_detail}")
             if netease_info.translated_lyrics and lyrics.suffix == ".json":
                 report("已附加网易云中文翻译，将固定显示在画面顶部")
+        elif (
+            qq_link
+            and use_qqmusic_lyrics
+            and qqmusic_info is not None
+            and qqmusic_info.page_lyrics
+        ):
+            lyrics = job_dir / "qqmusic-lyrics.lrc"
+            lyrics.write_text(qqmusic_info.page_lyrics, encoding="utf-8")
+            lyrics = _lyrics_with_translation(
+                lyrics,
+                qqmusic_info.translated_lyrics,
+                job_dir,
+                qqmusic_info.page_lyrics,
+            )
+            report("已使用 QQ 音乐页面公开歌词和行级时间轴")
+            if qqmusic_info.translated_lyrics and lyrics.suffix == ".json":
+                report("已附加 QQ 音乐翻译，将固定显示在画面顶部")
         else:
-            raise ValueError("请提供歌词，或勾选使用网易云页面公开歌词。")
+            raise ValueError("请提供歌词，或勾选使用网易云/QQ 音乐页面公开歌词。")
 
-        fallback_stem = (
-            f"{netease_info.title}-karaoke" if netease_info is not None else f"{video.stem}-karaoke"
+        if qqmusic_info is not None:
+            lyrics = _lyrics_with_qqmusic_source(lyrics, qqmusic_info, job_dir)
+
+        source_title = (
+            netease_info.title
+            if netease_info is not None
+            else qqmusic_info.title if qqmusic_info is not None else video.stem
         )
+        fallback_stem = f"{source_title}-karaoke"
         stem = _safe_stem(output_name, fallback=fallback_stem)
         output = job_dir / f"{stem}.mp4"
         assets = job_dir / f"{stem}.assets"
@@ -2851,6 +3025,64 @@ def run_netease_align_job(
             [],
             "\n".join(logs),
             str(job_dir) if job_dir else None,
+        )
+
+
+def run_qqmusic_job(
+    qqmusic_link: str,
+    output_name: str,
+    rights_confirmed: bool,
+    output_root: str = "",
+) -> UiJobResult:
+    job_dir: Path | None = None
+    logs: list[str] = []
+    try:
+        if not rights_confirmed:
+            raise PermissionError("请先确认你有权使用和处理对应歌词。")
+        link = (qqmusic_link or "").strip()
+        if not link:
+            raise ValueError("请粘贴 QQ 音乐单曲链接或完整分享文字。")
+        job_dir = _new_job_dir("qqmusic", output_root.strip() or None)
+        info = fetch_public_qqmusic_info(link)
+        logs.append("已读取 QQ 音乐公开的歌曲信息和行级 LRC；没有请求歌曲音频")
+        lyrics = job_dir / "qqmusic-lyrics.lrc"
+        lyrics.write_text(info.page_lyrics, encoding="utf-8")
+        lyrics = _lyrics_with_translation(
+            lyrics,
+            info.translated_lyrics,
+            job_dir,
+            info.page_lyrics,
+        )
+        lyrics = _lyrics_with_qqmusic_source(lyrics, info, job_dir)
+        document = read_lyrics(lyrics)
+        document.require_timed()
+        stem = _safe_stem(output_name, fallback=info.title)
+        exports = export_formats(
+            document,
+            job_dir,
+            stem,
+            ["lrc", "elrc", "srt", "vtt", "ass", "json"],
+        )
+        translation_detail = "，并附加公开翻译" if info.translated_lyrics else ""
+        return UiJobResult(
+            status=(
+                "### ✅ QQ 音乐歌词已生成\n"
+                f"**{info.title}** — {info.artist_text}{translation_detail}。"
+                "可下载后直接载入歌词编辑器，或用于制作 MV。"
+            ),
+            video=None,
+            files=[str(path) for path in exports.values()],
+            log="\n".join(logs),
+            output_dir=str(job_dir),
+        )
+    except Exception as exc:
+        logs.append(f"失败：{exc}")
+        return UiJobResult(
+            status=f"### ⚠️ QQ 音乐歌词读取失败\n{exc}",
+            video=None,
+            files=[],
+            log="\n".join(logs),
+            output_dir=str(job_dir) if job_dir else None,
         )
 
 
@@ -3750,6 +3982,7 @@ def create_web_app() -> object:
         make_output_directory = gr.State()
         align_output_directory = gr.State()
         netease_output_directory = gr.State()
+        qqmusic_output_directory = gr.State()
         editor_payload = gr.State({})
         editor_line_undo_payload = gr.State({})
         editor_output_directory = gr.State()
@@ -3807,7 +4040,35 @@ def create_web_app() -> object:
                                 lines=8,
                                 placeholder="第一句歌词\n第二句歌词\n第三句歌词",
                             )
-                        with gr.Accordion("使用网易云链接补充音频或歌词", open=False):
+                        with gr.Accordion("使用在线歌词来源（Vmoe / QQ 音乐 / 网易云）", open=False):
+                            gr.HTML(
+                                """
+                                <div class="kf-tip">
+                                  <b>Vmoe 卡拉 OK 字幕库</b>提供带逐字特效的 ASS。因官方接口要求
+                                  reCAPTCHA，请在下方官方页面由本人完成搜索和验证，下载 ASS 后
+                                  上传到上面的“③ 已生成歌词/字幕项目”；程序不会绕过验证码。
+                                  <div style="margin-top:10px">
+                                    <a href="https://karaoke.vmoe.info/" target="_blank"
+                                       rel="noopener noreferrer">在新窗口打开 Vmoe 歌词搜索</a>
+                                  </div>
+                                  <details style="margin-top:10px">
+                                    <summary style="cursor:pointer;font-weight:700">在这里展开 Vmoe 官方搜索页</summary>
+                                    <iframe src="https://karaoke.vmoe.info/" title="Vmoe 卡拉 OK 搜索"
+                                      style="width:100%;height:620px;border:1px solid #e3ded2;border-radius:12px;margin-top:8px">
+                                    </iframe>
+                                  </details>
+                                </div>
+                                """
+                            )
+                            make_qqmusic_link = gr.Textbox(
+                                label="QQ 音乐单曲链接（只读取公开歌词，不下载音频）",
+                                placeholder="https://y.qq.com/n/ryqq_v2/songDetail/...",
+                            )
+                            make_use_qqmusic_lyrics = gr.Checkbox(
+                                label="没有上传歌词时，使用 QQ 音乐公开 LRC",
+                                value=True,
+                            )
+                            gr.Markdown("---\n**网易云（可选音频与歌词）**")
                             make_netease_link = gr.Textbox(
                                 label="网易云单曲链接",
                                 placeholder="https://music.163.com/song?id=...",
@@ -3833,7 +4094,10 @@ def create_web_app() -> object:
                                 value=True,
                             )
                             make_rights = gr.Checkbox(
-                                label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
+                                label=(
+                                    "我确认歌曲和歌词归我合法使用，且不会绕过地区、版权、"
+                                    "验证码或 DRM 限制"
+                                ),
                                 value=False,
                             )
                             gr.Markdown(
@@ -4239,6 +4503,51 @@ def create_web_app() -> object:
                     open_netease_dir = gr.Button("在电脑中打开输出文件夹")
                     open_netease_message = gr.Markdown()
 
+            with gr.Tab("QQ 音乐生成歌词", id="qqmusic"), gr.Row(equal_height=False):
+                with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
+                    gr.HTML('<div class="kf-section-label">QQ Music Lyrics</div>')
+                    gr.Markdown("## 从 QQ 音乐单曲链接生成时间轴歌词")
+                    qqmusic_link = gr.Textbox(
+                        label="QQ 音乐单曲链接",
+                        placeholder=(
+                            "可粘贴完整分享文字，或 "
+                            "https://y.qq.com/n/ryqq_v2/songDetail/..."
+                        ),
+                    )
+                    qqmusic_name = gr.Textbox(label="输出名称", value="QQ音乐歌词时间轴")
+                    qqmusic_rights = gr.Checkbox(
+                        label="我确认有权使用和处理对应歌曲与歌词",
+                        value=False,
+                    )
+                    with gr.Accordion("高级设置", open=False):
+                        qqmusic_output_root = gr.Textbox(
+                            label="输出目录",
+                            value=str(_default_output_root()),
+                        )
+                    gr.Markdown(
+                        "> 此入口只读取 QQ 音乐网页公开的歌曲信息、行级 LRC 和可用翻译，"
+                        "不请求音频、不读取账号或 Cookie。普通 LRC 可在制作页结合本地音频"
+                        "进一步精修为逐字时间。"
+                    )
+                    qqmusic_button = gr.Button(
+                        "读取公开歌词并导出",
+                        variant="primary",
+                        elem_classes="kf-primary",
+                    )
+                with gr.Column(scale=5), gr.Group(elem_classes="kf-card"):
+                    qqmusic_status = gr.Markdown("### 等待 QQ 音乐单曲链接")
+                    qqmusic_downloads = gr.File(
+                        label="下载时间轴歌词",
+                        file_count="multiple",
+                    )
+                    qqmusic_log = gr.Textbox(
+                        label="处理记录",
+                        lines=10,
+                        interactive=False,
+                    )
+                    open_qqmusic_dir = gr.Button("在电脑中打开输出文件夹")
+                    open_qqmusic_message = gr.Markdown()
+
             with gr.Tab("歌词与注音编辑", id="editor"):
                 with gr.Column(elem_id="editor-workspace"):
                     with gr.Row(elem_id="editor-topbar"):
@@ -4568,6 +4877,8 @@ def create_web_app() -> object:
             pronunciation_font_size: float,
             pronunciation_color: str,
             output_root: str,
+            qqmusic_link: str,
+            use_qqmusic_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -4604,6 +4915,8 @@ def create_web_app() -> object:
                 pronunciation_font_size,
                 pronunciation_color,
                 output_root,
+                qqmusic_link,
+                use_qqmusic_lyrics,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -4630,6 +4943,8 @@ def create_web_app() -> object:
             rights_confirmed: bool,
             timing_refinement: str,
             output_root: str,
+            qqmusic_link: str,
+            use_qqmusic_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
@@ -4650,6 +4965,8 @@ def create_web_app() -> object:
                 rights_confirmed,
                 timing_refinement,
                 output_root,
+                qqmusic_link,
+                use_qqmusic_lyrics,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -4698,6 +5015,8 @@ def create_web_app() -> object:
                 make_rights,
                 make_timing_refinement,
                 make_output_root,
+                make_qqmusic_link,
+                make_use_qqmusic_lyrics,
             ],
             outputs=[
                 editor_payload,
@@ -4754,6 +5073,8 @@ def create_web_app() -> object:
                 make_pronunciation_size,
                 make_pronunciation_color,
                 make_output_root,
+                make_qqmusic_link,
+                make_use_qqmusic_lyrics,
             ],
             outputs=[
                 make_status,
@@ -4901,6 +5222,30 @@ def create_web_app() -> object:
                 netease_downloads,
                 netease_log,
                 netease_output_directory,
+            ],
+            show_progress="full",
+        )
+
+        def qqmusic_wrapper(
+            link: str,
+            name: str,
+            rights_confirmed: bool,
+            output_root: str,
+            progress: object = gr.Progress(),
+        ) -> tuple[str, list[str], str, str | None]:
+            progress((0, None), desc="正在读取 QQ 音乐公开歌词")
+            result = run_qqmusic_job(link, name, rights_confirmed, output_root)
+            progress(1.0, desc="完成" if result.files else "未完成")
+            return result.status, result.files, result.log, result.output_dir
+
+        qqmusic_button.click(
+            qqmusic_wrapper,
+            inputs=[qqmusic_link, qqmusic_name, qqmusic_rights, qqmusic_output_root],
+            outputs=[
+                qqmusic_status,
+                qqmusic_downloads,
+                qqmusic_log,
+                qqmusic_output_directory,
             ],
             show_progress="full",
         )
@@ -5984,6 +6329,8 @@ def create_web_app() -> object:
             pronunciation_font_size: float,
             pronunciation_color: str,
             output_root: str,
+            qqmusic_link: str,
+            use_qqmusic_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             if not handoff_ready:
@@ -6031,6 +6378,8 @@ def create_web_app() -> object:
                 pronunciation_font_size,
                 pronunciation_color,
                 output_root,
+                qqmusic_link,
+                use_qqmusic_lyrics,
                 progress=progress,
             )
 
@@ -6068,6 +6417,8 @@ def create_web_app() -> object:
                 make_pronunciation_size,
                 make_pronunciation_color,
                 make_output_root,
+                make_qqmusic_link,
+                make_use_qqmusic_lyrics,
             ],
             outputs=[
                 make_status,
@@ -6118,6 +6469,12 @@ def create_web_app() -> object:
             _open_output_directory,
             inputs=netease_output_directory,
             outputs=open_netease_message,
+            queue=False,
+        )
+        open_qqmusic_dir.click(
+            _open_output_directory,
+            inputs=qqmusic_output_directory,
+            outputs=open_qqmusic_message,
             queue=False,
         )
         open_editor_dir.click(

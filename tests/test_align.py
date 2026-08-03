@@ -41,6 +41,32 @@ def test_alignment_interpolates_a_missing_word() -> None:
     assert 1.0 < starts[1] < 2.0
 
 
+def test_low_coverage_recovery_builds_an_editable_fallback_timeline() -> None:
+    lyrics = parse_plain("completely different\nsecond lyric line")
+    recognized = [
+        RecognizedWord("无法匹配", 2.0, 3.0, 0.8),
+        RecognizedWord("另一种语言", 5.0, 6.0, 0.8),
+    ]
+
+    document, report = align_document(
+        lyrics,
+        recognized,
+        minimum_coverage=0.2,
+        allow_low_coverage=True,
+    )
+
+    assert report.coverage == 0.0
+    assert report.unmatched_line_indexes == (0, 1)
+    assert document.is_timed
+    assert [line.text for line in document.lines] == [
+        "completely different",
+        "second lyric line",
+    ]
+    assert document.lines[0].start == 2.0
+    assert document.lines[-1].end is not None
+    assert document.lines[-1].end >= 6.0
+
+
 def test_refinement_preserves_line_boundaries_but_follows_singing_speed() -> None:
     lyrics = parse_lrc("[00:01.00]one two three\n[00:03.00]last line\n")
     original_start = lyrics.lines[0].start
