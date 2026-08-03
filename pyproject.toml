@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "karaoke-forge"
-version = "0.9.0"
+version = "0.9.1"
 description = "Turn a song, its lyrics, and an MV into a timed karaoke video."
 readme = "README.md"
 requires-python = ">=3.10"

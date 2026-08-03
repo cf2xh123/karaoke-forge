@@ -176,6 +176,12 @@ def main() -> int:
         26,
         "#FFFFFF",
         str(Path.cwd() / ".smoke" / "web-session-render"),
+        "",
+        True,
+        "",
+        True,
+        False,
+        True,
     )
     waiting = client.predict(*make_args, api_name="/make_after_editor_handoff")
     if "校准歌词已载入制作页" not in waiting[0] or "请上传对应 MV" not in waiting[0]:

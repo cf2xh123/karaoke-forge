@@ -137,15 +137,19 @@ def japanese_pronunciation(
     return PronunciationLine(tuple(units)) if units else None
 
 
-def generate_pronunciation(text: str) -> PronunciationLine | None:
-    """Generate Japanese furigana or English katakana for a lyric line."""
+def generate_pronunciation(
+    text: str,
+    *,
+    include_english: bool = True,
+) -> PronunciationLine | None:
+    """Generate Japanese furigana and, when enabled, English katakana."""
 
     value = text.strip()
     if not value or _METADATA_RE.match(value):
         return None
     if _KANA_RE.search(value) and _KANJI_RE.search(value):
         return japanese_pronunciation(value)
-    if _ENGLISH_WORD_RE.search(value):
+    if include_english and _ENGLISH_WORD_RE.search(value):
         return english_pronunciation(value)
     return None
 

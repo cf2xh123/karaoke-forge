@@ -575,7 +575,7 @@ def test_make_page_prepares_editor_without_reuploading_inputs(
     )
     monkeypatch.setattr(
         "karaoke_forge.web.generate_pronunciation",
-        lambda text: (
+        lambda text, **_kwargs: (
             PronunciationLine(
                 (PronunciationUnit(source="Hello", reading="ハロー", start=0, end=5),)
             )
@@ -693,7 +693,10 @@ def test_make_page_returns_low_coverage_project_with_actionable_details(
             ),
         ),
     )
-    monkeypatch.setattr("karaoke_forge.web._materialize_auto_pronunciation", lambda _doc: 0)
+    monkeypatch.setattr(
+        "karaoke_forge.web._materialize_auto_pronunciation",
+        lambda _doc, **_kwargs: 0,
+    )
 
     result = prepare_make_editor_job(
         str(audio),
@@ -774,7 +777,7 @@ def test_subtitle_preview_reflects_translation_pronunciation_and_style(
 ) -> None:
     monkeypatch.setattr(
         "karaoke_forge.web.generate_pronunciation",
-        lambda text: PronunciationLine(
+        lambda text, **_kwargs: PronunciationLine(
             (PronunciationUnit(source=text, reading="サンプル"),),
         ),
     )
@@ -1018,6 +1021,163 @@ def test_make_job_can_import_utaten_lyrics_and_furigana(
     assert result.video is not None
     assert "UtaTen" in result.log
     assert "2 行公开歌词和假名" in result.log
+
+
+def test_make_job_can_use_only_utaten_pronunciation_with_uploaded_lyrics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from karaoke_forge.utaten import UtaTenLyricsInfo, UtaTenPronunciationUnit
+
+    audio = tmp_path / "authorized.flac"
+    video = tmp_path / "mv.mp4"
+    project = tmp_path / "own-lyrics.json"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    own_document = LyricsDocument(
+        lines=[
+            LyricLine(
+                "[Intro]",
+                0.0,
+                1.0,
+                [KaraokeToken("[Intro]", 0.0, 1.0)],
+                pronunciation="イントロ",
+            ),
+            LyricLine(
+                "迷い。",
+                1.25,
+                2.75,
+                [KaraokeToken("迷い。", 1.25, 2.75)],
+                pronunciation="めい",
+            ),
+            LyricLine(
+                "Wake  up!",
+                3.0,
+                4.5,
+                [KaraokeToken("Wake  up!", 3.0, 4.5)],
+                pronunciation="ウェイクアップ（誤）",
+            ),
+        ],
+        metadata={"source": "My edited lyrics", "word_timing": "manual"},
+        source_format="json",
+    )
+    project.write_text(
+        json.dumps(own_document.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    info = UtaTenLyricsInfo(
+        lyric_id="example",
+        title="Official title",
+        artist="Official artist",
+        canonical_url="https://utaten.com/lyric/example/",
+        lyrics=("迷い", "Wake up"),
+        readings=("まよい", "ウェイク up"),
+        pronunciation_units=(
+            (UtaTenPronunciationUnit("迷", "まよ", 0, 1),),
+            (UtaTenPronunciationUnit("Wake", "ウェイク", 0, 4),),
+        ),
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.fetch_public_utaten_info",
+        lambda _link: info,
+    )
+
+    def fake_make(_audio, _video, lyrics, output, assets, *, options, **_kwargs):
+        payload = json.loads(Path(lyrics).read_text(encoding="utf-8"))
+        assert payload["metadata"]["source"] == "My edited lyrics"
+        assert payload["metadata"]["auto_pronunciation"] == "false"
+        assert [line["text"] for line in payload["lines"]] == [
+            "[Intro]",
+            "迷い。",
+            "Wake  up!",
+        ]
+        assert [line["start"] for line in payload["lines"]] == [0.0, 1.25, 3.0]
+        assert payload["lines"][0]["pronunciation"] is None
+        assert payload["lines"][0]["pronunciation_units"] == []
+        assert payload["lines"][1]["pronunciation"] is None
+        assert payload["lines"][1]["pronunciation_units"] == [
+            {"source": "迷", "reading": "まよ", "start": 0, "end": 1}
+        ]
+        assert payload["lines"][2]["pronunciation_units"] == [
+            {"source": "Wake", "reading": "ウェイク", "start": 0, "end": 4}
+        ]
+        assert not options.style.auto_pronunciation
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True, exist_ok=True)
+        exported = assets / "lyrics.json"
+        exported.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        str(video),
+        str(project),
+        "",
+        "official-readings-only",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        rights_confirmed=True,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        utaten_link=info.canonical_url,
+        use_utaten_lyrics=False,
+        utaten_pronunciation_only=True,
+    )
+
+    assert result.video is not None
+    assert "仅采用官方注音" in result.log
+    assert "匹配 2/3 行" in result.log
+    assert "未匹配文字保持原样" in result.log
+
+
+def test_editor_preparation_can_disable_automatic_english_pronunciation(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    lyrics.write_text("[00:01.00]I you\n", encoding="utf-8")
+
+    result = prepare_make_editor_job(
+        str(audio),
+        str(video),
+        str(lyrics),
+        "",
+        "no-english-reading",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        auto_english_pronunciation=False,
+    )
+
+    assert result.project is not None
+    assert result.payload["metadata"]["auto_english_pronunciation"] == "false"
+    assert result.payload["lines"][0]["pronunciation"] is None
+    assert result.payload["lines"][0]["pronunciation_units"] == []
+    assert result.pronunciation_rows == []
+    assert "英语片假名自动注音已关闭" in result.status
 
 
 def test_make_job_prefers_an_uploaded_edited_project_over_stale_pasted_lyrics(

@@ -83,6 +83,23 @@ def test_utaten_command_accepts_lyric_page_links() -> None:
     assert args.i_have_rights
 
 
+def test_make_command_can_disable_only_automatic_english_pronunciation() -> None:
+    args = build_parser().parse_args(
+        [
+            "make",
+            "song.mp3",
+            "mv.mp4",
+            "lyrics.lrc",
+            "-o",
+            "out.mp4",
+            "--no-auto-english-pronunciation",
+        ]
+    )
+
+    assert not args.auto_english_pronunciation
+    assert args.show_pronunciation
+
+
 def test_align_off_preserves_timed_lyrics_without_whisper(tmp_path: Path) -> None:
     audio = tmp_path / "song.wav"
     lyrics = tmp_path / "lyrics.lrc"

@@ -55,6 +55,7 @@ def _style_from_args(args: argparse.Namespace) -> AssStyle:
         translation_font_size=args.translation_font_size,
         translation_color=args.translation_color,
         show_pronunciation=args.show_pronunciation,
+        auto_english_pronunciation=args.auto_english_pronunciation,
         pronunciation_font_size=args.pronunciation_font_size,
         pronunciation_color=args.pronunciation_color,
     )
@@ -81,6 +82,12 @@ def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="show Japanese furigana and English katakana readings above lyric rows",
+    )
+    group.add_argument(
+        "--auto-english-pronunciation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="automatically generate katakana readings for English words",
     )
     group.add_argument("--pronunciation-font-size", type=int, default=26)
     group.add_argument("--pronunciation-color", default="#FFFFFF")

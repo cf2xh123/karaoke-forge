@@ -191,15 +191,25 @@ def apply_editor_rows(
     )
 
 
-def pronunciation_to_editor_rows(line: LyricLine) -> list[list[object]]:
+def pronunciation_to_editor_rows(
+    line: LyricLine,
+    *,
+    auto_pronunciation: bool = True,
+    auto_english_pronunciation: bool = True,
+) -> list[list[object]]:
     units: Iterable[object]
     if line.pronunciation_units:
         units = line.pronunciation_units
     elif line.pronunciation:
         units = ()
-    else:
-        generated = generate_pronunciation(line.text)
+    elif auto_pronunciation:
+        generated = generate_pronunciation(
+            line.text,
+            include_english=auto_english_pronunciation,
+        )
         units = generated.units if generated else ()
+    else:
+        units = ()
     return [
         [unit.source, unit.reading, unit.start, unit.end]
         for unit in units
@@ -331,7 +341,6 @@ def apply_token_timing(
         for left, right in pairwise(line.tokens)
         if right.start < left.end - 0.001
     ]
-
     def was_existing_overlap(left: KaraokeToken, right: KaraokeToken) -> bool:
         """Allow an untouched source overlap while still rejecting a new one."""
 
@@ -381,6 +390,39 @@ def apply_token_timing(
     return result
 
 
+def _metadata_boolean(
+    document: LyricsDocument,
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    value = str(document.metadata.get(key, "")).strip().lower()
+    if not value:
+        return default
+    return value not in {"0", "false", "no", "off"}
+
+
+def document_pronunciation_to_editor_rows(
+    document: LyricsDocument,
+    line: LyricLine,
+) -> list[list[object]]:
+    """Respect the pronunciation policy persisted with an editor project."""
+
+    return pronunciation_to_editor_rows(
+        line,
+        auto_pronunciation=_metadata_boolean(
+            document,
+            "auto_pronunciation",
+            default=True,
+        ),
+        auto_english_pronunciation=_metadata_boolean(
+            document,
+            "auto_english_pronunciation",
+            default=True,
+        ),
+    )
+
+
 def nudge_editor_line_timing(
     document: LyricsDocument,
     table: object,
@@ -406,8 +448,17 @@ def nudge_editor_line_timing(
     return apply_editor_rows(current, rows)
 
 
-def _line_ruby_html(line: LyricLine) -> str:
-    units = pronunciation_to_editor_rows(line)
+def _line_ruby_html(
+    line: LyricLine,
+    *,
+    auto_pronunciation: bool,
+    auto_english_pronunciation: bool,
+) -> str:
+    units = pronunciation_to_editor_rows(
+        line,
+        auto_pronunciation=auto_pronunciation,
+        auto_english_pronunciation=auto_english_pronunciation,
+    )
     if not units and line.pronunciation:
         units = [[line.text, line.pronunciation, 0, len(line.text)]]
     parts: list[str] = []
@@ -515,6 +566,24 @@ def editor_preview_html(document: LyricsDocument, line_number: int) -> str:
     if index < 0 or index >= len(document.lines):
         return '<div class="kf-tip">请选择有效的歌词行号。</div>'
     line = document.lines[index]
+    auto_pronunciation = _metadata_boolean(
+        document,
+        "auto_pronunciation",
+        default=True,
+    )
+    auto_english_pronunciation = _metadata_boolean(
+        document,
+        "auto_english_pronunciation",
+        default=True,
+    )
+
+    def ruby_html(value: LyricLine) -> str:
+        return _line_ruby_html(
+            value,
+            auto_pronunciation=auto_pronunciation,
+            auto_english_pronunciation=auto_english_pronunciation,
+        )
+
     state = "暂时隐藏" if line.hidden else "显示"
     translation = (
         f'<div class="kf-editor-preview-translation">{html.escape(line.translation)}</div>'
@@ -532,20 +601,20 @@ def editor_preview_html(document: LyricsDocument, line_number: int) -> str:
         else None
     )
     if line.hidden:
-        active = f'<div style="color:#94a3b8">{_line_ruby_html(line)}</div>'
+        active = f'<div style="color:#94a3b8">{ruby_html(line)}</div>'
     else:
         active = (
             '<div class="kf-live-karaoke-current" '
             f'data-line-start="{line.start or 0.0:.3f}" '
             f'data-line-end="{line.end or 0.01:.3f}" '
             'style="position:relative;display:inline-block;color:white;">'
-            f'<div class="kf-live-karaoke-base">{_line_ruby_html(line)}</div>'
+            f'<div class="kf-live-karaoke-base">{ruby_html(line)}</div>'
             '<div class="kf-live-karaoke-fill" '
             'style="position:absolute;inset:0;color:#ffd54a;'
             'clip-path:inset(0 100% 0 0);">'
-            f"{_line_ruby_html(line)}</div></div>"
+            f"{ruby_html(line)}</div></div>"
         )
-    upcoming = f'<div style="color:white">{_line_ruby_html(following)}</div>' if following else ""
+    upcoming = f'<div style="color:white">{ruby_html(following)}</div>' if following else ""
     if visible_index is not None and visible_index % 2:
         upper, lower = upcoming, active
     else:
