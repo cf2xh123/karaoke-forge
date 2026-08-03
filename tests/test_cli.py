@@ -70,6 +70,19 @@ def test_qqmusic_command_accepts_single_song_links() -> None:
     assert args.i_have_rights
 
 
+def test_utaten_command_accepts_lyric_page_links() -> None:
+    args = build_parser().parse_args(
+        [
+            "utaten",
+            "https://utaten.com/lyric/yh15042710/",
+            "--i-have-rights",
+        ]
+    )
+
+    assert args.command == "utaten"
+    assert args.i_have_rights
+
+
 def test_align_off_preserves_timed_lyrics_without_whisper(tmp_path: Path) -> None:
     audio = tmp_path / "song.wav"
     lyrics = tmp_path / "lyrics.lrc"
