@@ -56,6 +56,7 @@ from .pipeline import (
 from .pronunciation import generate_pronunciation
 from .qqmusic import QQMusicSongInfo, fetch_public_qqmusic_info
 from .runtime import inspect_demucs_runtime
+from .utaten import UtaTenLyricsInfo, fetch_public_utaten_info
 from .workflows import MakeOptions, make_karaoke_video
 
 _EDITOR_CLIP_LOCKS_GUARD = threading.Lock()
@@ -2087,6 +2088,33 @@ def _lyrics_with_qqmusic_source(
     return target
 
 
+def _lyrics_with_utaten_source(
+    lyrics_path: Path,
+    info: UtaTenLyricsInfo,
+    job_dir: Path,
+) -> Path:
+    document = read_lyrics(lyrics_path)
+    for index, line in enumerate(document.lines):
+        if index >= len(info.lyrics) or line.text.strip() != info.lyrics[index].strip():
+            continue
+        reading = info.readings[index] if index < len(info.readings) else ""
+        if reading and reading != line.text:
+            line.pronunciation = reading
+    document.metadata.update(
+        {
+            "source": "UtaTen",
+            "source_url": info.canonical_url,
+            "source_id": info.lyric_id,
+            "ti": info.title,
+            "ar": info.artist,
+        }
+    )
+    document.source_format = "utaten"
+    target = job_dir / "lyrics-utaten.json"
+    target.write_text(write_format(document, "json"), encoding="utf-8")
+    return target
+
+
 def subtitle_preview_html(
     font: str,
     font_size: float,
@@ -2299,6 +2327,8 @@ def prepare_make_editor_job(
     output_root: str = "",
     qqmusic_link: str = "",
     use_qqmusic_lyrics: bool = True,
+    utaten_link: str = "",
+    use_utaten_lyrics: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2344,10 +2374,12 @@ def prepare_make_editor_job(
 
         netease_info = None
         qqmusic_info = None
+        utaten_info = None
         link = (netease_link or "").strip()
         qq_link = (qqmusic_link or "").strip()
-        if link and qq_link:
-            raise ValueError("网易云和 QQ 音乐链接一次只能填写一个，请保留本次要使用的来源。")
+        uta_link = (utaten_link or "").strip()
+        if sum(bool(value) for value in (link, qq_link, uta_link)) > 1:
+            raise ValueError("网易云、QQ 音乐和 UtaTen 链接一次只能填写一个。")
         if link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
@@ -2358,6 +2390,11 @@ def prepare_make_editor_job(
                 raise PermissionError("请勾选版权与使用权确认后再使用 QQ 音乐链接。")
             qqmusic_info = fetch_public_qqmusic_info(qq_link)
             report("仅从 QQ 音乐读取公开歌曲信息、行级 LRC 和翻译，不下载音频")
+        elif uta_link:
+            if not rights_confirmed:
+                raise PermissionError("请勾选版权与使用权确认后再使用 UtaTen 歌词链接。")
+            utaten_info = fetch_public_utaten_info(uta_link)
+            report("已从 UtaTen 读取公开歌词和页面假名，不下载音频")
 
         translated_lyrics = (
             netease_info.translated_lyrics
@@ -2418,13 +2455,19 @@ def prepare_make_editor_job(
             )
             if qqmusic_info.translated_lyrics and lyrics_path.suffix == ".json":
                 report("已附加 QQ 音乐翻译")
+        elif uta_link and use_utaten_lyrics and utaten_info is not None:
+            lyrics_path = job_dir / "utaten-lyrics.txt"
+            lyrics_path.write_text(utaten_info.plain_lyrics, encoding="utf-8")
+            report(f"已导入 UtaTen 的 {len(utaten_info.lyrics)} 行公开歌词和假名")
         else:
             raise ValueError(
-                "请上传/粘贴歌词，或填写网易云/QQ 音乐链接并勾选使用公开歌词。"
+                "请上传/粘贴歌词，或填写网易云/QQ 音乐/UtaTen 链接并勾选使用公开歌词。"
             )
 
         if qqmusic_info is not None:
             lyrics_path = _lyrics_with_qqmusic_source(lyrics_path, qqmusic_info, job_dir)
+        if utaten_info is not None:
+            lyrics_path = _lyrics_with_utaten_source(lyrics_path, utaten_info, job_dir)
         source = read_lyrics(lyrics_path)
         if source.is_timed:
             timing_mode = _web_timing_refinement(timing_refinement)
@@ -2490,7 +2533,11 @@ def prepare_make_editor_job(
         source_title = (
             netease_info.title
             if netease_info is not None
-            else qqmusic_info.title if qqmusic_info is not None else video.stem
+            else qqmusic_info.title
+            if qqmusic_info is not None
+            else utaten_info.title
+            if utaten_info is not None
+            else video.stem
         )
         fallback_stem = f"{source_title}-校准工程"
         stem = _safe_stem(output_name, fallback=fallback_stem)
@@ -2576,6 +2623,8 @@ def run_make_job(
     output_root: str = "",
     qqmusic_link: str = "",
     use_qqmusic_lyrics: bool = True,
+    utaten_link: str = "",
+    use_utaten_lyrics: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2606,10 +2655,12 @@ def run_make_job(
         job_dir = _new_job_dir("mv", output_root.strip() or None)
         netease_info = None
         qqmusic_info = None
+        utaten_info = None
         link = (netease_link or "").strip()
         qq_link = (qqmusic_link or "").strip()
-        if link and qq_link:
-            raise ValueError("网易云和 QQ 音乐链接一次只能填写一个，请保留本次要使用的来源。")
+        uta_link = (utaten_link or "").strip()
+        if sum(bool(value) for value in (link, qq_link, uta_link)) > 1:
+            raise ValueError("网易云、QQ 音乐和 UtaTen 链接一次只能填写一个。")
         if link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
@@ -2655,13 +2706,23 @@ def run_make_job(
                 report("已使用本地音频，仅从 QQ 音乐读取公开歌词")
             else:
                 report("QQ 音乐链接只提供公开歌词，不下载歌曲音频")
+        elif uta_link:
+            if not rights_confirmed:
+                raise PermissionError("请勾选版权与使用权确认后再使用 UtaTen 歌词链接。")
+            utaten_info = fetch_public_utaten_info(uta_link)
+            if audio is not None and audio.resolve() == video.resolve():
+                report("已使用 MV 内嵌完整音轨，仅从 UtaTen 读取公开歌词和假名")
+            elif audio is not None:
+                report("已使用本地音频，仅从 UtaTen 读取公开歌词和假名")
+            else:
+                report("UtaTen 链接只提供公开歌词和假名，不下载歌曲音频")
 
         if audio is None or not audio.is_file():
             if video_audio_state is False:
                 raise ValueError(
                     "未上传独立歌曲音频，而且该 MV 不含可用音轨；"
                     "请上传歌曲音频，或提供可公开播放的网易云单曲链接；"
-                    "QQ 音乐链接只用于读取歌词。"
+                    "QQ 音乐和 UtaTen 链接只用于读取歌词。"
                 )
             if video_audio_state is None:
                 raise ValueError(
@@ -2669,7 +2730,7 @@ def run_make_job(
                 )
             raise ValueError(
                 "请上传歌曲音频，或提供可公开播放的网易云单曲链接；"
-                "QQ 音乐链接只用于读取歌词。"
+                "QQ 音乐和 UtaTen 链接只用于读取歌词。"
             )
         if audio.suffix.lower() == ".ncm":
             raise ValueError(
@@ -2735,16 +2796,26 @@ def run_make_job(
             report("已使用 QQ 音乐页面公开歌词和行级时间轴")
             if qqmusic_info.translated_lyrics and lyrics.suffix == ".json":
                 report("已附加 QQ 音乐翻译，将固定显示在画面顶部")
+        elif uta_link and use_utaten_lyrics and utaten_info is not None:
+            lyrics = job_dir / "utaten-lyrics.txt"
+            lyrics.write_text(utaten_info.plain_lyrics, encoding="utf-8")
+            report(f"已导入 UtaTen 的 {len(utaten_info.lyrics)} 行公开歌词和假名")
         else:
-            raise ValueError("请提供歌词，或勾选使用网易云/QQ 音乐页面公开歌词。")
+            raise ValueError("请提供歌词，或勾选使用网易云/QQ 音乐/UtaTen 页面公开歌词。")
 
         if qqmusic_info is not None:
             lyrics = _lyrics_with_qqmusic_source(lyrics, qqmusic_info, job_dir)
+        if utaten_info is not None:
+            lyrics = _lyrics_with_utaten_source(lyrics, utaten_info, job_dir)
 
         source_title = (
             netease_info.title
             if netease_info is not None
-            else qqmusic_info.title if qqmusic_info is not None else video.stem
+            else qqmusic_info.title
+            if qqmusic_info is not None
+            else utaten_info.title
+            if utaten_info is not None
+            else video.stem
         )
         fallback_stem = f"{source_title}-karaoke"
         stem = _safe_stem(output_name, fallback=fallback_stem)
@@ -4040,7 +4111,10 @@ def create_web_app() -> object:
                                 lines=8,
                                 placeholder="第一句歌词\n第二句歌词\n第三句歌词",
                             )
-                        with gr.Accordion("使用在线歌词来源（Vmoe / QQ 音乐 / 网易云）", open=False):
+                        with gr.Accordion(
+                            "使用在线歌词来源（Vmoe / UtaTen / QQ 音乐 / 网易云）",
+                            open=False,
+                        ):
                             gr.HTML(
                                 """
                                 <div class="kf-tip">
@@ -4060,6 +4134,15 @@ def create_web_app() -> object:
                                 </div>
                                 """
                             )
+                            make_utaten_link = gr.Textbox(
+                                label="UtaTen 歌词页链接（读取歌词和页面假名）",
+                                placeholder="https://utaten.com/lyric/yh15042710/",
+                            )
+                            make_use_utaten_lyrics = gr.Checkbox(
+                                label="没有上传歌词时，直接导入 UtaTen 公开歌词和假名",
+                                value=True,
+                            )
+                            gr.Markdown("---\n**QQ 音乐（公开行级 LRC 与翻译）**")
                             make_qqmusic_link = gr.Textbox(
                                 label="QQ 音乐单曲链接（只读取公开歌词，不下载音频）",
                                 placeholder="https://y.qq.com/n/ryqq_v2/songDetail/...",
@@ -4879,6 +4962,8 @@ def create_web_app() -> object:
             output_root: str,
             qqmusic_link: str,
             use_qqmusic_lyrics: bool,
+            utaten_link: str,
+            use_utaten_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -4917,6 +5002,8 @@ def create_web_app() -> object:
                 output_root,
                 qqmusic_link,
                 use_qqmusic_lyrics,
+                utaten_link,
+                use_utaten_lyrics,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -4945,6 +5032,8 @@ def create_web_app() -> object:
             output_root: str,
             qqmusic_link: str,
             use_qqmusic_lyrics: bool,
+            utaten_link: str,
+            use_utaten_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
@@ -4967,6 +5056,8 @@ def create_web_app() -> object:
                 output_root,
                 qqmusic_link,
                 use_qqmusic_lyrics,
+                utaten_link,
+                use_utaten_lyrics,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5017,6 +5108,8 @@ def create_web_app() -> object:
                 make_output_root,
                 make_qqmusic_link,
                 make_use_qqmusic_lyrics,
+                make_utaten_link,
+                make_use_utaten_lyrics,
             ],
             outputs=[
                 editor_payload,
@@ -5075,6 +5168,8 @@ def create_web_app() -> object:
                 make_output_root,
                 make_qqmusic_link,
                 make_use_qqmusic_lyrics,
+                make_utaten_link,
+                make_use_utaten_lyrics,
             ],
             outputs=[
                 make_status,
@@ -6331,6 +6426,8 @@ def create_web_app() -> object:
             output_root: str,
             qqmusic_link: str,
             use_qqmusic_lyrics: bool,
+            utaten_link: str,
+            use_utaten_lyrics: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             if not handoff_ready:
@@ -6380,6 +6477,8 @@ def create_web_app() -> object:
                 output_root,
                 qqmusic_link,
                 use_qqmusic_lyrics,
+                utaten_link,
+                use_utaten_lyrics,
                 progress=progress,
             )
 
@@ -6419,6 +6518,8 @@ def create_web_app() -> object:
                 make_output_root,
                 make_qqmusic_link,
                 make_use_qqmusic_lyrics,
+                make_utaten_link,
+                make_use_utaten_lyrics,
             ],
             outputs=[
                 make_status,

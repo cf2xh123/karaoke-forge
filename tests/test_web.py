@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -946,6 +947,77 @@ def test_make_job_can_use_qqmusic_page_lyrics_with_local_audio(
 
     assert result.video is not None
     assert "仅从 QQ 音乐读取公开歌词" in result.log
+
+
+def test_make_job_can_import_utaten_lyrics_and_furigana(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from karaoke_forge.utaten import UtaTenLyricsInfo
+
+    audio = tmp_path / "authorized.flac"
+    video = tmp_path / "mv.mp4"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    info = UtaTenLyricsInfo(
+        lyric_id="yh15042710",
+        title="Example Song",
+        artist="Example Artist",
+        canonical_url="https://utaten.com/lyric/yh15042710/",
+        lyrics=("迷い", "Wake up"),
+        readings=("まよい", "ウェイク up"),
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.fetch_public_utaten_info",
+        lambda _link: info,
+    )
+
+    def fake_make(_audio, _video, lyrics, output, assets, **_kwargs):
+        payload = json.loads(Path(lyrics).read_text(encoding="utf-8"))
+        assert payload["metadata"]["source"] == "UtaTen"
+        assert payload["metadata"]["source_id"] == "yh15042710"
+        assert payload["lines"][0]["text"] == "迷い"
+        assert payload["lines"][0]["pronunciation"] == "まよい"
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True, exist_ok=True)
+        exported = assets / "lyrics.json"
+        exported.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        str(video),
+        None,
+        "",
+        "utaten-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        rights_confirmed=True,
+        output_root=str(tmp_path / "outputs"),
+        utaten_link=info.canonical_url,
+        use_utaten_lyrics=True,
+    )
+
+    assert result.video is not None
+    assert "UtaTen" in result.log
+    assert "2 行公开歌词和假名" in result.log
 
 
 def test_make_job_prefers_an_uploaded_edited_project_over_stale_pasted_lyrics(

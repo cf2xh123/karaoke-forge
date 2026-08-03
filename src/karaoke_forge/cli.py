@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import shutil
 import sys
 import tempfile
@@ -287,6 +288,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_style_arguments(qqmusic)
     qqmusic.set_defaults(handler=_handle_qqmusic)
+
+    utaten = subparsers.add_parser(
+        "utaten",
+        help="import public plain lyrics and furigana from an UtaTen lyric page",
+    )
+    utaten.add_argument("url", help="UtaTen lyric URL or shared text")
+    utaten.add_argument("-o", "--output-dir", type=Path, default=Path("build/utaten"))
+    utaten.add_argument("--name", help="output basename")
+    utaten.add_argument(
+        "--i-have-rights",
+        action="store_true",
+        required=True,
+        help="confirm that you have the right to use and process the lyrics",
+    )
+    utaten.set_defaults(handler=_handle_utaten)
     return parser
 
 
@@ -562,6 +578,25 @@ def _handle_qqmusic(args: argparse.Namespace) -> int:
     )
     print(f"Track: {info.title} — {info.artist_text}")
     _print_exports(exports)
+    return 0
+
+
+def _handle_utaten(args: argparse.Namespace) -> int:
+    from .utaten import build_utaten_document, fetch_public_utaten_info
+
+    info = fetch_public_utaten_info(args.url)
+    document = build_utaten_document(info)
+    fallback = f"utaten-{info.lyric_id}"
+    basename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", args.name or info.title).strip(" .")
+    basename = basename or fallback
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    plain_path = args.output_dir / f"{basename}.txt"
+    project_path = args.output_dir / f"{basename}.json"
+    plain_path.write_text(info.plain_lyrics, encoding="utf-8")
+    project_path.write_text(write_format(document, "json"), encoding="utf-8")
+    print(f"Track: {info.title} — {info.artist}")
+    print(f"  txt  {plain_path.resolve()}")
+    print(f" json  {project_path.resolve()}")
     return 0
 
 

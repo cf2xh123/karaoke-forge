@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.8.0 adds Vmoe ASS and QQ Music lyric sources, plus recoverable editor
-> projects when automatic lyric matching has low coverage.
+> Version 0.9.0 adds direct UtaTen lyric-page imports with per-line furigana while
+> retaining the Vmoe, QQ Music, and recoverable editor workflows from 0.8.0.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -16,7 +16,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
-- Use Vmoe karaoke ASS or public QQ Music/NetEase lyrics, and refine line timing from audio;
+- Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;
 - Add Japanese furigana and English katakana readings above the corresponding lyric row;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
@@ -25,7 +25,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.8.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.9.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -73,6 +73,17 @@ project JSON without requesting audio, accounts, cookies, or passwords:
 karaoke-forge qqmusic \
   "https://y.qq.com/n/ryqq_v2/songDetail/001gQnW91BEDaN" \
   --i-have-rights -o build/qqmusic
+```
+
+The Make page also accepts an `https://utaten.com/lyric/.../` URL. Karaoke Forge imports
+the publicly rendered lyric text and keeps UtaTen's per-line furigana as pronunciation
+metadata instead of mixing it into the source lyric. The equivalent CLI command exports
+plain text and project JSON; UtaTen does not provide timing, so audio alignment still runs:
+
+```bash
+karaoke-forge utaten \
+  "https://utaten.com/lyric/yh15042710/" \
+  --i-have-rights -o build/utaten
 ```
 
 The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or project JSON.
