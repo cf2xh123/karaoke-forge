@@ -1,8 +1,7 @@
 # Karaoke Forge
 
-> Version 0.7.1 makes Windows setup self-contained with a project-private Python
-> runtime. Demucs remains optional, with a recommended CPU build and an optional
-> NVIDIA build.
+> Version 0.8.0 adds Vmoe ASS and QQ Music lyric sources, plus recoverable editor
+> projects when automatic lyric matching has low coverage.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -17,7 +16,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
-- Prefer real NetEase YRC word timing and refine ordinary line-timed lyrics from audio;
+- Use Vmoe karaoke ASS or public QQ Music/NetEase lyrics, and refine line timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;
 - Add Japanese furigana and English katakana readings above the corresponding lyric row;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
@@ -26,7 +25,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.7.1` alpha. Check the generated timeline before a final render.
+This is a usable `0.8.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -63,6 +62,19 @@ timeline-only export, lyric/pronunciation editing, format conversion, and enviro
 checks. Media is processed by the local service and is not automatically uploaded to
 the public internet.
 
+The Make page includes the official [Vmoe karaoke search](https://karaoke.vmoe.info/).
+Vmoe requires its own reCAPTCHA for search and ASS downloads, so the user completes that
+step on the official page and uploads the downloaded ASS; Karaoke Forge does not bypass
+the challenge. A separate QQ Music tab and the `qqmusic` CLI command accept official
+single-song links and export public line-timed LRC, available translations, ASS, and
+project JSON without requesting audio, accounts, cookies, or passwords:
+
+```bash
+karaoke-forge qqmusic \
+  "https://y.qq.com/n/ryqq_v2/songDetail/001gQnW91BEDaN" \
+  --i-have-rights -o build/qqmusic
+```
+
 The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or project JSON.
 Each row keeps source text, translation, timing, pronunciation, and visibility together.
 Hidden rows remain recoverable in JSON but are omitted from subtitle/video exports;
@@ -95,6 +107,12 @@ The legacy `--no-refine-word-timing` flag remains accepted for compatibility.
 Cookies stay in local process memory and are never written to project outputs; the app
 does not accept passwords, elevate membership access, bypass regional/DRM restrictions,
 or decrypt NCM. A legally exported local MP3/FLAC/WAV/M4A remains supported.
+
+When plain-lyric matching falls below the safety threshold, web calibration now keeps
+the formal lyrics and creates an editable recovery timeline instead of stopping. It
+lists unmatched lines, the language detected by Whisper, model and vocal-separation
+state, and suggested next steps. A recovery timeline should be auditioned and manually
+checked before final rendering.
 
 For the command line:
 

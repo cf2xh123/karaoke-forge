@@ -7,6 +7,7 @@ from karaoke_forge.editor import (
     pronunciation_to_editor_rows,
 )
 from karaoke_forge.formats import parse_yrc
+from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
 from karaoke_forge.netease import NeteaseSongInfo
 from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
@@ -651,6 +652,68 @@ def test_make_page_keeps_line_timing_when_auto_refinement_is_unavailable(
     assert "没有生成成功" not in result.status
 
 
+def test_make_page_returns_low_coverage_project_with_actionable_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.txt"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    lyrics.write_text("First lyric\nSecond lyric\n", encoding="utf-8")
+    fallback = LyricsDocument(
+        lines=[
+            LyricLine(
+                "First lyric",
+                1.0,
+                2.0,
+                [KaraokeToken("First lyric", 1.0, 2.0)],
+            ),
+            LyricLine(
+                "Second lyric",
+                2.0,
+                4.0,
+                [KaraokeToken("Second lyric", 2.0, 4.0)],
+            ),
+        ],
+        metadata={"alignment_status": "low_coverage_recovery"},
+        source_format="aligned",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.align_audio_and_lyrics",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            document=fallback,
+            recovered=True,
+            report=SimpleNamespace(coverage=0.1, unmatched_line_indexes=(1,)),
+            transcription=SimpleNamespace(
+                detected_language="en",
+                language_probability=0.91,
+            ),
+        ),
+    )
+    monkeypatch.setattr("karaoke_forge.web._materialize_auto_pronunciation", lambda _doc: 0)
+
+    result = prepare_make_editor_job(
+        str(audio),
+        str(video),
+        str(lyrics),
+        "",
+        "recovered-project",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        output_root=str(tmp_path / "outputs"),
+    )
+
+    assert result.project is not None
+    assert "保底时间轴" in result.status
+    assert "第 2 行：Second lyric" in result.status
+    assert "识别语言" in result.status
+    assert "medium / large-v3" in result.status
+
+
 def test_make_page_uses_embedded_mv_audio_for_editor_preparation(
     tmp_path: Path,
     monkeypatch,
@@ -809,6 +872,80 @@ def test_make_job_can_use_netease_page_lyrics_with_local_audio(
     assert result.video is not None
     assert "已生成" in result.status
     assert "仅从网易云读取" in result.log
+
+
+def test_make_job_can_use_qqmusic_page_lyrics_with_local_audio(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from karaoke_forge.qqmusic import QQMusicSongInfo
+
+    audio = tmp_path / "authorized.flac"
+    video = tmp_path / "mv.mp4"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    info = QQMusicSongInfo(
+        song_mid="001gQnW91BEDaN",
+        title="QQ Linked Song",
+        artists=("Artist",),
+        canonical_url="https://y.qq.com/n/ryqq_v2/songDetail/001gQnW91BEDaN",
+        page_lyrics="[00:01.00]Hello\n[00:02.00]World\n",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.fetch_public_qqmusic_info",
+        lambda _link: info,
+    )
+
+    def fake_make(
+        _audio,
+        _video,
+        lyrics,
+        output,
+        assets,
+        **_kwargs,
+    ):
+        content = Path(lyrics).read_text(encoding="utf-8")
+        assert '"source": "QQ Music"' in content
+        assert "Hello" in content
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True, exist_ok=True)
+        exported = assets / "lyrics.lrc"
+        exported.write_text("[00:01.00]Hello\n", encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"lrc": exported},
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        str(video),
+        None,
+        "",
+        "qq-linked-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        rights_confirmed=True,
+        output_root=str(tmp_path / "outputs"),
+        qqmusic_link=info.canonical_url,
+        use_qqmusic_lyrics=True,
+    )
+
+    assert result.video is not None
+    assert "仅从 QQ 音乐读取公开歌词" in result.log
 
 
 def test_make_job_prefers_an_uploaded_edited_project_over_stale_pasted_lyrics(

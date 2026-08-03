@@ -1,8 +1,9 @@
 import pytest
 
-from karaoke_forge.align import RecognizedWord
+from karaoke_forge.align import AlignmentError, RecognizedWord
 from karaoke_forge.formats import parse_lrc, parse_yrc, read_lyrics
 from karaoke_forge.pipeline import (
+    AlignOptions,
     _build_initial_prompt,
     align_audio_and_lyrics,
     normalize_timing_refinement,
@@ -84,6 +85,33 @@ def test_auto_refinement_keeps_timed_lyrics_when_whisper_is_unavailable(
     assert any("已保留原时间轴并继续" in message for message in messages)
 
 
+def test_auto_refinement_keeps_timed_lyrics_when_coverage_is_low(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"audio")
+    document = parse_lrc("[00:01.00]Hello\n")
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.refine_audio_word_timing",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AlignmentError("Alignment coverage is only 10.0%")
+        ),
+    )
+
+    result = refine_audio_word_timing_with_fallback(
+        audio,
+        document,
+        timing_mode="auto",
+        progress=messages.append,
+    )
+
+    assert result is None
+    assert any("覆盖率不足" in message for message in messages)
+    assert any("已保留原时间轴并继续" in message for message in messages)
+
+
 def test_force_refinement_still_raises_when_whisper_is_unavailable(
     tmp_path,
     monkeypatch,
@@ -124,3 +152,30 @@ def test_plain_lyrics_still_require_whisper(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(TranscriptionError, match="model unavailable"):
         align_audio_and_lyrics(audio, lyrics)
+
+
+def test_pipeline_marks_low_coverage_recovery_for_editor_use(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.wav"
+    lyrics = tmp_path / "lyrics.txt"
+    audio.write_bytes(b"audio")
+    lyrics.write_text("First line\nSecond line\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.transcribe_with_faster_whisper",
+        lambda *_args, **_kwargs: TranscriptionResult(
+            words=[RecognizedWord("完全不同", 1.0, 4.0, 0.8)],
+            detected_language="zh",
+            language_probability=0.95,
+        ),
+    )
+
+    result = align_audio_and_lyrics(
+        audio,
+        lyrics,
+        options=AlignOptions(recover_low_coverage=True),
+    )
+
+    assert result.recovered
+    assert result.report.coverage == 0.0
+    assert result.document.is_timed
+    assert result.document.metadata["alignment_status"] == "low_coverage_recovery"
+    assert result.document.metadata["unmatched_lyric_lines"] == "1,2"

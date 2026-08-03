@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .ass import AssStyle
-from .formats import export_formats, read_lyrics, write_format
+from .formats import attach_reference_translation, export_formats, read_lyrics, write_format
 from .media import MediaError, find_ffmpeg, render_karaoke_video
 from .pipeline import (
     AlignOptions,
@@ -270,6 +270,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_alignment_arguments(netease)
     _add_style_arguments(netease)
     netease.set_defaults(handler=_handle_netease)
+
+    qqmusic = subparsers.add_parser(
+        "qqmusic",
+        help="export public timed lyrics from a QQ Music song link",
+    )
+    qqmusic.add_argument("url", help="QQ Music single-song URL or shared text")
+    qqmusic.add_argument("-o", "--output-dir", type=Path, default=Path("build/qqmusic"))
+    qqmusic.add_argument("--name", help="output basename")
+    qqmusic.add_argument("--formats", type=_formats, default=_formats(DEFAULT_FORMATS))
+    qqmusic.add_argument(
+        "--i-have-rights",
+        action="store_true",
+        required=True,
+        help="confirm that you have the right to use and process the lyrics",
+    )
+    _add_style_arguments(qqmusic)
+    qqmusic.set_defaults(handler=_handle_qqmusic)
     return parser
 
 
@@ -511,6 +528,40 @@ def _handle_netease(args: argparse.Namespace) -> int:
     _print_exports(result.exports)
     if result.kept_audio:
         print(f"audio  {result.kept_audio}")
+    return 0
+
+
+def _handle_qqmusic(args: argparse.Namespace) -> int:
+    from .qqmusic import fetch_public_qqmusic_info
+
+    info = fetch_public_qqmusic_info(args.url)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    source = args.output_dir / ".qqmusic-source.lrc"
+    source.write_text(info.page_lyrics, encoding="utf-8")
+    try:
+        document = read_lyrics(source)
+    finally:
+        source.unlink(missing_ok=True)
+    if info.translated_lyrics:
+        attach_reference_translation(document, info.page_lyrics, info.translated_lyrics)
+    document.metadata.update(
+        {
+            "source": "QQ Music",
+            "source_url": info.canonical_url,
+            "source_id": info.song_mid,
+            "ti": info.title,
+            "ar": info.artist_text,
+        }
+    )
+    exports = export_formats(
+        document,
+        args.output_dir,
+        args.name or info.title,
+        args.formats,
+        ass_style=_style_from_args(args),
+    )
+    print(f"Track: {info.title} — {info.artist_text}")
+    _print_exports(exports)
     return 0
 
 
