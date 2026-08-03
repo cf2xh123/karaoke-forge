@@ -25,11 +25,11 @@ from .editor import (
     apply_pronunciation_rows,
     apply_token_timing,
     document_from_payload,
+    document_pronunciation_to_editor_rows,
     document_to_editor_rows,
     editor_preview_html,
     editor_token_timeline_html,
     nudge_editor_line_timing,
-    pronunciation_to_editor_rows,
     token_timing_to_json,
 )
 from .formats import (
@@ -56,7 +56,12 @@ from .pipeline import (
 from .pronunciation import generate_pronunciation
 from .qqmusic import QQMusicSongInfo, fetch_public_qqmusic_info
 from .runtime import inspect_demucs_runtime
-from .utaten import UtaTenLyricsInfo, fetch_public_utaten_info
+from .utaten import (
+    UtaTenLyricsInfo,
+    UtaTenPronunciationReport,
+    apply_utaten_pronunciation,
+    fetch_public_utaten_info,
+)
 from .workflows import MakeOptions, make_karaoke_video
 
 _EDITOR_CLIP_LOCKS_GUARD = threading.Lock()
@@ -2035,6 +2040,8 @@ def _build_style(
     show_pronunciation: bool = True,
     pronunciation_font_size: float = 26,
     pronunciation_color: str = "#FFFFFF",
+    auto_pronunciation: bool = True,
+    auto_english_pronunciation: bool = True,
 ) -> AssStyle:
     return AssStyle(
         font=font or "Microsoft YaHei",
@@ -2046,6 +2053,8 @@ def _build_style(
         translation_font_size=int(translation_font_size),
         translation_color=translation_color,
         show_pronunciation=show_pronunciation,
+        auto_pronunciation=auto_pronunciation,
+        auto_english_pronunciation=auto_english_pronunciation,
         pronunciation_font_size=int(pronunciation_font_size),
         pronunciation_color=pronunciation_color,
     )
@@ -2092,27 +2101,40 @@ def _lyrics_with_utaten_source(
     lyrics_path: Path,
     info: UtaTenLyricsInfo,
     job_dir: Path,
-) -> Path:
+    *,
+    pronunciation_only: bool,
+    lyrics_source_is_utaten: bool,
+) -> tuple[Path, UtaTenPronunciationReport]:
     document = read_lyrics(lyrics_path)
-    for index, line in enumerate(document.lines):
-        if index >= len(info.lyrics) or line.text.strip() != info.lyrics[index].strip():
-            continue
-        reading = info.readings[index] if index < len(info.readings) else ""
-        if reading and reading != line.text:
-            line.pronunciation = reading
-    document.metadata.update(
-        {
-            "source": "UtaTen",
-            "source_url": info.canonical_url,
-            "source_id": info.lyric_id,
-            "ti": info.title,
-            "ar": info.artist,
-        }
+    report = apply_utaten_pronunciation(
+        document,
+        info,
+        replace_existing=pronunciation_only,
     )
-    document.source_format = "utaten"
+    if lyrics_source_is_utaten:
+        document.metadata.update(
+            {
+                "source": "UtaTen",
+                "source_url": info.canonical_url,
+                "source_id": info.lyric_id,
+                "ti": info.title,
+                "ar": info.artist,
+            }
+        )
+        document.source_format = "utaten"
+    else:
+        document.metadata.update(
+            {
+                "pronunciation_source": "UtaTen",
+                "pronunciation_source_url": info.canonical_url,
+                "pronunciation_source_id": info.lyric_id,
+            }
+        )
+    if pronunciation_only:
+        document.metadata["pronunciation_policy"] = "utaten-only"
     target = job_dir / "lyrics-utaten.json"
     target.write_text(write_format(document, "json"), encoding="utf-8")
-    return target
+    return target, report
 
 
 def subtitle_preview_html(
@@ -2129,6 +2151,7 @@ def subtitle_preview_html(
     pronunciation_color: str,
     sample_text: str = "让每一句歌词，都踩准拍子。",
     sample_translation: str = "让歌声与画面在这里相遇。",
+    auto_english_pronunciation: bool = True,
 ) -> str:
     """Return a browser-native preview of the current ASS subtitle style."""
 
@@ -2176,7 +2199,14 @@ def subtitle_preview_html(
         )
 
     def preview_line(value: str, *, active: bool) -> str:
-        pronunciation = generate_pronunciation(value) if show_pronunciation else None
+        pronunciation = (
+            generate_pronunciation(
+                value,
+                include_english=auto_english_pronunciation,
+            )
+            if show_pronunciation
+            else None
+        )
         if pronunciation is None:
             return coloured_source(value, 0, active=active)
         parts: list[str] = []
@@ -2285,14 +2315,25 @@ def _low_coverage_summary(
     )
 
 
-def _materialize_auto_pronunciation(document: LyricsDocument) -> int:
+def _materialize_auto_pronunciation(
+    document: LyricsDocument,
+    *,
+    enabled: bool = True,
+    include_english: bool = True,
+) -> int:
     """Persist generated readings so the editor can adjust them before rendering."""
 
+    document.metadata["auto_pronunciation"] = "true" if enabled else "false"
+    document.metadata["auto_english_pronunciation"] = (
+        "true" if include_english else "false"
+    )
+    if not enabled:
+        return 0
     generated_count = 0
     for line in document.lines:
         if line.pronunciation or line.pronunciation_units:
             continue
-        generated = generate_pronunciation(line.text)
+        generated = generate_pronunciation(line.text, include_english=include_english)
         if generated is None:
             continue
         line.pronunciation_units = [
@@ -2329,6 +2370,8 @@ def prepare_make_editor_job(
     use_qqmusic_lyrics: bool = True,
     utaten_link: str = "",
     use_utaten_lyrics: bool = True,
+    utaten_pronunciation_only: bool = False,
+    auto_english_pronunciation: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2378,6 +2421,8 @@ def prepare_make_editor_job(
         link = (netease_link or "").strip()
         qq_link = (qqmusic_link or "").strip()
         uta_link = (utaten_link or "").strip()
+        if utaten_pronunciation_only and not uta_link:
+            raise ValueError("选择“仅使用 UtaTen 官方注音”时，请同时填写 UtaTen 歌词页链接。")
         if sum(bool(value) for value in (link, qq_link, uta_link)) > 1:
             raise ValueError("网易云、QQ 音乐和 UtaTen 链接一次只能填写一个。")
         if link:
@@ -2407,7 +2452,8 @@ def prepare_make_editor_job(
             else qqmusic_info.page_lyrics if qqmusic_info is not None else None
         )
 
-        if lyrics_file is not None or (pasted_lyrics and pasted_lyrics.strip()):
+        provided_lyrics = lyrics_file is not None or bool(pasted_lyrics and pasted_lyrics.strip())
+        if provided_lyrics:
             lyrics_path = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
             if netease_info is not None or qqmusic_info is not None:
                 lyrics_path = _lyrics_with_translation(
@@ -2466,8 +2512,26 @@ def prepare_make_editor_job(
 
         if qqmusic_info is not None:
             lyrics_path = _lyrics_with_qqmusic_source(lyrics_path, qqmusic_info, job_dir)
+        utaten_report = None
         if utaten_info is not None:
-            lyrics_path = _lyrics_with_utaten_source(lyrics_path, utaten_info, job_dir)
+            lyrics_path, utaten_report = _lyrics_with_utaten_source(
+                lyrics_path,
+                utaten_info,
+                job_dir,
+                pronunciation_only=utaten_pronunciation_only,
+                lyrics_source_is_utaten=not provided_lyrics,
+            )
+            if utaten_pronunciation_only and not utaten_report.annotated_lines:
+                raise ValueError(
+                    "UtaTen 官方歌词与当前歌词没有可安全转移的注音片段；"
+                    "请确认链接对应同一首歌，正文和原时间轴均未被覆盖。"
+                )
+            mode = "仅采用官方注音" if utaten_pronunciation_only else "采用官方注音"
+            report(
+                f"UtaTen {mode}：匹配 {utaten_report.matched_lines}/"
+                f"{utaten_report.local_lines} 行，写入 {utaten_report.annotated_lines} 行、"
+                f"{utaten_report.mapped_units} 个 ruby 片段；未匹配文字保持原样"
+            )
         source = read_lyrics(lyrics_path)
         if source.is_timed:
             timing_mode = _web_timing_refinement(timing_refinement)
@@ -2527,8 +2591,17 @@ def prepare_make_editor_job(
                     f"已按上传音频生成时间轴，匹配覆盖率 **{aligned.report.coverage:.1%}**。"
                 )
 
-        generated_count = _materialize_auto_pronunciation(document)
-        report(f"已为 {generated_count} 行歌词生成可编辑注音")
+        auto_pronunciation = not (utaten_pronunciation_only and utaten_info is not None)
+        generated_count = _materialize_auto_pronunciation(
+            document,
+            enabled=auto_pronunciation,
+            include_english=auto_english_pronunciation,
+        )
+        if auto_pronunciation:
+            english_detail = "包含英语片假名" if auto_english_pronunciation else "已跳过英语片假名"
+            report(f"已为 {generated_count} 行歌词生成可编辑注音（{english_detail}）")
+        else:
+            report("已关闭自动补注音；未匹配到 UtaTen ruby 的文字保持无注音")
         document.require_timed()
         source_title = (
             netease_info.title
@@ -2554,8 +2627,20 @@ def prepare_make_editor_job(
         status = (
             "### ✅ 可校准 KTV 工程已生成\n"
             f"{timing_summary}\n\n"
-            f"共 {len(document.lines)} 行，自动注音 {generated_count} 行。"
-            "已沿用制作页的音频和 MV；现在可逐句试听和微调，完成后再渲染视频。"
+            f"共 {len(document.lines)} 行。"
+            + (
+                f"UtaTen 官方注音已写入 {utaten_report.annotated_lines} 行，"
+                f"映射 {utaten_report.mapped_units} 个 ruby 片段；"
+                "其余文字保持无注音。"
+                if utaten_pronunciation_only and utaten_report is not None
+                else f"自动注音 {generated_count} 行；"
+                + (
+                    "英语片假名自动注音已开启。"
+                    if auto_english_pronunciation
+                    else "英语片假名自动注音已关闭。"
+                )
+            )
+            + "已沿用制作页的音频和 MV；现在可逐句试听和微调，完成后再渲染视频。"
         )
         report("校准工程已生成并送入编辑器")
         return UiEditorPreparationResult(
@@ -2564,7 +2649,7 @@ def prepare_make_editor_job(
             rows=document_to_editor_rows(document),
             line_number=line_number,
             whole_pronunciation=line.pronunciation or "",
-            pronunciation_rows=pronunciation_to_editor_rows(line),
+            pronunciation_rows=document_pronunciation_to_editor_rows(document, line),
             preview=editor_preview_html(document, line_number),
             project=str(project),
             audio=str(audio),
@@ -2625,6 +2710,8 @@ def run_make_job(
     use_qqmusic_lyrics: bool = True,
     utaten_link: str = "",
     use_utaten_lyrics: bool = True,
+    utaten_pronunciation_only: bool = False,
+    auto_english_pronunciation: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2659,6 +2746,8 @@ def run_make_job(
         link = (netease_link or "").strip()
         qq_link = (qqmusic_link or "").strip()
         uta_link = (utaten_link or "").strip()
+        if utaten_pronunciation_only and not uta_link:
+            raise ValueError("选择“仅使用 UtaTen 官方注音”时，请同时填写 UtaTen 歌词页链接。")
         if sum(bool(value) for value in (link, qq_link, uta_link)) > 1:
             raise ValueError("网易云、QQ 音乐和 UtaTen 链接一次只能填写一个。")
         if link:
@@ -2748,7 +2837,8 @@ def run_make_job(
             else qqmusic_info.page_lyrics if qqmusic_info is not None else None
         )
 
-        if lyrics_file is not None or (pasted_lyrics and pasted_lyrics.strip()):
+        provided_lyrics = lyrics_file is not None or bool(pasted_lyrics and pasted_lyrics.strip())
+        if provided_lyrics:
             lyrics = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
             if netease_info is not None or qqmusic_info is not None:
                 lyrics = _lyrics_with_translation(
@@ -2805,8 +2895,26 @@ def run_make_job(
 
         if qqmusic_info is not None:
             lyrics = _lyrics_with_qqmusic_source(lyrics, qqmusic_info, job_dir)
+        utaten_report = None
         if utaten_info is not None:
-            lyrics = _lyrics_with_utaten_source(lyrics, utaten_info, job_dir)
+            lyrics, utaten_report = _lyrics_with_utaten_source(
+                lyrics,
+                utaten_info,
+                job_dir,
+                pronunciation_only=utaten_pronunciation_only,
+                lyrics_source_is_utaten=not provided_lyrics,
+            )
+            if utaten_pronunciation_only and not utaten_report.annotated_lines:
+                raise ValueError(
+                    "UtaTen 官方歌词与当前歌词没有可安全转移的注音片段；"
+                    "请确认链接对应同一首歌，正文和原时间轴均未被覆盖。"
+                )
+            mode = "仅采用官方注音" if utaten_pronunciation_only else "采用官方注音"
+            report(
+                f"UtaTen {mode}：匹配 {utaten_report.matched_lines}/"
+                f"{utaten_report.local_lines} 行，写入 {utaten_report.annotated_lines} 行、"
+                f"{utaten_report.mapped_units} 个 ruby 片段；未匹配文字保持原样"
+            )
 
         source_title = (
             netease_info.title
@@ -2844,6 +2952,8 @@ def run_make_job(
                     show_pronunciation,
                     pronunciation_font_size,
                     pronunciation_color,
+                    not (utaten_pronunciation_only and utaten_info is not None),
+                    auto_english_pronunciation,
                 ),
                 audio_offset=float(audio_offset),
                 crf=crf,
@@ -3206,7 +3316,7 @@ def load_editor_project(
         f"### ✅ 已载入 {source.name}\n共 {len(document.lines)} 行，可编辑后导出。",
         line_number,
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, line_number),
     )
 
@@ -3225,7 +3335,7 @@ def load_editor_line(
         document.to_dict(),
         document_to_editor_rows(document),
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, int(line_number)),
     )
 
@@ -3250,7 +3360,7 @@ def _editor_selected_line_outputs(
         document_to_editor_rows(document),
         selected,
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, selected),
         editor_token_timeline_html(document, selected),
         token_timing_to_json(line),
@@ -3336,7 +3446,9 @@ def _editor_document_with_pending_changes(
             original_line.pronunciation or ""
         ).strip() or _pronunciation_draft_signature(
             pronunciation_table
-        ) != _pronunciation_draft_signature(pronunciation_to_editor_rows(original_line))
+        ) != _pronunciation_draft_signature(
+            document_pronunciation_to_editor_rows(original, original_line)
+        )
 
     # A changed pronunciation draft still describes the pre-edit text. Save it
     # there first, then let line/token text edits remap only the surviving spans.
@@ -3506,7 +3618,7 @@ def save_editor_pronunciation(
         document.to_dict(),
         document_to_editor_rows(document),
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, int(line_number)),
         f"### ✅ 已保存第 {int(line_number)} 行注音",
     )
@@ -3538,7 +3650,7 @@ def save_editor_pronunciation_workspace(
         document.to_dict(),
         document_to_editor_rows(document),
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, selected),
         f"### ✅ 已保存第 {selected} 行注音",
     )
@@ -3641,7 +3753,7 @@ def save_editor_token_timing(
         document.to_dict(),
         document_to_editor_rows(document),
         line.pronunciation or "",
-        pronunciation_to_editor_rows(line),
+        document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, int(line_number)),
         editor_token_timeline_html(document, int(line_number)),
         token_timing_to_json(line),
@@ -4142,6 +4254,17 @@ def create_web_app() -> object:
                                 label="没有上传歌词时，直接导入 UtaTen 公开歌词和假名",
                                 value=True,
                             )
+                            make_utaten_pronunciation_only = gr.Checkbox(
+                                label=(
+                                    "有自己的歌词时，仅使用 UtaTen 官方注音"
+                                    "（正文和时间轴保持不变）"
+                                ),
+                                value=False,
+                            )
+                            gr.Markdown(
+                                "勾选后会先清除歌词文件中原有的注音，再按正文相似度和字符片段"
+                                "转移 UtaTen ruby；对不上的文字保持无注音，不会自动猜读音。"
+                            )
                             gr.Markdown("---\n**QQ 音乐（公开行级 LRC 与翻译）**")
                             make_qqmusic_link = gr.Textbox(
                                 label="QQ 音乐单曲链接（只读取公开歌词，不下载音频）",
@@ -4258,6 +4381,10 @@ def create_web_app() -> object:
                         with gr.Row():
                             make_show_pronunciation = gr.Checkbox(
                                 label="显示日语振假名和英语片假名读音",
+                                value=True,
+                            )
+                            make_auto_english_pronunciation = gr.Checkbox(
+                                label="自动生成英语片假名（不影响手动或 UtaTen 官方注音）",
                                 value=True,
                             )
                             make_pronunciation_size = gr.Slider(
@@ -4964,6 +5091,8 @@ def create_web_app() -> object:
             use_qqmusic_lyrics: bool,
             utaten_link: str,
             use_utaten_lyrics: bool,
+            utaten_pronunciation_only: bool,
+            auto_english_pronunciation: bool,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -5004,6 +5133,8 @@ def create_web_app() -> object:
                 use_qqmusic_lyrics,
                 utaten_link,
                 use_utaten_lyrics,
+                utaten_pronunciation_only,
+                auto_english_pronunciation,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -5034,6 +5165,8 @@ def create_web_app() -> object:
             use_qqmusic_lyrics: bool,
             utaten_link: str,
             use_utaten_lyrics: bool,
+            utaten_pronunciation_only: bool,
+            auto_english_pronunciation: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
@@ -5058,6 +5191,8 @@ def create_web_app() -> object:
                 use_qqmusic_lyrics,
                 utaten_link,
                 use_utaten_lyrics,
+                utaten_pronunciation_only,
+                auto_english_pronunciation,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5110,6 +5245,8 @@ def create_web_app() -> object:
                 make_use_qqmusic_lyrics,
                 make_utaten_link,
                 make_use_utaten_lyrics,
+                make_utaten_pronunciation_only,
+                make_auto_english_pronunciation,
             ],
             outputs=[
                 editor_payload,
@@ -5170,6 +5307,8 @@ def create_web_app() -> object:
                 make_use_qqmusic_lyrics,
                 make_utaten_link,
                 make_use_utaten_lyrics,
+                make_utaten_pronunciation_only,
+                make_auto_english_pronunciation,
             ],
             outputs=[
                 make_status,
@@ -5195,6 +5334,7 @@ def create_web_app() -> object:
             make_pronunciation_color,
             make_preview_text,
             make_preview_translation,
+            make_auto_english_pronunciation,
         ]
         for preview_input in preview_inputs:
             preview_input.change(
@@ -6347,7 +6487,7 @@ def create_web_app() -> object:
                     timed_rows,
                     selected,
                     timed_line.pronunciation or "",
-                    pronunciation_to_editor_rows(timed_line),
+                    document_pronunciation_to_editor_rows(timed_document, timed_line),
                     output_name,
                     audio_file,
                 )
@@ -6428,6 +6568,8 @@ def create_web_app() -> object:
             use_qqmusic_lyrics: bool,
             utaten_link: str,
             use_utaten_lyrics: bool,
+            utaten_pronunciation_only: bool,
+            auto_english_pronunciation: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             if not handoff_ready:
@@ -6479,6 +6621,8 @@ def create_web_app() -> object:
                 use_qqmusic_lyrics,
                 utaten_link,
                 use_utaten_lyrics,
+                utaten_pronunciation_only,
+                auto_english_pronunciation,
                 progress=progress,
             )
 
@@ -6520,6 +6664,8 @@ def create_web_app() -> object:
                 make_use_qqmusic_lyrics,
                 make_utaten_link,
                 make_use_utaten_lyrics,
+                make_utaten_pronunciation_only,
+                make_auto_english_pronunciation,
             ],
             outputs=[
                 make_status,

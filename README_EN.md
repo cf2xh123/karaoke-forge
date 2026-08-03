@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.9.0 adds direct UtaTen lyric-page imports with per-line furigana while
-> retaining the Vmoe, QQ Music, and recoverable editor workflows from 0.8.0.
+> Version 0.9.1 can transfer only verified official UtaTen ruby readings onto an
+> existing lyric project and adds an independent switch for automatic English katakana.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -18,14 +18,14 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;
-- Add Japanese furigana and English katakana readings above the corresponding lyric row;
+- Add Japanese furigana and optional automatic English katakana above the lyric row;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.9.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.9.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -86,6 +86,17 @@ karaoke-forge utaten \
   --i-have-rights -o build/utaten
 ```
 
+When an uploaded lyric file or edited project should remain authoritative, enable
+“Use only official UtaTen pronunciation.” Karaoke Forge clears the old pronunciation,
+matches local and UtaTen lines in order while tolerating punctuation and spacing changes,
+then transfers only ruby spans whose source characters can be verified. Local lyric text,
+translations, line timing, and word timing stay unchanged; unmatched text remains without
+pronunciation instead of receiving a guessed reading.
+
+Automatic English katakana has a separate Make-page switch. Turning it off does not affect
+Japanese furigana or manual/project/UtaTen readings. ASS-producing CLI commands expose the
+same policy as `--no-auto-english-pronunciation`.
+
 The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or project JSON.
 Each row keeps source text, translation, timing, pronunciation, and visibility together.
 Hidden rows remain recoverable in JSON but are omitted from subtitle/video exports;
@@ -105,8 +116,9 @@ track, the full workflow automatically uses the MV audio instead. Public transla
 is placed at the top centre when available. Paired original lines use an upper-left and
 lower-right KTV layout, and the web style panel includes a live 16:9 subtitle preview.
 Japanese lines with kanji receive hiragana readings, while English words receive katakana
-readings. Use `--no-show-pronunciation` to disable them; generated readings can be corrected
-through each JSON lyric line's `pronunciation` field.
+readings by default. Use `--no-auto-english-pronunciation` to disable only automatic English
+katakana, or `--no-show-pronunciation` to hide all readings; generated readings can be
+corrected through each JSON lyric line's `pronunciation` field.
 When NetEase exposes YRC, its real per-character start times and durations drive the
 karaoke sweep directly. For ordinary line-timed LRC/SRT input, audio recognition refines
 the timing inside each line while preserving its original boundaries. Use

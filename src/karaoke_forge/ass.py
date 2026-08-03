@@ -30,6 +30,8 @@ class AssStyle:
     karaoke_row_gap: int = 72
     karaoke_margin_h: int = 100
     show_pronunciation: bool = True
+    auto_pronunciation: bool = True
+    auto_english_pronunciation: bool = True
     pronunciation_font_size: int = 26
     pronunciation_color: str = "#FFFFFF"
     pronunciation_gap: int = 4
@@ -49,7 +51,12 @@ def _escape_ass_text(value: str) -> str:
     return value.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}").replace("\n", r"\N")
 
 
-def _line_pronunciation(line: LyricLine) -> PronunciationLine | None:
+def _line_pronunciation(
+    line: LyricLine,
+    *,
+    auto_pronunciation: bool = True,
+    auto_english_pronunciation: bool = True,
+) -> PronunciationLine | None:
     if line.pronunciation_units:
         return PronunciationLine(
             tuple(
@@ -76,7 +83,12 @@ def _line_pronunciation(line: LyricLine) -> PronunciationLine | None:
             ),
             separator="",
         )
-    return generate_pronunciation(line.text)
+    if not auto_pronunciation:
+        return None
+    return generate_pronunciation(
+        line.text,
+        include_english=auto_english_pronunciation,
+    )
 
 
 @lru_cache(maxsize=32)
@@ -207,7 +219,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events: list[str] = []
     pronunciations = [
-        _line_pronunciation(line) if style.show_pronunciation else None for line in lines
+        (
+            _line_pronunciation(
+                line,
+                auto_pronunciation=style.auto_pronunciation,
+                auto_english_pronunciation=style.auto_english_pronunciation,
+            )
+            if style.show_pronunciation
+            else None
+        )
+        for line in lines
     ]
 
     # Keep the current line and the next line visible, then roll one row at a

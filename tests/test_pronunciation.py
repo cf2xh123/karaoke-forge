@@ -52,3 +52,14 @@ def test_japanese_furigana_only_labels_kanji_segments() -> None:
 
 def test_metadata_lines_are_not_annotated() -> None:
     assert generate_pronunciation("作曲 : Aviel Kaei Tozzo") is None
+
+
+def test_english_auto_pronunciation_can_be_disabled_without_affecting_japanese() -> None:
+    assert generate_pronunciation("Hello world", include_english=False) is None
+
+    def convert(_text: str):
+        return [{"orig": "空", "hira": "そら"}]
+
+    result = japanese_pronunciation("空", converter=convert)
+    assert result is not None
+    assert result.text == "そら"
