@@ -5,7 +5,7 @@
 [English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前版本：`0.7.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
+> 当前版本：`0.7.1`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式 MV。
 
 ## 能做什么
 
@@ -53,7 +53,8 @@ MV，制作页会保留校准结果并明确提示补选视频。这样既不用
 
 ## 环境要求
 
-- Python 3.10 或更高版本；
+- 手动安装时需要 Python 3.10 或更高版本；Windows 双击安装会自动在项目内准备私有
+  Python 3.12.10，不需要预装 Python 或 Conda，也不会修改全局 PATH；
 - [FFmpeg](https://ffmpeg.org/download.html)，并确保终端中可以运行 `ffmpeg -version`；
 - 生成时间轴需要 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)；
 - 可选的人声分离使用 [Demucs](https://github.com/facebookresearch/demucs)。上游项目目前只做有限维护，因此它不是默认依赖。
@@ -62,7 +63,8 @@ MV，制作页会保留校准结果并明确提示补选视频。这样既不用
 
 Windows 用户可以完全通过双击操作：
 
-1. 第一次使用时双击项目根目录的 **`首次安装.bat`**；
+1. 第一次使用时双击项目根目录的 **`首次安装.bat`**；脚本会从 Python 官方 NuGet 包
+   下载约 14 MB 的私有运行时到 `.runtime`，然后创建 `.venv`，不会安装系统 Python；
 2. 安装完成后双击 **`启动网页版.bat`**；
 3. 浏览器会自动打开本地工作台；
 4. 上传歌曲、MV 和歌词，先生成校准工程，试听确认后再生成最终视频。

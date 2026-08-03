@@ -1,27 +1,27 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title Karaoke Forge - 安装 Demucs 人声分离
+title Karaoke Forge - Install Demucs
+set "PYTHONUTF8=1"
 
 echo.
 echo  ==========================================
-echo       安装 Demucs 人声分离（可选）
+echo       Install Demucs vocal separation
 echo  ==========================================
 echo.
-echo  仅在复杂伴奏让歌词识别不准时需要。
-echo  CPU 版约 120 MB，实测一首 218 秒歌曲约 57 秒完成。
-echo  NVIDIA 版另需下载约 1.9 GB，速度更快但不是必须。
-echo  首次实际分离还会联网下载所选模型，之后会使用本机缓存。
+echo Install this only when accompaniment reduces lyric recognition accuracy.
+echo The CPU build is recommended and needs about 120 MB.
+echo The NVIDIA build needs an additional download of about 1.9 GB.
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [错误] 请先双击“首次安装.bat”。
+  echo [ERROR] The first-time setup has not completed.
+  echo Run the first-time setup batch file before installing Demucs.
   pause
   exit /b 1
 )
 
-echo.
-choice /C CN /N /M "请选择：[C] CPU 版（推荐）  [N] NVIDIA 显卡版："
+choice /C CN /N /M "Choose [C] CPU recommended or [N] NVIDIA GPU: "
 if errorlevel 2 (
   set "DEMUCS_DEVICE=cuda"
 ) else (
@@ -32,12 +32,13 @@ if errorlevel 2 (
 if errorlevel 1 goto :failed
 
 echo.
-echo 安装与检查完成。请重新启动网页版。
+echo Demucs installation and checks completed. Restart the web app.
 pause
 exit /b 0
 
 :failed
 echo.
-echo [错误] 安装没有完成。已安装的 CPU 版本如仍可用，不会被删除。
+echo [ERROR] Demucs installation did not complete.
+echo An existing CPU build, if any, was not removed.
 pause
 exit /b 1

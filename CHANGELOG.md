@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-03
+
+### Added
+
+- Windows “首次安装.bat”现在会在项目内自动准备固定版本并校验 SHA-512 的私有
+  Python 3.12.10 运行时，再创建 `.venv`；新电脑无需预装系统 Python 或 Conda，且不会
+  修改全局 `PATH`。
+
+### Fixed
+
+- 三个 Windows 批处理入口改为纯 ASCII 命令，并通过 `.gitattributes` 强制检出为 CRLF，
+  避免中文系统代码页把 UTF-8 提示拆成 `ffmpeg.org`、`errorlevel` 等错误命令。
+
 ## [0.7.0] - 2026-08-03
 
 ### Changed

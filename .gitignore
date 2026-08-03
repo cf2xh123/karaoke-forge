@@ -11,6 +11,7 @@ dist/
 build/
 
 # Virtual environments and local configuration
+.runtime/
 .venv/
 venv/
 .env

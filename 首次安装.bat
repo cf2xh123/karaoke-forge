@@ -1,56 +1,64 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title Karaoke Forge - 首次安装
+title Karaoke Forge - First-time setup
+set "PYTHONUTF8=1"
+set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 
 echo.
 echo  ==========================================
-echo       Karaoke Forge 首次安装
+echo       Karaoke Forge first-time setup
 echo  ==========================================
 echo.
-
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [错误] 没有找到 Python。
-  echo 请先安装 Python 3.10 或更高版本，并勾选 Add Python to PATH。
-  echo https://www.python.org/downloads/
-  pause
-  exit /b 1
-)
+echo This setup uses a private Python runtime inside the project.
+echo It does not require Conda or a system-wide Python installation.
+echo.
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [1/3] 正在创建独立运行环境...
-  python -m venv .venv
+  echo [1/4] Preparing private Python 3.12 runtime...
+  where powershell.exe >nul 2>nul
+  if errorlevel 1 (
+    echo [ERROR] Windows PowerShell was not found.
+    goto :failed
+  )
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "scripts\bootstrap_windows.ps1"
+  if errorlevel 1 goto :failed
+
+  echo [2/4] Creating the isolated project environment...
+  ".runtime\python\tools\python.exe" -m venv ".venv"
   if errorlevel 1 goto :failed
 ) else (
-  echo [1/3] 已找到运行环境。
+  echo [1/4] Private project environment already exists.
+  echo [2/4] Reusing the existing project environment.
 )
 
-echo [2/3] 正在安装网页和歌词对齐组件，首次安装需要一些时间...
+echo [3/4] Installing the web app and lyric alignment components...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto :failed
 ".venv\Scripts\python.exe" -m pip install -e ".[web,align,netease,pronunciation]"
 if errorlevel 1 goto :failed
 
-echo [3/3] 正在检查 FFmpeg...
+echo [4/4] Checking FFmpeg...
 where ffmpeg >nul 2>nul
 if errorlevel 1 (
   echo.
-  echo [提醒] 没有找到 FFmpeg。网页可以打开，但视频暂时无法生成。
-  echo 请从 https://ffmpeg.org/download.html 安装，并把 ffmpeg 加入 PATH。
+  echo [WARNING] FFmpeg was not found on PATH.
+  echo The web app can open, but video generation will not work yet.
+  echo Download FFmpeg from https://ffmpeg.org/download.html and add it to PATH.
 ) else (
-  echo FFmpeg 已就绪。
+  echo FFmpeg is ready.
 )
 
 echo.
-echo 安装完成！以后直接双击“启动网页版.bat”即可。
-echo 如需改善复杂伴奏下的识别，可另行双击“安装人声分离（Demucs）.bat”。
-echo Demucs 不默认安装，是因为 NVIDIA 显卡版还需下载约 1.9 GB 的 Torch。
+echo Setup completed successfully.
+echo You can now double-click the web launcher batch file.
+echo Demucs vocal separation remains an optional separate install.
 pause
 exit /b 0
 
 :failed
 echo.
-echo [错误] 安装没有完成。请检查上方信息或 README.md。
+echo [ERROR] Setup did not complete.
+echo Check the messages above and your network connection, then run this file again.
 pause
 exit /b 1
