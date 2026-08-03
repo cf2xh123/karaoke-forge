@@ -1,5 +1,6 @@
 import math
 import random
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,6 +141,12 @@ def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, mo
     )
     monkeypatch.setattr("karaoke_forge.media.subprocess.Popen", fake_popen)
     monkeypatch.setattr("karaoke_forge.media._ensure_demucs_legacy_model", lambda *_args: None)
+    certificate_bundle = tmp_path / "cacert.pem"
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: str(certificate_bundle)),
+    )
     messages: list[str] = []
 
     result = separate_vocals(audio, output_dir, device="cpu", progress=messages.append)
@@ -148,6 +155,7 @@ def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, mo
     command = captured["command"]
     assert command[3:5] == ["-d", "cpu"]
     assert captured["environment"]["HF_HUB_OFFLINE"] == "1"
-    assert captured["environment"]["SSL_CERT_FILE"]
+    assert captured["environment"]["SSL_CERT_FILE"] == str(certificate_bundle)
+    assert captured["environment"]["REQUESTS_CA_BUNDLE"] == str(certificate_bundle)
     assert any("Downloading model" in message for message in messages)
     assert messages[-1].startswith("Demucs 人声分离完成")

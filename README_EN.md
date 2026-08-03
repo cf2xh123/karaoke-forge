@@ -1,8 +1,8 @@
 # Karaoke Forge
 
-> Version 0.7.0 keeps Demucs optional. On Windows, run
-> `安装人声分离（Demucs）.bat` and choose the recommended CPU build or the optional NVIDIA
-> build. The CUDA Torch download is about 1.9 GB.
+> Version 0.7.1 makes Windows setup self-contained with a project-private Python
+> runtime. Demucs remains optional, with a recommended CPU build and an optional
+> NVIDIA build.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -26,11 +26,14 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.7.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.7.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 
-Python 3.10+ and [FFmpeg](https://ffmpeg.org/download.html) are required.
+Manual installation requires Python 3.10+ and
+[FFmpeg](https://ffmpeg.org/download.html). On Windows, the first-time setup batch file
+downloads a pinned private Python 3.12.10 runtime into the project, so no system Python
+or Conda installation is required and the global `PATH` is not changed.
 
 ```bash
 python -m venv .venv
@@ -53,7 +56,9 @@ karaoke-forge web
 ```
 
 On Windows, non-technical users can double-click `首次安装.bat` once and use
-`启动网页版.bat` afterwards. The browser interface covers complete video creation,
+`启动网页版.bat` afterwards. The first setup downloads an approximately 14 MB official
+Python NuGet runtime into `.runtime` and creates the isolated `.venv`. The browser
+interface covers complete video creation,
 timeline-only export, lyric/pronunciation editing, format conversion, and environment
 checks. Media is processed by the local service and is not automatically uploaded to
 the public internet.

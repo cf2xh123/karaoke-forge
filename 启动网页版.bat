@@ -1,19 +1,21 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title Karaoke Forge - 本地网页
+title Karaoke Forge - Local web app
+set "PYTHONUTF8=1"
 
 if not exist ".venv\Scripts\python.exe" (
-  echo 尚未完成首次安装。
-  echo 请先双击“首次安装.bat”。
+  echo First-time setup has not completed.
+  echo Run the setup batch file in this folder first.
   pause
   exit /b 1
 )
 
-echo 正在启动 Karaoke Forge...
-echo 浏览器会自动打开。请不要关闭这个窗口，使用结束后按 Ctrl+C。
+echo Starting Karaoke Forge...
+echo The browser will open automatically. Keep this window open.
+echo Press Ctrl+C here when you want to stop the app.
 ".venv\Scripts\python.exe" -m karaoke_forge web
 
 echo.
-echo 网页已经停止。
+echo The web app has stopped.
 pause
