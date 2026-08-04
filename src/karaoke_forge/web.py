@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .artwork import ArtworkError, download_public_cover
 from .ass import AssStyle
 from .editor import (
     apply_editor_rows,
@@ -52,6 +53,12 @@ from .pipeline import (
     normalize_timing_refinement,
     refine_audio_word_timing_with_fallback,
     should_refine_timing,
+)
+from .projects import (
+    PROJECT_FILENAME,
+    load_recent_workspace,
+    load_workspace_project,
+    save_workspace_project,
 )
 from .pronunciation import generate_pronunciation
 from .qqmusic import QQMusicSongInfo, fetch_public_qqmusic_info
@@ -1927,6 +1934,56 @@ def _file_path(value: object | None) -> Path | None:
     return None
 
 
+def _file_paths(value: object | None) -> tuple[Path, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, os.PathLike)):
+        return tuple(path for item in value if (path := _file_path(item)) is not None)
+    path = _file_path(value)
+    return (path,) if path is not None else ()
+
+
+def _validated_cover(value: object | None) -> Path | None:
+    cover = _file_path(value)
+    if cover is None:
+        return None
+    if not cover.is_file():
+        raise ValueError("选择的封面图片不存在，请重新上传。")
+    if cover.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        raise ValueError("封面仅支持 JPG、PNG、WebP 或 BMP 图片。")
+    return cover
+
+
+def _validated_fonts(value: object | None) -> tuple[Path, ...]:
+    fonts = _file_paths(value)
+    for font in fonts:
+        if not font.is_file():
+            raise ValueError(f"字体文件不存在：{font.name}")
+        if font.suffix.lower() not in {".ttf", ".otf", ".ttc"}:
+            raise ValueError(f"字体仅支持 TTF、OTF 或 TTC：{font.name}")
+    return fonts
+
+
+def _online_cover_for_job(
+    local_cover: Path | None,
+    cover_url: str | None,
+    job_dir: Path,
+    report: Callable[[str], None],
+) -> Path | None:
+    if local_cover is not None:
+        report("已使用本地上传的专辑封面")
+        return local_cover
+    if not cover_url:
+        return None
+    try:
+        cover = download_public_cover(cover_url, job_dir / "online-album-cover")
+    except ArtworkError as exc:
+        report(f"在线专辑封面读取失败，将等待本地封面：{exc}")
+        return None
+    report("已读取在线歌曲信息中的专辑封面")
+    return cover
+
+
 def _safe_stem(value: str | None, fallback: str = "karaoke") -> str:
     stem = Path((value or "").strip()).stem
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", stem)
@@ -2011,7 +2068,9 @@ def inspect_make_lyrics(lyrics_file: object | None) -> str:
 def exported_project_for_make(files: object) -> tuple[str | None, str]:
     """Select the recoverable JSON from one editor export for the make page."""
 
-    values = files if isinstance(files, Sequence) and not isinstance(files, (str, bytes)) else [files]
+    values = (
+        files if isinstance(files, Sequence) and not isinstance(files, (str, bytes)) else [files]
+    )
     for value in values:
         path = _file_path(value)
         if path is not None and path.suffix.lower() == ".json" and path.is_file():
@@ -2324,9 +2383,7 @@ def _materialize_auto_pronunciation(
     """Persist generated readings so the editor can adjust them before rendering."""
 
     document.metadata["auto_pronunciation"] = "true" if enabled else "false"
-    document.metadata["auto_english_pronunciation"] = (
-        "true" if include_english else "false"
-    )
+    document.metadata["auto_english_pronunciation"] = "true" if include_english else "false"
     if not enabled:
         return 0
     generated_count = 0
@@ -2372,6 +2429,11 @@ def prepare_make_editor_job(
     use_utaten_lyrics: bool = True,
     utaten_pronunciation_only: bool = False,
     auto_english_pronunciation: bool = True,
+    cover_file: object | None = None,
+    font_files: object | None = None,
+    font: str = "Microsoft YaHei",
+    cover_style: str = "aurora",
+    cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2388,17 +2450,19 @@ def prepare_make_editor_job(
     try:
         audio = _file_path(audio_file)
         video = _file_path(video_file)
-        if video is None or not video.is_file():
-            raise ValueError("请先在制作页上传对应的 MV；之后无需再次上传。")
+        if video is not None and not video.is_file():
+            video = None
+        cover = _validated_cover(cover_file)
+        fonts = _validated_fonts(font_files)
         using_mv_audio = False
         if audio is None or not audio.is_file():
-            has_video_audio = probe_media_has_audio(video)
+            has_video_audio = probe_media_has_audio(video) if video is not None else False
             if has_video_audio is True:
                 audio = video
                 using_mv_audio = True
             elif has_video_audio is False:
                 raise ValueError(
-                    "未上传独立歌曲音频，而且这个 MV 不含可用音轨；请上传歌曲音频后再校准。"
+                    "未上传独立歌曲音频，且 MV 不含可用音轨或没有上传 MV；请上传歌曲音频后再校准。"
                 )
             else:
                 raise ValueError(
@@ -2441,15 +2505,33 @@ def prepare_make_editor_job(
             utaten_info = fetch_public_utaten_info(uta_link)
             report("已从 UtaTen 读取公开歌词和页面假名，不下载音频")
 
+        online_cover_url = (
+            netease_info.cover_url
+            if netease_info is not None
+            else qqmusic_info.cover_url
+            if qqmusic_info is not None
+            else None
+        )
+        cover = _online_cover_for_job(cover, online_cover_url, job_dir, report)
+        if video is None and cover is None:
+            raise ValueError(
+                "没有上传 MV 时，请上传一张专辑图片；"
+                "也可以填写带公开封面的网易云或 QQ 音乐单曲链接。"
+            )
+
         translated_lyrics = (
             netease_info.translated_lyrics
             if netease_info is not None
-            else qqmusic_info.translated_lyrics if qqmusic_info is not None else None
+            else qqmusic_info.translated_lyrics
+            if qqmusic_info is not None
+            else None
         )
         reference_lyrics = (
             netease_info.page_lyrics
             if netease_info is not None
-            else qqmusic_info.page_lyrics if qqmusic_info is not None else None
+            else qqmusic_info.page_lyrics
+            if qqmusic_info is not None
+            else None
         )
 
         provided_lyrics = lyrics_file is not None or bool(pasted_lyrics and pasted_lyrics.strip())
@@ -2485,10 +2567,7 @@ def prepare_make_editor_job(
             if netease_info.translated_lyrics and lyrics_path.suffix == ".json":
                 report("已附加网易云中文翻译")
         elif (
-            qq_link
-            and use_qqmusic_lyrics
-            and qqmusic_info is not None
-            and qqmusic_info.page_lyrics
+            qq_link and use_qqmusic_lyrics and qqmusic_info is not None and qqmusic_info.page_lyrics
         ):
             lyrics_path = job_dir / "qqmusic-lyrics.lrc"
             lyrics_path.write_text(qqmusic_info.page_lyrics, encoding="utf-8")
@@ -2582,10 +2661,7 @@ def prepare_make_editor_job(
                     model=model,
                     separate_vocals=separate_vocals,
                 )
-                report(
-                    f"匹配覆盖率 {aligned.report.coverage:.1%}，"
-                    "已生成可恢复的保底校准工程"
-                )
+                report(f"匹配覆盖率 {aligned.report.coverage:.1%}，已生成可恢复的保底校准工程")
             else:
                 timing_summary = (
                     f"已按上传音频生成时间轴，匹配覆盖率 **{aligned.report.coverage:.1%}**。"
@@ -2611,9 +2687,13 @@ def prepare_make_editor_job(
             else utaten_info.title
             if utaten_info is not None
             else video.stem
+            if video is not None
+            else audio.stem
         )
         fallback_stem = f"{source_title}-校准工程"
         stem = _safe_stem(output_name, fallback=fallback_stem)
+        manifest_path = job_dir / PROJECT_FILENAME
+        document.metadata["workspace_manifest"] = str(manifest_path)
         exports = export_formats(
             document,
             job_dir,
@@ -2621,7 +2701,22 @@ def prepare_make_editor_job(
             ["lrc", "elrc", "srt", "vtt", "ass", "json"],
         )
         project = exports["json"]
-        files = [str(path) for path in exports.values()]
+        workspace = save_workspace_project(
+            job_dir,
+            name=stem,
+            lyrics_project=project,
+            audio=audio,
+            video=video,
+            cover=cover,
+            font_files=fonts,
+            settings={
+                "font": font,
+                "cover_style": cover_style,
+                "cover_waveform": bool(cover_waveform),
+            },
+            recent_root=_default_output_root(),
+        )
+        files = [str(path) for path in exports.values()] + [str(workspace.manifest)]
         line_number = 1
         line = document.lines[0]
         status = (
@@ -2640,7 +2735,8 @@ def prepare_make_editor_job(
                     else "英语片假名自动注音已关闭。"
                 )
             )
-            + "已沿用制作页的音频和 MV；现在可逐句试听和微调，完成后再渲染视频。"
+            + "音频、MV/封面和字体已保存为可恢复工程；"
+            "现在可逐句试听和微调，完成后再渲染视频。"
         )
         report("校准工程已生成并送入编辑器")
         return UiEditorPreparationResult(
@@ -2712,6 +2808,10 @@ def run_make_job(
     use_utaten_lyrics: bool = True,
     utaten_pronunciation_only: bool = False,
     auto_english_pronunciation: bool = True,
+    cover_file: object | None = None,
+    font_files: object | None = None,
+    cover_style: str = "aurora",
+    cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2727,13 +2827,15 @@ def run_make_job(
     try:
         audio = _file_path(audio_file)
         video = _file_path(video_file)
-        if video is None or not video.is_file():
-            raise ValueError("请先上传对应的 MV 视频。")
+        if video is not None and not video.is_file():
+            video = None
+        cover = _validated_cover(cover_file)
+        fonts = _validated_fonts(font_files)
         if audio is not None and not audio.is_file():
             audio = None
 
         video_audio_state: bool | None = None
-        if audio is None:
+        if audio is None and video is not None:
             video_audio_state = probe_media_has_audio(video)
             if video_audio_state is True:
                 audio = video
@@ -2781,7 +2883,7 @@ def run_make_job(
                     temporary_audio = track.audio_path
             else:
                 netease_info = fetch_public_netease_info(link)
-                if audio.resolve() == video.resolve():
+                if video is not None and audio.resolve() == video.resolve():
                     report("已使用 MV 内嵌完整音轨，仅从网易云读取公开歌曲信息和歌词")
                 else:
                     report("已使用本地音频，仅从网易云读取公开歌曲信息和歌词")
@@ -2789,7 +2891,7 @@ def run_make_job(
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用 QQ 音乐链接。")
             qqmusic_info = fetch_public_qqmusic_info(qq_link)
-            if audio is not None and audio.resolve() == video.resolve():
+            if video is not None and audio is not None and audio.resolve() == video.resolve():
                 report("已使用 MV 内嵌完整音轨，仅从 QQ 音乐读取公开歌词")
             elif audio is not None:
                 report("已使用本地音频，仅从 QQ 音乐读取公开歌词")
@@ -2799,14 +2901,33 @@ def run_make_job(
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用 UtaTen 歌词链接。")
             utaten_info = fetch_public_utaten_info(uta_link)
-            if audio is not None and audio.resolve() == video.resolve():
+            if video is not None and audio is not None and audio.resolve() == video.resolve():
                 report("已使用 MV 内嵌完整音轨，仅从 UtaTen 读取公开歌词和假名")
             elif audio is not None:
                 report("已使用本地音频，仅从 UtaTen 读取公开歌词和假名")
             else:
                 report("UtaTen 链接只提供公开歌词和假名，不下载歌曲音频")
 
+        online_cover_url = (
+            netease_info.cover_url
+            if netease_info is not None
+            else qqmusic_info.cover_url
+            if qqmusic_info is not None
+            else None
+        )
+        cover = _online_cover_for_job(cover, online_cover_url, job_dir, report)
+        if video is None and cover is None:
+            raise ValueError(
+                "没有上传 MV 时，请上传一张专辑图片；"
+                "也可以填写带公开封面的网易云或 QQ 音乐单曲链接。"
+            )
+
         if audio is None or not audio.is_file():
+            if video is None:
+                raise ValueError(
+                    "无 MV 制作需要完整歌曲音频；请上传 MP3、FLAC、WAV 或 M4A，"
+                    "也可以提供可公开播放的网易云单曲链接。"
+                )
             if video_audio_state is False:
                 raise ValueError(
                     "未上传独立歌曲音频，而且该 MV 不含可用音轨；"
@@ -2829,12 +2950,16 @@ def run_make_job(
         translated_lyrics = (
             netease_info.translated_lyrics
             if netease_info is not None
-            else qqmusic_info.translated_lyrics if qqmusic_info is not None else None
+            else qqmusic_info.translated_lyrics
+            if qqmusic_info is not None
+            else None
         )
         reference_lyrics = (
             netease_info.page_lyrics
             if netease_info is not None
-            else qqmusic_info.page_lyrics if qqmusic_info is not None else None
+            else qqmusic_info.page_lyrics
+            if qqmusic_info is not None
+            else None
         )
 
         provided_lyrics = lyrics_file is not None or bool(pasted_lyrics and pasted_lyrics.strip())
@@ -2870,10 +2995,7 @@ def run_make_job(
             if netease_info.translated_lyrics and lyrics.suffix == ".json":
                 report("已附加网易云中文翻译，将固定显示在画面顶部")
         elif (
-            qq_link
-            and use_qqmusic_lyrics
-            and qqmusic_info is not None
-            and qqmusic_info.page_lyrics
+            qq_link and use_qqmusic_lyrics and qqmusic_info is not None and qqmusic_info.page_lyrics
         ):
             lyrics = job_dir / "qqmusic-lyrics.lrc"
             lyrics.write_text(qqmusic_info.page_lyrics, encoding="utf-8")
@@ -2924,6 +3046,8 @@ def run_make_job(
             else utaten_info.title
             if utaten_info is not None
             else video.stem
+            if video is not None
+            else audio.stem
         )
         fallback_stem = f"{source_title}-karaoke"
         stem = _safe_stem(output_name, fallback=fallback_stem)
@@ -2961,13 +3085,45 @@ def run_make_job(
                 overwrite=False,
                 auto_sync=auto_sync,
                 timing_refinement=_web_timing_refinement(timing_refinement),
+                cover_image=cover,
+                font_files=fonts,
+                cover_style=cover_style,
+                cover_waveform=bool(cover_waveform),
             ),
             progress=report,
         )
+        manifest_path = job_dir / PROJECT_FILENAME
+        project_document = getattr(result, "document", None) or read_lyrics(lyrics)
+        project_document.metadata["workspace_manifest"] = str(manifest_path)
+        project_json = result.exports.get("json") or (job_dir / f"{stem}.json")
+        project_json.write_text(write_format(project_document, "json"), encoding="utf-8")
+        workspace = save_workspace_project(
+            job_dir,
+            name=stem,
+            lyrics_project=project_json,
+            audio=audio,
+            video=video,
+            cover=cover,
+            font_files=fonts,
+            settings={
+                "font": font,
+                "font_size": int(font_size),
+                "quality": quality,
+                "auto_english_pronunciation": bool(auto_english_pronunciation),
+                "cover_style": cover_style,
+                "cover_waveform": bool(cover_waveform),
+            },
+            recent_root=_default_output_root(),
+        )
         if temporary_audio:
             temporary_audio.unlink(missing_ok=True)
-            report("本次获取的临时音频已清理")
-        files = [str(result.video), *(str(path) for path in result.exports.values())]
+            report("本次获取的临时音频已保存进工程，并清理下载缓存")
+        files = [
+            str(result.video),
+            *(str(path) for path in result.exports.values()),
+            *([] if "json" in result.exports else [str(project_json)]),
+            str(workspace.manifest),
+        ]
         timing_warning = getattr(result, "timing_refinement_warning", None)
         if timing_warning:
             alignment = f"⚠️ {timing_warning}"
@@ -2985,8 +3141,10 @@ def run_make_job(
                 f"\n\n自动定位到歌曲从 MV 第 **{sync_result.offset:.2f} 秒**开始，"
                 f"置信度 **{sync_result.confidence:.0%}**。"
             )
-        elif audio.resolve() == video.resolve():
+        elif video is not None and audio.resolve() == video.resolve():
             sync_text = "\n\n已直接使用 MV 内嵌完整音轨。"
+        elif video is None:
+            sync_text = "\n\n已使用虚化背景与旋转专辑封面生成无 MV 版本。"
         else:
             sync_text = ""
         status = (
@@ -3926,7 +4084,16 @@ def export_editor_project(
         whole_line,
         pronunciation_table,
     )
-    job_dir = _new_job_dir("editor")
+    workspace = None
+    manifest_value = document.metadata.get("workspace_manifest")
+    if manifest_value:
+        try:
+            workspace = load_workspace_project(manifest_value)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            workspace = None
+    job_dir = workspace.manifest.parent if workspace is not None else _new_job_dir("editor")
+    manifest_path = job_dir / PROJECT_FILENAME
+    document.metadata["workspace_manifest"] = str(manifest_path)
     stem = _safe_stem(output_name, fallback="edited-lyrics")
     formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.visible_lines else ["json"]
     exports = export_formats(
@@ -3934,6 +4101,17 @@ def export_editor_project(
         job_dir,
         stem,
         formats,
+    )
+    save_workspace_project(
+        job_dir,
+        name=stem,
+        lyrics_project=exports["json"],
+        audio=workspace.audio if workspace is not None else None,
+        video=workspace.video if workspace is not None else None,
+        cover=workspace.cover if workspace is not None else None,
+        font_files=workspace.font_files if workspace is not None else (),
+        settings=workspace.settings if workspace is not None else {},
+        recent_root=_default_output_root(),
     )
     hidden_count = sum(line.hidden for line in document.lines)
     visibility_note = (
@@ -4035,6 +4213,7 @@ def handoff_editor_to_make(
 def handoff_make_readiness(
     video_file: object | None,
     lyrics_file: object | None,
+    cover_file: object | None = None,
 ) -> UiJobResult | None:
     """Return a user-facing stop result when an editor handoff cannot render yet."""
 
@@ -4052,17 +4231,18 @@ def handoff_make_readiness(
         )
 
     video = _file_path(video_file)
-    if video is None or not video.is_file():
+    cover = _file_path(cover_file)
+    if (video is None or not video.is_file()) and (cover is None or not cover.is_file()):
         return UiJobResult(
             status=(
                 "### ✅ 校准歌词已载入制作页\n"
                 f"已采用 `{lyrics.name}`，编辑结果不会丢失。\n\n"
-                "### 下一步：请上传对应 MV\n"
-                "选择 MV 后点击“生成卡拉 OK 视频”即可继续；校准音频和歌词无需重复上传。"
+                "### 下一步：请上传对应 MV 或一张专辑图片\n"
+                "选择 MV，或用专辑图片生成旋转唱片画面；校准音频和歌词无需重复上传。"
             ),
             video=None,
             files=[],
-            log="已保留校准歌词和音频；制作页尚未选择 MV，因此没有启动最终渲染。",
+            log="已保留校准歌词和音频；制作页尚未选择 MV 或专辑图片。",
             output_dir=None,
         )
 
@@ -4199,22 +4379,44 @@ def create_web_app() -> object:
                         gr.Markdown("## 选择制作素材")
                         with gr.Row():
                             make_audio = gr.File(
-                                label="① 歌曲音频（可选；有声 MV 可直接使用其音轨）",
+                                label="① 歌曲音频（无 MV 时必填；有声 MV 可用其音轨）",
                                 file_types=["audio"],
                                 type="filepath",
                             )
                             make_video = gr.File(
-                                label="② 对应 MV",
+                                label="② 对应 MV（可选）",
                                 file_types=["video"],
                                 type="filepath",
                             )
                             make_lyrics = gr.File(
                                 label=(
-                                    "③ 已生成歌词/字幕项目"
-                                    "（推荐 JSON，也支持 ASS/LRC/SRT/VTT）"
+                                    "③ 已生成歌词/字幕项目（推荐 JSON，也支持 ASS/LRC/SRT/VTT）"
                                 ),
                                 file_types=[".txt", ".lrc", ".srt", ".vtt", ".ass", ".json"],
                                 type="filepath",
+                            )
+                        make_cover = gr.File(
+                            label="没有 MV？上传专辑图片（可选；在线歌曲链接也会尝试读取封面）",
+                            file_types=["image"],
+                            type="filepath",
+                        )
+                        gr.Markdown(
+                            "> 不上传 MV 时，将以专辑图生成虚化背景，并让中间的圆形唱片缓慢旋转。"
+                        )
+                        with gr.Row():
+                            make_cover_style = gr.Dropdown(
+                                label="无 MV 画面风格",
+                                choices=[
+                                    ("星环舞台 · AI 原创场景与双层声浪", "aurora"),
+                                    ("午夜黑胶 · 悬浮唱片与金色脉冲", "vinyl"),
+                                    ("极光唱片 · 居中封面与环绕声浪", "halo"),
+                                    ("银河频谱 · 左侧唱片与动态频谱", "spectrum"),
+                                ],
+                                value="aurora",
+                            )
+                            make_cover_waveform = gr.Checkbox(
+                                label="显示随音乐实时变化的波形 / 频谱",
+                                value=True,
                             )
                         make_lyrics_status = gr.Markdown("尚未选择歌词文件。")
                         with gr.Accordion("没有歌词文件？直接粘贴歌词", open=False):
@@ -4256,8 +4458,7 @@ def create_web_app() -> object:
                             )
                             make_utaten_pronunciation_only = gr.Checkbox(
                                 label=(
-                                    "有自己的歌词时，仅使用 UtaTen 官方注音"
-                                    "（正文和时间轴保持不变）"
+                                    "有自己的歌词时，仅使用 UtaTen 官方注音（正文和时间轴保持不变）"
                                 ),
                                 value=False,
                             )
@@ -4357,6 +4558,16 @@ def create_web_app() -> object:
                             )
                             make_font_size = gr.Slider(32, 88, value=58, step=1, label="字号")
                             make_margin = gr.Slider(30, 180, value=72, step=2, label="底部距离")
+                        make_font_files = gr.File(
+                            label="导入自定义字体（TTF / OTF / TTC，可多选；会随工程保存）",
+                            file_types=[".ttf", ".otf", ".ttc"],
+                            file_count="multiple",
+                            type="filepath",
+                        )
+                        gr.Markdown(
+                            "> 字体名称一般填写字体文件显示的家族名；上传后会先用首个文件名自动填入，"
+                            "若预览不一致可手动修改。请只使用有授权的字体。"
+                        )
                         with gr.Row():
                             make_text_color = gr.ColorPicker(label="未唱颜色", value="#FFFFFF")
                             make_highlight_color = gr.ColorPicker(
@@ -4384,7 +4595,7 @@ def create_web_app() -> object:
                                 value=True,
                             )
                             make_auto_english_pronunciation = gr.Checkbox(
-                                label="自动生成英语片假名（不影响手动或 UtaTen 官方注音）",
+                                label="显示英语片假名（关闭后也会过滤旧工程和已导入的英文注音）",
                                 value=True,
                             )
                             make_pronunciation_size = gr.Slider(
@@ -4720,8 +4931,7 @@ def create_web_app() -> object:
                     qqmusic_link = gr.Textbox(
                         label="QQ 音乐单曲链接",
                         placeholder=(
-                            "可粘贴完整分享文字，或 "
-                            "https://y.qq.com/n/ryqq_v2/songDetail/..."
+                            "可粘贴完整分享文字，或 https://y.qq.com/n/ryqq_v2/songDetail/..."
                         ),
                     )
                     qqmusic_name = gr.Textbox(label="输出名称", value="QQ音乐歌词时间轴")
@@ -5093,6 +5303,10 @@ def create_web_app() -> object:
             use_utaten_lyrics: bool,
             utaten_pronunciation_only: bool,
             auto_english_pronunciation: bool,
+            cover: object,
+            font_files: object,
+            cover_style: str,
+            cover_waveform: bool,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -5135,6 +5349,10 @@ def create_web_app() -> object:
                 use_utaten_lyrics,
                 utaten_pronunciation_only,
                 auto_english_pronunciation,
+                cover,
+                font_files,
+                cover_style,
+                cover_waveform,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -5167,6 +5385,11 @@ def create_web_app() -> object:
             use_utaten_lyrics: bool,
             utaten_pronunciation_only: bool,
             auto_english_pronunciation: bool,
+            cover: object,
+            font_files: object,
+            font: str,
+            cover_style: str,
+            cover_waveform: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
@@ -5193,6 +5416,11 @@ def create_web_app() -> object:
                 use_utaten_lyrics,
                 utaten_pronunciation_only,
                 auto_english_pronunciation,
+                cover,
+                font_files,
+                font,
+                cover_style,
+                cover_waveform,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5247,6 +5475,11 @@ def create_web_app() -> object:
                 make_use_utaten_lyrics,
                 make_utaten_pronunciation_only,
                 make_auto_english_pronunciation,
+                make_cover,
+                make_font_files,
+                make_font,
+                make_cover_style,
+                make_cover_waveform,
             ],
             outputs=[
                 editor_payload,
@@ -5309,6 +5542,10 @@ def create_web_app() -> object:
                 make_use_utaten_lyrics,
                 make_utaten_pronunciation_only,
                 make_auto_english_pronunciation,
+                make_cover,
+                make_font_files,
+                make_cover_style,
+                make_cover_waveform,
             ],
             outputs=[
                 make_status,
@@ -5495,6 +5732,69 @@ def create_web_app() -> object:
                 result[3],
             )
             return (*result, token_timeline, token_json, {})
+
+        def restore_recent_workspace() -> tuple[object, ...]:
+            workspace = load_recent_workspace(_default_output_root())
+            if workspace is None:
+                return tuple(gr.skip() for _ in range(22))
+            loaded = list(load_editor_project_workspace(workspace.lyrics_project))
+            loaded[2] = (
+                f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
+                "歌词、音频、MV/封面和字体均可继续微调；每次导出都会更新同一工程。"
+            )
+            audio = str(workspace.audio) if workspace.audio and workspace.audio.is_file() else None
+            video = str(workspace.video) if workspace.video and workspace.video.is_file() else None
+            cover = str(workspace.cover) if workspace.cover and workspace.cover.is_file() else None
+            font_files = [str(path) for path in workspace.font_files]
+            settings = workspace.settings or {}
+            font_name = str(settings.get("font") or "Microsoft YaHei")
+            cover_style = str(settings.get("cover_style") or "aurora")
+            cover_waveform = bool(settings.get("cover_waveform", True))
+            make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
+            return (
+                *loaded,
+                str(workspace.lyrics_project),
+                audio,
+                audio,
+                video,
+                cover,
+                font_files,
+                workspace.name,
+                font_name,
+                cover_style,
+                cover_waveform,
+                gr.update(selected="editor"),
+                make_status,
+            )
+
+        app.load(
+            restore_recent_workspace,
+            outputs=[
+                editor_payload,
+                editor_lines,
+                editor_status,
+                editor_line_number,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_preview,
+                editor_token_timeline,
+                editor_token_json,
+                editor_line_undo_payload,
+                editor_source,
+                editor_audio,
+                make_audio,
+                make_video,
+                make_cover,
+                make_font_files,
+                make_name,
+                make_font,
+                make_cover_style,
+                make_cover_waveform,
+                main_tabs,
+                make_status,
+            ],
+            queue=False,
+        )
 
         def load_editor_line_workspace(
             payload: dict[str, Any],
@@ -6095,19 +6395,16 @@ def create_web_app() -> object:
             ],
         )
         editor_toggle_line_event = editor_toggle_line_hidden.click(
-            lambda payload,
-            table,
-            line_number,
-            token_json,
-            whole,
-            units: apply_editor_current_line_action_workspace(
-                payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                "toggle-hidden",
+            lambda payload, table, line_number, token_json, whole, units: (
+                apply_editor_current_line_action_workspace(
+                    payload,
+                    table,
+                    line_number,
+                    token_json,
+                    whole,
+                    units,
+                    "toggle-hidden",
+                )
             ),
             inputs=[
                 editor_payload,
@@ -6126,19 +6423,16 @@ def create_web_app() -> object:
             ],
         )
         editor_delete_line_event = editor_delete_line.click(
-            lambda payload,
-            table,
-            line_number,
-            token_json,
-            whole,
-            units: apply_editor_current_line_action_workspace(
-                payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                "delete",
+            lambda payload, table, line_number, token_json, whole, units: (
+                apply_editor_current_line_action_workspace(
+                    payload,
+                    table,
+                    line_number,
+                    token_json,
+                    whole,
+                    units,
+                    "delete",
+                )
             ),
             inputs=[
                 editor_payload,
@@ -6238,78 +6532,62 @@ def create_web_app() -> object:
         for timing_button, timing_function in [
             (
                 editor_start_earlier,
-                lambda payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                undo_state: nudge_editor_timing_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    undo_state,
-                    start_delta=-0.1,
+                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                    nudge_editor_timing_workspace(
+                        payload,
+                        table,
+                        line_number,
+                        token_json,
+                        whole,
+                        units,
+                        undo_state,
+                        start_delta=-0.1,
+                    )
                 ),
             ),
             (
                 editor_start_later,
-                lambda payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                undo_state: nudge_editor_timing_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    undo_state,
-                    start_delta=0.1,
+                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                    nudge_editor_timing_workspace(
+                        payload,
+                        table,
+                        line_number,
+                        token_json,
+                        whole,
+                        units,
+                        undo_state,
+                        start_delta=0.1,
+                    )
                 ),
             ),
             (
                 editor_end_earlier,
-                lambda payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                undo_state: nudge_editor_timing_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    undo_state,
-                    end_delta=-0.1,
+                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                    nudge_editor_timing_workspace(
+                        payload,
+                        table,
+                        line_number,
+                        token_json,
+                        whole,
+                        units,
+                        undo_state,
+                        end_delta=-0.1,
+                    )
                 ),
             ),
             (
                 editor_end_later,
-                lambda payload,
-                table,
-                line_number,
-                token_json,
-                whole,
-                units,
-                undo_state: nudge_editor_timing_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    undo_state,
-                    end_delta=0.1,
+                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                    nudge_editor_timing_workspace(
+                        payload,
+                        table,
+                        line_number,
+                        token_json,
+                        whole,
+                        units,
+                        undo_state,
+                        end_delta=0.1,
+                    )
                 ),
             ),
         ]:
@@ -6570,14 +6848,18 @@ def create_web_app() -> object:
             use_utaten_lyrics: bool,
             utaten_pronunciation_only: bool,
             auto_english_pronunciation: bool,
+            cover: object,
+            font_files: object,
+            cover_style: str,
+            cover_waveform: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             if not handoff_ready:
                 return tuple(gr.skip() for _ in range(5))
 
-            stop_result = handoff_make_readiness(video, lyrics)
+            stop_result = handoff_make_readiness(video, lyrics, cover)
             if stop_result is not None:
-                progress(1.0, desc="等待上传 MV")
+                progress(1.0, desc="等待上传 MV 或专辑图片")
                 return (
                     stop_result.status,
                     stop_result.video,
@@ -6623,6 +6905,10 @@ def create_web_app() -> object:
                 use_utaten_lyrics,
                 utaten_pronunciation_only,
                 auto_english_pronunciation,
+                cover,
+                font_files,
+                cover_style,
+                cover_waveform,
                 progress=progress,
             )
 
@@ -6666,6 +6952,10 @@ def create_web_app() -> object:
                 make_use_utaten_lyrics,
                 make_utaten_pronunciation_only,
                 make_auto_english_pronunciation,
+                make_cover,
+                make_font_files,
+                make_cover_style,
+                make_cover_waveform,
             ],
             outputs=[
                 make_status,
@@ -6693,6 +6983,12 @@ def create_web_app() -> object:
             inspect_make_lyrics,
             inputs=make_lyrics,
             outputs=make_lyrics_status,
+            queue=False,
+        )
+        make_font_files.change(
+            lambda files: _file_paths(files)[0].stem if _file_paths(files) else gr.skip(),
+            inputs=make_font_files,
+            outputs=make_font,
             queue=False,
         )
         refresh_environment.click(

@@ -9,6 +9,7 @@ from .ass import AssStyle
 from .formats import export_formats, read_lyrics
 from .media import (
     AudioSyncResult,
+    create_spinning_cover_video,
     detect_audio_sync,
     probe_media_has_audio,
     render_karaoke_video,
@@ -36,6 +37,10 @@ class MakeOptions:
     auto_sync: bool = False
     timing_refinement: str = "auto"
     refine_word_timing: bool | None = None
+    cover_image: Path | None = None
+    font_files: tuple[Path, ...] = ()
+    cover_style: str = "aurora"
+    cover_waveform: bool = True
 
 
 @dataclass(frozen=True)
@@ -52,7 +57,7 @@ class MakeResult:
 
 def make_karaoke_video(
     audio_path: str | Path,
-    video_path: str | Path,
+    video_path: str | Path | None,
     lyrics_path: str | Path,
     output_path: str | Path,
     assets_dir: str | Path,
@@ -64,20 +69,39 @@ def make_karaoke_video(
 
     options = options or MakeOptions()
     audio = Path(audio_path)
-    video_source = Path(video_path)
+    video_source = Path(video_path) if video_path is not None else None
     output = Path(output_path)
     assets = Path(assets_dir)
     if not audio.is_file():
         raise FileNotFoundError(f"Audio file not found: {audio}")
-    if not video_source.is_file():
+    if video_source is not None and not video_source.is_file():
         raise FileNotFoundError(f"Video file not found: {video_source}")
+    cover_image = Path(options.cover_image) if options.cover_image is not None else None
+    if video_source is None and (cover_image is None or not cover_image.is_file()):
+        raise ValueError("Video or cover image is required.")
     if output.exists() and not options.overwrite:
         raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
     assets.mkdir(parents=True, exist_ok=True)
 
+    generated_cover_background = video_source is None
+    if generated_cover_background:
+        assert cover_image is not None
+        video_source = create_spinning_cover_video(
+            cover_image,
+            audio,
+            assets / "spinning-cover-background.mp4",
+            overwrite=options.overwrite,
+            style=options.cover_style,
+            show_waveform=options.cover_waveform,
+            progress=progress,
+        )
+        if progress:
+            progress("没有 MV，已改用旋转专辑封面作为画面")
+    assert video_source is not None
+
     effective_offset = options.audio_offset
     sync_result: AudioSyncResult | None = None
-    if options.auto_sync:
+    if options.auto_sync and not generated_cover_background:
         if audio.resolve() == video_source.resolve():
             if progress:
                 progress("正在使用 MV 内嵌完整音轨，无需额外偏移")
@@ -175,6 +199,7 @@ def make_karaoke_video(
         crf=options.crf,
         preset=options.preset,
         audio_bitrate=options.audio_bitrate,
+        font_files=options.font_files,
         overwrite=options.overwrite,
         progress=progress,
     )

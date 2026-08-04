@@ -40,15 +40,17 @@ def test_fetch_public_qqmusic_info_reads_lrc_metadata_and_translation(monkeypatc
             "https://y.qq.com/n/ryqq_v2/songDetail/001gQnW91BEDaN",
         ),
     )
-    monkeypatch.setattr(
-        "karaoke_forge.qqmusic._download_public_json",
-        lambda *_args, **_kwargs: {
+    def public_json(url, **_kwargs):
+        if "fcg_play_single_song" in url:
+            return {"data": [{"album": {"mid": "000CoverMid"}}]}
+        return {
             "retcode": 0,
             "lyric": "[ti:Example &amp; Song]\n[ar:Artist A/Artist B]\n"
             "[al:Album]\n[00:01.00]Hello",
             "trans": "[00:01.00]你好",
-        },
-    )
+        }
+
+    monkeypatch.setattr("karaoke_forge.qqmusic._download_public_json", public_json)
 
     info = fetch_public_qqmusic_info("song link")
 
@@ -58,6 +60,9 @@ def test_fetch_public_qqmusic_info_reads_lrc_metadata_and_translation(monkeypatc
     assert info.album == "Album"
     assert info.page_lyrics.endswith("[00:01.00]Hello\n")
     assert info.translated_lyrics == "[00:01.00]你好\n"
+    assert info.cover_url == (
+        "https://y.gtimg.cn/music/photo_new/T002R800x800M000000CoverMid.jpg"
+    )
 
 
 @pytest.mark.parametrize(

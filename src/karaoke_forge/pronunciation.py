@@ -154,5 +154,11 @@ def generate_pronunciation(
     return None
 
 
+def contains_english_word(text: str) -> bool:
+    """Return whether *text* contains a Latin-script word eligible for reading."""
+
+    return _ENGLISH_WORD_RE.search(text) is not None
+
+
 def pronunciation_dependencies_available() -> bool:
     return _default_english_lookup() is not None and _default_japanese_converter() is not None
