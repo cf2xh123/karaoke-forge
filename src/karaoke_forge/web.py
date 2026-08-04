@@ -3092,9 +3092,6 @@ def run_make_job(
             ),
             progress=report,
         )
-        if temporary_audio:
-            temporary_audio.unlink(missing_ok=True)
-            report("本次获取的临时音频已清理")
         manifest_path = job_dir / PROJECT_FILENAME
         project_document = getattr(result, "document", None) or read_lyrics(lyrics)
         project_document.metadata["workspace_manifest"] = str(manifest_path)
@@ -3118,6 +3115,9 @@ def run_make_job(
             },
             recent_root=_default_output_root(),
         )
+        if temporary_audio:
+            temporary_audio.unlink(missing_ok=True)
+            report("本次获取的临时音频已保存进工程，并清理下载缓存")
         files = [
             str(result.video),
             *(str(path) for path in result.exports.values()),
