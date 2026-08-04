@@ -92,7 +92,7 @@ def test_render_reports_disk_full_and_removes_new_partial_output(tmp_path, monke
     assert not output.exists()
 
 
-def test_spinning_cover_builds_blurred_circular_ffmpeg_graph(tmp_path, monkeypatch) -> None:
+def test_spinning_cover_builds_audio_reactive_aurora_graph(tmp_path, monkeypatch) -> None:
     cover = tmp_path / "cover.jpg"
     audio = tmp_path / "song.wav"
     output = tmp_path / "background.mp4"
@@ -114,8 +114,9 @@ def test_spinning_cover_builds_blurred_circular_ffmpeg_graph(tmp_path, monkeypat
     command = captured["command"]
     graph = command[command.index("-filter_complex") + 1]
     assert result == output
-    assert "gblur=sigma=42" in graph
-    assert "geq=r='18+7*sin" in graph
+    assert "midnight-stage.png" in " ".join(str(value) for value in command)
+    assert "geq=r='11+8*sin" in graph
+    assert "gblur=sigma=14" in graph
     assert "rotate=2*PI*t/12.000" in graph
     assert "showwaves=" in graph
     assert command[command.index("-t") + 1] == "42.500"

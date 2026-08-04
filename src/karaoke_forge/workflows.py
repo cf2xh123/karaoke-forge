@@ -39,7 +39,7 @@ class MakeOptions:
     refine_word_timing: bool | None = None
     cover_image: Path | None = None
     font_files: tuple[Path, ...] = ()
-    cover_style: str = "vinyl"
+    cover_style: str = "aurora"
     cover_waveform: bool = True
 
 

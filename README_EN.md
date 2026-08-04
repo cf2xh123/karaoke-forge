@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> Version 0.10.0 adds resumable projects, bundled custom fonts, and three
+> Version 0.10.1 adds resumable projects, bundled custom fonts, and four polished
 > audio-reactive album-art video styles for songs without an MV.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
@@ -15,8 +15,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Read TXT, LRC, enhanced LRC, SRT, VTT, ASS, and project JSON;
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
-- Render a no-MV version from local or NetEase/QQ Music cover art using a vinyl
-  turntable, cover glow, or frequency-stage style with real audio-driven visuals;
+- Render a no-MV version from local or NetEase/QQ Music cover art using four
+  audio-reactive styles on an original cinematic stage background;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;
@@ -31,7 +31,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.10.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.10.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 

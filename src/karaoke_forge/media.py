@@ -450,12 +450,12 @@ def create_spinning_cover_video(
     resolution: tuple[int, int] = (1920, 1080),
     duration: float | None = None,
     rotation_seconds: float = 12.0,
-    style: str = "vinyl",
+    style: str = "aurora",
     show_waveform: bool = True,
     overwrite: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
-    """Create a silent blurred-background video with a rotating circular cover."""
+    """Create a polished audio-reactive background from cover art and a song."""
 
     image = Path(image_path).resolve()
     audio = Path(audio_path).resolve()
@@ -471,100 +471,172 @@ def create_spinning_cover_video(
         raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
     width, height = resolution
     style = style.strip().lower()
-    if style not in {"vinyl", "halo", "spectrum"}:
+    if style not in {"aurora", "vinyl", "halo", "spectrum"}:
         raise ValueError(f"Unsupported cover video style: {style}")
-    disc_size = max(240, min(width, height) * 2 // 3)
     radius_expression = (
         "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
         "(min(W,H)/2)*(min(W,H)/2)),255,0)"
     )
     duration_text = f"{effective_duration:.3f}"
-    background = (
-        "[0:v]split=2[background][cover];"
-        f"[background]scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},gblur=sigma=42,eq=brightness=-0.28:saturation=0.9[bg];"
-    )
-    if style == "vinyl":
-        vinyl_size = max(360, min(width, height) * 3 // 4)
+    rotation = max(1.0, rotation_seconds)
+    stage_asset = Path(__file__).resolve().parent / "assets" / "visuals" / "midnight-stage.png"
+    stage_args: list[str] = []
+    if stage_asset.is_file():
+        stage_args = ["-loop", "1", "-i", str(stage_asset)]
+        background = (
+            "[0:v]null[cover];"
+            f"[2:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},format=rgba,"
+            "eq=brightness=-0.07:saturation=0.94[bg];"
+        )
+    else:
+        background = (
+            "[0:v]split=2[coverbgsrc][cover];"
+            f"[coverbgsrc]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma=54,"
+            "eq=brightness=-0.35:saturation=1.08,format=rgba,"
+            f"drawbox=x=0:y={height * 62 // 100}:w={width}:h={height * 38 // 100}:"
+            "color=0x02040B@0.18:t=fill[bg];"
+        )
+
+    if style == "aurora":
+        platter_size = max(280, min(width, height) * 49 // 100)
+        label_size = platter_size * 80 // 100
+        ring_size = platter_size + max(40, height * 5 // 100)
+        ring_expression = (
+            "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.472,min(W,H)*0.488),120,0)"
+        )
+        disc_graph = (
+            f"color=c=0x090B17:s={platter_size}x{platter_size}:d={duration_text}:r=30,"
+            "format=rgba,geq="
+            "r='11+8*sin(hypot(X-W/2,Y-H/2)*0.25)':"
+            "g='13+7*sin(hypot(X-W/2,Y-H/2)*0.25)':"
+            "b='24+11*sin(hypot(X-W/2,Y-H/2)*0.25)':"
+            f"a='{radius_expression}'[platter];"
+            f"[cover]scale={label_size}:{label_size}:force_original_aspect_ratio=increase,"
+            f"crop={label_size}:{label_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[label];"
+            "[platter][label]overlay=(W-w)/2:(H-h)/2:shortest=1[discbase];"
+            f"color=c=0x00000000:s={ring_size}x{ring_size}:d={duration_text}:r=30,"
+            "format=rgba,geq=r='94':g='218':b='255':"
+            f"a='{ring_expression}',gblur=sigma=3[ring];"
+            "[ring][discbase]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
+        )
+        filter_graph = background + disc_graph
+        if show_waveform:
+            wave_width = width * 76 // 100
+            filter_graph += (
+                f";[1:a]showwaves=s={wave_width}x170:mode=p2p:rate=30:"
+                "colors=0x6DE7FF,format=rgba,"
+                "colorkey=0x000000:0.32:0.12[wavebase];"
+                "[wavebase]split[wave][wavesoft];"
+                "[wavesoft]gblur=sigma=14,colorchannelmixer=aa=0.70[waveglow];"
+                f"[bg][waveglow]overlay=(W-w)/2:{height * 39 // 100}:shortest=1[wavebg];"
+                f"[wavebg][wave]overlay=(W-w)/2:{height * 39 // 100}:shortest=1[scene];"
+                f"[scene][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
+            )
+        else:
+            filter_graph += (
+                f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
+            )
+    elif style == "vinyl":
+        vinyl_size = max(340, min(width, height) * 58 // 100)
         label_size = vinyl_size * 58 // 100
-        arm_width = max(12, height // 50)
-        arm_height = max(180, height * 42 // 100)
-        arm_x = width // 2 + vinyl_size * 25 // 100
-        arm_y = height // 2 - vinyl_size * 55 // 100
-        pivot_size = max(46, height * 8 // 100)
+        disc_x = width * 8 // 100
+        disc_y = height * 5 // 100
         filter_graph = (
             background
-            + f"color=c=0x111214:s={vinyl_size}x{vinyl_size}:d={duration_text}:r=30,"
-            "format=rgba,"
-            "geq=r='18+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
-            "g='19+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
-            "b='21+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
+            + f"color=c=0x0A0B10:s={vinyl_size}x{vinyl_size}:d={duration_text}:r=30,"
+            "format=rgba,geq="
+            "r='12+9*sin(hypot(X-W/2,Y-H/2)*0.27)':"
+            "g='13+8*sin(hypot(X-W/2,Y-H/2)*0.27)':"
+            "b='17+8*sin(hypot(X-W/2,Y-H/2)*0.27)':"
             f"a='{radius_expression}'[vinyl];"
             f"[cover]scale={label_size}:{label_size}:force_original_aspect_ratio=increase,"
             f"crop={label_size}:{label_size},format=rgba,"
             f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
-            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
-            "ow=rotw(iw):oh=roth(ih):c=none[label];"
-            "[vinyl][label]overlay=(W-w)/2:(H-h)/2:shortest=1[record];"
-            "[bg][record]overlay=(W-w)/2:(H-h)/2+30:shortest=1[recordscene];"
-            f"color=c=0x303238:s={pivot_size}x{pivot_size}:d={duration_text}:r=30,"
-            "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-            f"a='{radius_expression}'[pivot];"
-            f"[recordscene][pivot]overlay="
-            f"{arm_x + arm_width + arm_height * 52 // 100 - pivot_size // 2}:"
-            f"{max(8, arm_y - pivot_size // 3)}:"
-            "shortest=1[turntable];"
-            f"color=c=white@0.88:s={arm_width}x{arm_height}:d={duration_text}:r=30,"
-            "format=rgba,"
-            "rotate=0.30:ow=rotw(iw):oh=roth(ih):c=none[arm];"
-            f"[turntable][arm]overlay={arm_x}:{arm_y}:shortest=1[scene]"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[label];"
+            "[vinyl][label]overlay=(W-w)/2:(H-h)/2:shortest=1[record]"
         )
         if show_waveform:
             filter_graph += (
-                f";[1:a]showwaves=s={width * 2 // 3}x110:mode=cline:rate=30:"
-                "colors=0xFFD166,format=rgba,colorchannelmixer=aa=0.78[wave];"
-                "[scene][wave]overlay=(W-w)/2:H*0.58:shortest=1[visual]"
+                f";[bg]drawbox=x={width * 45 // 100}:y={height * 14 // 100}:"
+                f"w={width * 48 // 100}:h={height * 33 // 100}:"
+                "color=0x070A18@0.30:t=fill,"
+                f"drawbox=x={width * 45 // 100}:y={height * 14 // 100}:"
+                f"w={width * 48 // 100}:h={height * 33 // 100}:"
+                "color=0x8EDFFF@0.24:t=2[glass];"
+                f"[1:a]showwaves=s={width * 42 // 100}x180:mode=cline:rate=30:"
+                "colors=0xFFD27A,format=rgba,"
+                "colorkey=0x000000:0.32:0.12[wave];"
+                f"[glass][wave]overlay={width * 48 // 100}:{height * 22 // 100}:"
+                "shortest=1[wavebg];"
+                f"[wavebg][record]overlay={disc_x}:{disc_y}:shortest=1[scene]"
             )
         else:
-            filter_graph += ";[scene]null[visual]"
+            filter_graph += f";[bg][record]overlay={disc_x}:{disc_y}:shortest=1[scene]"
+        filter_graph += ";[scene]null[visual]"
     elif style == "spectrum":
-        cover_size = max(300, min(width, height) * 56 // 100)
+        cover_size = max(260, min(width, height) * 43 // 100)
         filter_graph = (
             background
             + f"[cover]scale={cover_size}:{cover_size}:force_original_aspect_ratio=increase,"
             f"crop={cover_size}:{cover_size},format=rgba,"
             f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
-            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
-            "ow=rotw(iw):oh=roth(ih):c=none[disc];"
-            "[bg][disc]overlay=W*0.08:(H-h)/2:shortest=1[scene]"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[disc];"
+            f"[bg]drawbox=x={width * 38 // 100}:y={height * 9 // 100}:"
+            f"w={width * 55 // 100}:h={height * 43 // 100}:"
+            "color=0x050817@0.34:t=fill,"
+            f"drawbox=x={width * 38 // 100}:y={height * 9 // 100}:"
+            f"w={width * 55 // 100}:h={height * 43 // 100}:"
+            "color=0xA78BFA@0.22:t=2[glass]"
         )
         if show_waveform:
             filter_graph += (
-                f";[1:a]showfreqs=s={width * 42 // 100}x{height * 48 // 100}:"
-                "mode=bar:ascale=log:fscale=log:colors=0x69E6D2,format=rgba,"
-                "colorkey=0x000000:0.08:0.0[frequency];"
-                "[scene][frequency]overlay=W-w-100:(H-h)/2:shortest=1[visual]"
+                f";[1:a]showfreqs=s={width * 49 // 100}x{height * 35 // 100}:"
+                "mode=bar:ascale=log:fscale=log:colors=0x67E8F9,"
+                "format=rgba,colorchannelmixer=rr=0.38:gg=0.88:bb=1.0,"
+                "colorkey=0x000000:0.32:0.12[frequency];"
+                f"[glass][frequency]overlay={width * 41 // 100}:{height * 13 // 100}:"
+                "shortest=1[freqscene];"
+                f"[freqscene][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
+                "shortest=1[visual]"
             )
         else:
-            filter_graph += ";[scene]null[visual]"
+            filter_graph += (
+                f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
+                "shortest=1[visual]"
+            )
     else:
+        disc_size = max(300, min(width, height) * 51 // 100)
+        ring_size = disc_size + max(34, height * 4 // 100)
+        ring_expression = (
+            "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.470,min(W,H)*0.490),120,0)"
+        )
         filter_graph = (
             background
             + f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
             f"crop={disc_size}:{disc_size},format=rgba,"
             f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
-            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
-            "ow=rotw(iw):oh=roth(ih):c=none[disc];"
-            "[bg][disc]overlay=(W-w)/2:(H-h)/2:shortest=1[scene]"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[discbase];"
+            f"color=c=0x00000000:s={ring_size}x{ring_size}:d={duration_text}:r=30,"
+            "format=rgba,geq=r='139':g='233':b='253':"
+            f"a='{ring_expression}',gblur=sigma=3[haloring];"
+            "[haloring][discbase]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
         )
         if show_waveform:
             filter_graph += (
-                f";[1:a]showwaves=s={width * 3 // 4}x150:mode=p2p:rate=30:"
-                "colors=0x8BE9FD,format=rgba,colorchannelmixer=aa=0.72[wave];"
-                "[scene][wave]overlay=(W-w)/2:H*0.58:shortest=1[visual]"
+                f";[1:a]showwaves=s={width * 82 // 100}x190:mode=p2p:rate=30:"
+                "colors=0x8BE9FD,format=rgba,"
+                "colorkey=0x000000:0.32:0.12[wave];"
+                f"[bg][wave]overlay=(W-w)/2:{height * 37 // 100}:shortest=1[wavebg];"
+                f"[wavebg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
             )
         else:
-            filter_graph += ";[scene]null[visual]"
+            filter_graph += (
+                f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
+            )
     filter_graph += ";[visual]format=yuv420p[outv]"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -577,6 +649,7 @@ def create_spinning_cover_video(
         str(image),
         "-i",
         str(audio),
+        *stage_args,
         "-filter_complex",
         filter_graph,
         "-map",

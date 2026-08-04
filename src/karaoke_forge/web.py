@@ -2432,7 +2432,7 @@ def prepare_make_editor_job(
     cover_file: object | None = None,
     font_files: object | None = None,
     font: str = "Microsoft YaHei",
-    cover_style: str = "vinyl",
+    cover_style: str = "aurora",
     cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
@@ -2810,7 +2810,7 @@ def run_make_job(
     auto_english_pronunciation: bool = True,
     cover_file: object | None = None,
     font_files: object | None = None,
-    cover_style: str = "vinyl",
+    cover_style: str = "aurora",
     cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
@@ -4407,11 +4407,12 @@ def create_web_app() -> object:
                             make_cover_style = gr.Dropdown(
                                 label="无 MV 画面风格",
                                 choices=[
-                                    ("黑胶唱片机 · 唱针与金色波形", "vinyl"),
-                                    ("封面光晕 · 居中唱片与蓝色波形", "halo"),
-                                    ("频谱舞台 · 左侧唱片与动态频谱", "spectrum"),
+                                    ("星环舞台 · AI 原创场景与双层声浪", "aurora"),
+                                    ("午夜黑胶 · 悬浮唱片与金色脉冲", "vinyl"),
+                                    ("极光唱片 · 居中封面与环绕声浪", "halo"),
+                                    ("银河频谱 · 左侧唱片与动态频谱", "spectrum"),
                                 ],
-                                value="vinyl",
+                                value="aurora",
                             )
                             make_cover_waveform = gr.Checkbox(
                                 label="显示随音乐实时变化的波形 / 频谱",
@@ -5747,7 +5748,7 @@ def create_web_app() -> object:
             font_files = [str(path) for path in workspace.font_files]
             settings = workspace.settings or {}
             font_name = str(settings.get("font") or "Microsoft YaHei")
-            cover_style = str(settings.get("cover_style") or "vinyl")
+            cover_style = str(settings.get("cover_style") or "aurora")
             cover_waveform = bool(settings.get("cover_waveform", True))
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
             return (
