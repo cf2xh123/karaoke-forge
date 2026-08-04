@@ -97,6 +97,7 @@ def test_make_uses_spinning_cover_when_video_is_missing(tmp_path, monkeypatch) -
     lyrics.write_text("[00:01.00]Hello\n", encoding="utf-8")
 
     def fake_cover(_image, _audio, target, **kwargs):
+        assert kwargs["background_theme"] == "paper"
         assert kwargs["style"] == "spectrum"
         assert kwargs["show_waveform"] is False
         target = Path(target)
@@ -122,6 +123,7 @@ def test_make_uses_spinning_cover_when_video_is_missing(tmp_path, monkeypatch) -
         options=MakeOptions(
             cover_image=cover,
             font_files=(font,),
+            cover_background="paper",
             cover_style="spectrum",
             cover_waveform=False,
             timing_refinement="off",

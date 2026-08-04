@@ -2432,6 +2432,7 @@ def prepare_make_editor_job(
     cover_file: object | None = None,
     font_files: object | None = None,
     font: str = "Microsoft YaHei",
+    cover_background: str = "adaptive",
     cover_style: str = "aurora",
     cover_waveform: bool = True,
     *,
@@ -2711,6 +2712,7 @@ def prepare_make_editor_job(
             font_files=fonts,
             settings={
                 "font": font,
+                "cover_background": cover_background,
                 "cover_style": cover_style,
                 "cover_waveform": bool(cover_waveform),
             },
@@ -2810,6 +2812,7 @@ def run_make_job(
     auto_english_pronunciation: bool = True,
     cover_file: object | None = None,
     font_files: object | None = None,
+    cover_background: str = "adaptive",
     cover_style: str = "aurora",
     cover_waveform: bool = True,
     *,
@@ -3087,6 +3090,7 @@ def run_make_job(
                 timing_refinement=_web_timing_refinement(timing_refinement),
                 cover_image=cover,
                 font_files=fonts,
+                cover_background=cover_background,
                 cover_style=cover_style,
                 cover_waveform=bool(cover_waveform),
             ),
@@ -3110,6 +3114,7 @@ def run_make_job(
                 "font_size": int(font_size),
                 "quality": quality,
                 "auto_english_pronunciation": bool(auto_english_pronunciation),
+                "cover_background": cover_background,
                 "cover_style": cover_style,
                 "cover_waveform": bool(cover_waveform),
             },
@@ -4401,16 +4406,28 @@ def create_web_app() -> object:
                             type="filepath",
                         )
                         gr.Markdown(
-                            "> 不上传 MV 时，将以专辑图生成虚化背景，并让中间的圆形唱片缓慢旋转。"
+                            "> 不上传 MV 时，可分别选择背景主题与唱片布局；5 种背景 × 4 种布局，"
+                            "共 20 种组合。默认会从每张专辑封面继承颜色，并随音乐显示波形。"
                         )
                         with gr.Row():
-                            make_cover_style = gr.Dropdown(
-                                label="无 MV 画面风格",
+                            make_cover_background = gr.Dropdown(
+                                label="无 MV 背景主题",
                                 choices=[
-                                    ("星环舞台 · AI 原创场景与双层声浪", "aurora"),
-                                    ("午夜黑胶 · 悬浮唱片与金色脉冲", "vinyl"),
-                                    ("极光唱片 · 居中封面与环绕声浪", "halo"),
-                                    ("银河频谱 · 左侧唱片与动态频谱", "spectrum"),
+                                    ("专辑流光 · 自动继承每张封面颜色", "adaptive"),
+                                    ("深空星环 · 蓝紫暗色舞台", "midnight"),
+                                    ("日落玻璃 · 珊瑚暖色舞台", "sunset"),
+                                    ("海盐极光 · 明亮青绿水光", "ocean"),
+                                    ("纸艺花园 · 奶油色手工拼贴", "paper"),
+                                ],
+                                value="adaptive",
+                            )
+                            make_cover_style = gr.Dropdown(
+                                label="唱片与频谱布局",
+                                choices=[
+                                    ("星环唱片 · 居中黑胶与双层声浪", "aurora"),
+                                    ("偏置黑胶 · 悬浮唱片与脉冲窗", "vinyl"),
+                                    ("环绕唱片 · 居中封面与横向声浪", "halo"),
+                                    ("侧置频谱 · 左侧唱片与动态频谱", "spectrum"),
                                 ],
                                 value="aurora",
                             )
@@ -5305,6 +5322,7 @@ def create_web_app() -> object:
             auto_english_pronunciation: bool,
             cover: object,
             font_files: object,
+            cover_background: str,
             cover_style: str,
             cover_waveform: bool,
             progress: object = gr.Progress(),
@@ -5351,6 +5369,7 @@ def create_web_app() -> object:
                 auto_english_pronunciation,
                 cover,
                 font_files,
+                cover_background,
                 cover_style,
                 cover_waveform,
                 progress_callback=update,
@@ -5388,6 +5407,7 @@ def create_web_app() -> object:
             cover: object,
             font_files: object,
             font: str,
+            cover_background: str,
             cover_style: str,
             cover_waveform: bool,
             progress: object = gr.Progress(),
@@ -5419,6 +5439,7 @@ def create_web_app() -> object:
                 cover,
                 font_files,
                 font,
+                cover_background,
                 cover_style,
                 cover_waveform,
                 progress_callback=update,
@@ -5478,6 +5499,7 @@ def create_web_app() -> object:
                 make_cover,
                 make_font_files,
                 make_font,
+                make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
             ],
@@ -5544,6 +5566,7 @@ def create_web_app() -> object:
                 make_auto_english_pronunciation,
                 make_cover,
                 make_font_files,
+                make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
             ],
@@ -5736,7 +5759,7 @@ def create_web_app() -> object:
         def restore_recent_workspace() -> tuple[object, ...]:
             workspace = load_recent_workspace(_default_output_root())
             if workspace is None:
-                return tuple(gr.skip() for _ in range(22))
+                return tuple(gr.skip() for _ in range(23))
             loaded = list(load_editor_project_workspace(workspace.lyrics_project))
             loaded[2] = (
                 f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
@@ -5748,6 +5771,7 @@ def create_web_app() -> object:
             font_files = [str(path) for path in workspace.font_files]
             settings = workspace.settings or {}
             font_name = str(settings.get("font") or "Microsoft YaHei")
+            cover_background = str(settings.get("cover_background") or "adaptive")
             cover_style = str(settings.get("cover_style") or "aurora")
             cover_waveform = bool(settings.get("cover_waveform", True))
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
@@ -5761,6 +5785,7 @@ def create_web_app() -> object:
                 font_files,
                 workspace.name,
                 font_name,
+                cover_background,
                 cover_style,
                 cover_waveform,
                 gr.update(selected="editor"),
@@ -5788,6 +5813,7 @@ def create_web_app() -> object:
                 make_font_files,
                 make_name,
                 make_font,
+                make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
                 main_tabs,
@@ -6850,6 +6876,7 @@ def create_web_app() -> object:
             auto_english_pronunciation: bool,
             cover: object,
             font_files: object,
+            cover_background: str,
             cover_style: str,
             cover_waveform: bool,
             progress: object = gr.Progress(),
@@ -6907,6 +6934,7 @@ def create_web_app() -> object:
                 auto_english_pronunciation,
                 cover,
                 font_files,
+                cover_background,
                 cover_style,
                 cover_waveform,
                 progress=progress,
@@ -6954,6 +6982,7 @@ def create_web_app() -> object:
                 make_auto_english_pronunciation,
                 make_cover,
                 make_font_files,
+                make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
             ],

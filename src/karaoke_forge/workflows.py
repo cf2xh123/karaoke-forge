@@ -39,6 +39,7 @@ class MakeOptions:
     refine_word_timing: bool | None = None
     cover_image: Path | None = None
     font_files: tuple[Path, ...] = ()
+    cover_background: str = "adaptive"
     cover_style: str = "aurora"
     cover_waveform: bool = True
 
@@ -91,6 +92,7 @@ def make_karaoke_video(
             audio,
             assets / "spinning-cover-background.mp4",
             overwrite=options.overwrite,
+            background_theme=options.cover_background,
             style=options.cover_style,
             show_waveform=options.cover_waveform,
             progress=progress,

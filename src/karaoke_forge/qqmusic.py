@@ -99,7 +99,7 @@ def resolve_qqmusic_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.1"},
+        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.2"},
         method="GET",
     )
     try:
@@ -116,7 +116,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
         headers={
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://y.qq.com/",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.1",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.2",
         },
     )
     try:
