@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.10.2 adds five distinct no-MV backgrounds that combine freely with four
-> audio-reactive album-art layouts, including an adaptive theme derived from each cover.
+> Version 0.10.2 adds five distinct no-MV backgrounds that combine freely with five
+> audio-reactive layouts, led by a centered premium CD player on adaptive blurred cover art.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -16,7 +16,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
 - Render a no-MV version from local or NetEase/QQ Music cover art using five backgrounds
-  and four audio-reactive layouts, for 20 combinations with project-persistent settings;
+  and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;

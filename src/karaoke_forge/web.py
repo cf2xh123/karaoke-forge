@@ -2433,7 +2433,7 @@ def prepare_make_editor_job(
     font_files: object | None = None,
     font: str = "Microsoft YaHei",
     cover_background: str = "adaptive",
-    cover_style: str = "aurora",
+    cover_style: str = "cdplayer",
     cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
@@ -2813,7 +2813,7 @@ def run_make_job(
     cover_file: object | None = None,
     font_files: object | None = None,
     cover_background: str = "adaptive",
-    cover_style: str = "aurora",
+    cover_style: str = "cdplayer",
     cover_waveform: bool = True,
     *,
     progress_callback: Callable[[str], None] | None = None,
@@ -4406,8 +4406,8 @@ def create_web_app() -> object:
                             type="filepath",
                         )
                         gr.Markdown(
-                            "> 不上传 MV 时，可分别选择背景主题与唱片布局；5 种背景 × 4 种布局，"
-                            "共 20 种组合。默认会从每张专辑封面继承颜色，并随音乐显示波形。"
+                            "> 不上传 MV 时，可分别选择背景主题与唱片布局；5 种背景 × 5 种布局，"
+                            "共 25 种组合。默认会从每张专辑封面继承颜色，并放入居中 CD 机。"
                         )
                         with gr.Row():
                             make_cover_background = gr.Dropdown(
@@ -4424,12 +4424,13 @@ def create_web_app() -> object:
                             make_cover_style = gr.Dropdown(
                                 label="唱片与频谱布局",
                                 choices=[
+                                    ("桌面 CD 机 · 柔焦封面与精致播放器", "cdplayer"),
                                     ("星环唱片 · 居中黑胶与双层声浪", "aurora"),
                                     ("偏置黑胶 · 悬浮唱片与脉冲窗", "vinyl"),
                                     ("环绕唱片 · 居中封面与横向声浪", "halo"),
                                     ("侧置频谱 · 左侧唱片与动态频谱", "spectrum"),
                                 ],
-                                value="aurora",
+                                value="cdplayer",
                             )
                             make_cover_waveform = gr.Checkbox(
                                 label="显示随音乐实时变化的波形 / 频谱",
@@ -5772,7 +5773,7 @@ def create_web_app() -> object:
             settings = workspace.settings or {}
             font_name = str(settings.get("font") or "Microsoft YaHei")
             cover_background = str(settings.get("cover_background") or "adaptive")
-            cover_style = str(settings.get("cover_style") or "aurora")
+            cover_style = str(settings.get("cover_style") or "cdplayer")
             cover_waveform = bool(settings.get("cover_waveform", True))
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
             return (

@@ -40,7 +40,7 @@ class MakeOptions:
     cover_image: Path | None = None
     font_files: tuple[Path, ...] = ()
     cover_background: str = "adaptive"
-    cover_style: str = "aurora"
+    cover_style: str = "cdplayer"
     cover_waveform: bool = True
 
 

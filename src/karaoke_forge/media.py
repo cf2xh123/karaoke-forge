@@ -472,7 +472,7 @@ def create_spinning_cover_video(
         raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
     width, height = resolution
     style = style.strip().lower()
-    if style not in {"aurora", "vinyl", "halo", "spectrum"}:
+    if style not in {"aurora", "vinyl", "halo", "spectrum", "cdplayer"}:
         raise ValueError(f"Unsupported cover video style: {style}")
     background_theme = background_theme.strip().lower()
     theme_specs = {
@@ -522,6 +522,17 @@ def create_spinning_cover_video(
             f"eq=brightness={theme_brightness:.2f}:contrast=1.04:"
             f"saturation={theme_saturation:.2f},format=rgba[bg];"
         )
+
+    player_args: list[str] = []
+    player_input: str | None = None
+    if style == "cdplayer":
+        player_asset = (
+            Path(__file__).resolve().parent / "assets" / "visuals" / "cd-player-chassis.png"
+        )
+        if not player_asset.is_file():
+            raise MediaError(f"CD player asset not found: {player_asset}")
+        player_input = f"[{2 + (1 if asset_name is not None else 0)}:v]"
+        player_args = ["-loop", "1", "-i", str(player_asset)]
 
     if style == "aurora":
         platter_size = max(280, min(width, height) * 49 // 100)
@@ -634,6 +645,56 @@ def create_spinning_cover_video(
                 f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
                 "shortest=1[visual]"
             )
+    elif style == "cdplayer":
+        assert player_input is not None
+        player_size = max(380, min(width, height) * 88 // 100)
+        disc_size = player_size * 41 // 100
+        platter_size = disc_size + max(14, height * 2 // 100)
+        hub_size = max(16, disc_size * 7 // 100)
+        disc_y = player_size * 20 // 100
+        hub_expression = (
+            "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
+            "(min(W,H)/2)*(min(W,H)/2)),235,0)"
+        )
+        filter_graph = (
+            background
+            + f"{player_input}scale={player_size}:{player_size},format=rgba[player];"
+            f"color=c=0x171A20:s={platter_size}x{platter_size}:"
+            f"d={duration_text}:r=30,format=rgba,geq="
+            "r='23+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            "g='26+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            "b='32+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            f"a='{radius_expression}'[cdwell];"
+            f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
+            f"crop={disc_size}:{disc_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[cdart];"
+            "[cdwell][cdart]overlay=(W-w)/2:(H-h)/2:shortest=1[cdbase];"
+            f"color=c=0x00000000:s={hub_size}x{hub_size}:d={duration_text}:r=30,"
+            "format=rgba,geq=r='232':g='221':b='196':"
+            f"a='{hub_expression}',gblur=sigma=0.6[hub];"
+            "[cdbase][hub]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
+        )
+        if show_waveform:
+            wave_width = width * 76 // 100
+            filter_graph += (
+                f";[1:a]showwaves=s={wave_width}x130:mode=p2p:rate=30:"
+                f"colors=0x{wave_color},format=rgba,"
+                "colorkey=0x000000:0.20:0.08[cdwavebase];"
+                "[cdwavebase]split[cdwave][cdwavesoft];"
+                "[cdwavesoft]gblur=sigma=12,colorchannelmixer=aa=0.62[cdwaveglow];"
+                f"[bg][cdwaveglow]overlay=(W-w)/2:{height * 31 // 100}:"
+                "shortest=1[cdglowbg];"
+                f"[cdglowbg][cdwave]overlay=(W-w)/2:{height * 31 // 100}:"
+                "shortest=1[cdwavebg];"
+                "[cdwavebg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
+                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
+            )
+        else:
+            filter_graph += (
+                ";[bg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
+                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
+            )
     else:
         disc_size = max(300, min(width, height) * 51 // 100)
         ring_size = disc_size + max(34, height * 4 // 100)
@@ -677,6 +738,7 @@ def create_spinning_cover_video(
         "-i",
         str(audio),
         *stage_args,
+        *player_args,
         "-filter_complex",
         filter_graph,
         "-map",
