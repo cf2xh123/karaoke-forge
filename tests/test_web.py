@@ -9,7 +9,8 @@ from karaoke_forge.editor import (
 )
 from karaoke_forge.formats import parse_yrc, read_lyrics
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
-from karaoke_forge.netease import NeteaseSongInfo
+from karaoke_forge.netease import NeteaseSongInfo, NeteaseTrack
+from karaoke_forge.projects import load_workspace_project
 from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
     EDITOR_STOP_GATE_JS,
@@ -1400,3 +1401,77 @@ def test_make_job_uses_mv_audio_without_downloading_netease_audio(
     assert result.video is not None
     assert "MV 内嵌完整音轨" in result.log
     assert "中文翻译" in result.log
+
+
+def test_downloaded_netease_audio_is_saved_before_temporary_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"image")
+    downloaded: list[Path] = []
+
+    def fake_download(_link, output_dir, **_kwargs):
+        audio = Path(output_dir) / "audio.m4a"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"complete audio")
+        downloaded.append(audio)
+        return NeteaseTrack(
+            song_id="42",
+            title="Downloaded Song",
+            artists=("Artist",),
+            canonical_url="https://music.163.com/song?id=42",
+            audio_path=audio,
+            page_lyrics="[00:01.00]Hello\n",
+            is_preview=False,
+        )
+
+    def fake_make(_audio, _video, lyrics, output, assets, **_kwargs):
+        document = read_lyrics(lyrics)
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "lyrics.json"
+        exported.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            document=document,
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.download_netease_track", fake_download)
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+
+    result = run_make_job(
+        None,
+        None,
+        None,
+        "",
+        "downloaded-project",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        netease_link="https://music.163.com/song?id=42",
+        rights_confirmed=True,
+        timing_refinement="off",
+        cover_file=str(cover),
+    )
+
+    manifest = next(Path(path) for path in result.files if path.endswith("karaoke-forge-project.json"))
+    workspace = load_workspace_project(manifest)
+    assert result.video is not None
+    assert workspace.audio is not None and workspace.audio.read_bytes() == b"complete audio"
+    assert downloaded and not downloaded[0].exists()
+    assert "已保存进工程" in result.log

@@ -52,8 +52,9 @@ def persist_project_asset(
         return None
     root = Path(project_dir).resolve()
     try:
-        path.relative_to(root)
-        return path
+        relative = path.relative_to(root)
+        if not relative.parts or relative.parts[0] not in {".source", ".work"}:
+            return path
     except ValueError:
         pass
     assets = root / "project-assets"
