@@ -20,6 +20,7 @@ _ALLOWED_COVER_HOSTS = {
 _MAX_IMAGE_BYTES = 15 * 1024 * 1024
 _IMAGE_SUFFIXES = {
     "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
 }
