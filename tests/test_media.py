@@ -114,12 +114,56 @@ def test_spinning_cover_builds_audio_reactive_aurora_graph(tmp_path, monkeypatch
     command = captured["command"]
     graph = command[command.index("-filter_complex") + 1]
     assert result == output
-    assert "midnight-stage.png" in " ".join(str(value) for value in command)
+    assert "midnight-stage.png" not in " ".join(str(value) for value in command)
+    assert "gblur=sigma=42" in graph
+    assert "saturation=1.25" in graph
     assert "geq=r='11+8*sin" in graph
     assert "gblur=sigma=14" in graph
     assert "rotate=2*PI*t/12.000" in graph
     assert "showwaves=" in graph
     assert command[command.index("-t") + 1] == "42.500"
+
+
+def test_spinning_cover_supports_fixed_background_theme(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    output = tmp_path / "sunset.mp4"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr("karaoke_forge.media.probe_media_duration", lambda _path: 8.0)
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    create_spinning_cover_video(cover, audio, output, background_theme="sunset")
+
+    command = captured["command"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "sunset-glass.png" in " ".join(str(value) for value in command)
+    assert "sin(t/11)" in graph
+    assert "saturation=1.00" in graph
+
+
+def test_spinning_cover_rejects_unknown_background_theme(tmp_path) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+
+    with pytest.raises(ValueError, match="Unsupported cover background theme"):
+        create_spinning_cover_video(
+            cover,
+            audio,
+            tmp_path / "bad.mp4",
+            duration=1.0,
+            background_theme="neon-city",
+        )
 
 
 def test_spinning_cover_supports_audio_frequency_stage(tmp_path, monkeypatch) -> None:
@@ -146,6 +190,41 @@ def test_spinning_cover_supports_audio_frequency_stage(tmp_path, monkeypatch) ->
     assert "showfreqs=" in graph
     assert command[command.index("-i") + 1] == str(cover)
     assert str(audio) in command
+
+
+def test_spinning_cover_builds_centered_cd_player_graph(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    output = tmp_path / "cd-player.mp4"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr("karaoke_forge.media.probe_media_duration", lambda _path: 6.0)
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    create_spinning_cover_video(
+        cover,
+        audio,
+        output,
+        style="cdplayer",
+        background_theme="sunset",
+    )
+
+    command = captured["command"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "cd-player-chassis.png" in " ".join(str(value) for value in command)
+    assert "sunset-glass.png" in " ".join(str(value) for value in command)
+    assert "[3:v]scale=" in graph
+    assert "[cdwavebg][player]overlay=(W-w)/2:0" in graph
+    assert "rotate=2*PI*t/12.000" in graph
+    assert "[cdbase][hub]overlay=" in graph
 
 
 def test_render_passes_uploaded_fonts_to_libass(tmp_path, monkeypatch) -> None:

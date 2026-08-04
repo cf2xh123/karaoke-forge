@@ -451,6 +451,7 @@ def create_spinning_cover_video(
     duration: float | None = None,
     rotation_seconds: float = 12.0,
     style: str = "aurora",
+    background_theme: str = "adaptive",
     show_waveform: bool = True,
     overwrite: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -471,33 +472,67 @@ def create_spinning_cover_video(
         raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
     width, height = resolution
     style = style.strip().lower()
-    if style not in {"aurora", "vinyl", "halo", "spectrum"}:
+    if style not in {"aurora", "vinyl", "halo", "spectrum", "cdplayer"}:
         raise ValueError(f"Unsupported cover video style: {style}")
+    background_theme = background_theme.strip().lower()
+    theme_specs = {
+        "adaptive": (None, "FFFFFF", (255, 255, 255), -0.10, 1.25),
+        "midnight": ("midnight-stage.png", "6DE7FF", (94, 218, 255), -0.07, 0.94),
+        "sunset": ("sunset-glass.png", "FFE0A3", (255, 192, 126), -0.04, 1.00),
+        "ocean": ("sea-salt.png", "E9FFFF", (255, 255, 255), -0.08, 0.96),
+        "paper": ("paper-garden.png", "163B7A", (232, 112, 92), -0.06, 0.98),
+    }
+    if background_theme not in theme_specs:
+        raise ValueError(f"Unsupported cover background theme: {background_theme}")
     radius_expression = (
         "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
         "(min(W,H)/2)*(min(W,H)/2)),255,0)"
     )
     duration_text = f"{effective_duration:.3f}"
     rotation = max(1.0, rotation_seconds)
-    stage_asset = Path(__file__).resolve().parent / "assets" / "visuals" / "midnight-stage.png"
+    asset_name, wave_color, ring_color, theme_brightness, theme_saturation = theme_specs[
+        background_theme
+    ]
+    overscan_width = width * 108 // 100
+    overscan_height = height * 108 // 100
+    drift_crop = (
+        f"crop={width}:{height}:"
+        "x='(in_w-out_w)/2*(1+sin(t/11))':"
+        "y='(in_h-out_h)/2*(1+cos(t/13))'"
+    )
     stage_args: list[str] = []
-    if stage_asset.is_file():
+    if asset_name is not None:
+        stage_asset = Path(__file__).resolve().parent / "assets" / "visuals" / asset_name
+        if not stage_asset.is_file():
+            raise MediaError(f"Background theme asset not found: {stage_asset}")
         stage_args = ["-loop", "1", "-i", str(stage_asset)]
         background = (
             "[0:v]null[cover];"
-            f"[2:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},format=rgba,"
-            "eq=brightness=-0.07:saturation=0.94[bg];"
+            f"[2:v]scale={overscan_width}:{overscan_height}:"
+            "force_original_aspect_ratio=increase,"
+            f"crop={overscan_width}:{overscan_height},{drift_crop},format=rgba,"
+            f"eq=brightness={theme_brightness:.2f}:saturation={theme_saturation:.2f}[bg];"
         )
     else:
         background = (
             "[0:v]split=2[coverbgsrc][cover];"
-            f"[coverbgsrc]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},gblur=sigma=54,"
-            "eq=brightness=-0.35:saturation=1.08,format=rgba,"
-            f"drawbox=x=0:y={height * 62 // 100}:w={width}:h={height * 38 // 100}:"
-            "color=0x02040B@0.18:t=fill[bg];"
+            f"[coverbgsrc]scale={overscan_width}:{overscan_height}:"
+            "force_original_aspect_ratio=increase,"
+            f"crop={overscan_width}:{overscan_height},{drift_crop},gblur=sigma=42,"
+            f"eq=brightness={theme_brightness:.2f}:contrast=1.04:"
+            f"saturation={theme_saturation:.2f},format=rgba[bg];"
         )
+
+    player_args: list[str] = []
+    player_input: str | None = None
+    if style == "cdplayer":
+        player_asset = (
+            Path(__file__).resolve().parent / "assets" / "visuals" / "cd-player-chassis.png"
+        )
+        if not player_asset.is_file():
+            raise MediaError(f"CD player asset not found: {player_asset}")
+        player_input = f"[{2 + (1 if asset_name is not None else 0)}:v]"
+        player_args = ["-loop", "1", "-i", str(player_asset)]
 
     if style == "aurora":
         platter_size = max(280, min(width, height) * 49 // 100)
@@ -519,7 +554,8 @@ def create_spinning_cover_video(
             f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[label];"
             "[platter][label]overlay=(W-w)/2:(H-h)/2:shortest=1[discbase];"
             f"color=c=0x00000000:s={ring_size}x{ring_size}:d={duration_text}:r=30,"
-            "format=rgba,geq=r='94':g='218':b='255':"
+            f"format=rgba,geq=r='{ring_color[0]}':g='{ring_color[1]}':"
+            f"b='{ring_color[2]}':"
             f"a='{ring_expression}',gblur=sigma=3[ring];"
             "[ring][discbase]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
         )
@@ -528,8 +564,8 @@ def create_spinning_cover_video(
             wave_width = width * 76 // 100
             filter_graph += (
                 f";[1:a]showwaves=s={wave_width}x170:mode=p2p:rate=30:"
-                "colors=0x6DE7FF,format=rgba,"
-                "colorkey=0x000000:0.32:0.12[wavebase];"
+                f"colors=0x{wave_color},format=rgba,"
+                "colorkey=0x000000:0.20:0.08[wavebase];"
                 "[wavebase]split[wave][wavesoft];"
                 "[wavesoft]gblur=sigma=14,colorchannelmixer=aa=0.70[waveglow];"
                 f"[bg][waveglow]overlay=(W-w)/2:{height * 39 // 100}:shortest=1[wavebg];"
@@ -568,8 +604,8 @@ def create_spinning_cover_video(
                 f"w={width * 48 // 100}:h={height * 33 // 100}:"
                 "color=0x8EDFFF@0.24:t=2[glass];"
                 f"[1:a]showwaves=s={width * 42 // 100}x180:mode=cline:rate=30:"
-                "colors=0xFFD27A,format=rgba,"
-                "colorkey=0x000000:0.32:0.12[wave];"
+                f"colors=0x{wave_color},format=rgba,"
+                "colorkey=0x000000:0.20:0.08[wave];"
                 f"[glass][wave]overlay={width * 48 // 100}:{height * 22 // 100}:"
                 "shortest=1[wavebg];"
                 f"[wavebg][record]overlay={disc_x}:{disc_y}:shortest=1[scene]"
@@ -595,9 +631,10 @@ def create_spinning_cover_video(
         if show_waveform:
             filter_graph += (
                 f";[1:a]showfreqs=s={width * 49 // 100}x{height * 35 // 100}:"
-                "mode=bar:ascale=log:fscale=log:colors=0x67E8F9,"
-                "format=rgba,colorchannelmixer=rr=0.38:gg=0.88:bb=1.0,"
-                "colorkey=0x000000:0.32:0.12[frequency];"
+                f"mode=bar:ascale=log:fscale=log:colors=0x{wave_color},"
+                f"format=rgba,colorchannelmixer=rr={ring_color[0] / 255:.2f}:"
+                f"gg={ring_color[1] / 255:.2f}:bb={ring_color[2] / 255:.2f},"
+                "colorkey=0x000000:0.20:0.08[frequency];"
                 f"[glass][frequency]overlay={width * 41 // 100}:{height * 13 // 100}:"
                 "shortest=1[freqscene];"
                 f"[freqscene][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
@@ -607,6 +644,56 @@ def create_spinning_cover_video(
             filter_graph += (
                 f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
                 "shortest=1[visual]"
+            )
+    elif style == "cdplayer":
+        assert player_input is not None
+        player_size = max(380, min(width, height) * 88 // 100)
+        disc_size = player_size * 41 // 100
+        platter_size = disc_size + max(14, height * 2 // 100)
+        hub_size = max(16, disc_size * 7 // 100)
+        disc_y = player_size * 20 // 100
+        hub_expression = (
+            "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
+            "(min(W,H)/2)*(min(W,H)/2)),235,0)"
+        )
+        filter_graph = (
+            background
+            + f"{player_input}scale={player_size}:{player_size},format=rgba[player];"
+            f"color=c=0x171A20:s={platter_size}x{platter_size}:"
+            f"d={duration_text}:r=30,format=rgba,geq="
+            "r='23+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            "g='26+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            "b='32+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
+            f"a='{radius_expression}'[cdwell];"
+            f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
+            f"crop={disc_size}:{disc_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[cdart];"
+            "[cdwell][cdart]overlay=(W-w)/2:(H-h)/2:shortest=1[cdbase];"
+            f"color=c=0x00000000:s={hub_size}x{hub_size}:d={duration_text}:r=30,"
+            "format=rgba,geq=r='232':g='221':b='196':"
+            f"a='{hub_expression}',gblur=sigma=0.6[hub];"
+            "[cdbase][hub]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
+        )
+        if show_waveform:
+            wave_width = width * 76 // 100
+            filter_graph += (
+                f";[1:a]showwaves=s={wave_width}x130:mode=p2p:rate=30:"
+                f"colors=0x{wave_color},format=rgba,"
+                "colorkey=0x000000:0.20:0.08[cdwavebase];"
+                "[cdwavebase]split[cdwave][cdwavesoft];"
+                "[cdwavesoft]gblur=sigma=12,colorchannelmixer=aa=0.62[cdwaveglow];"
+                f"[bg][cdwaveglow]overlay=(W-w)/2:{height * 31 // 100}:"
+                "shortest=1[cdglowbg];"
+                f"[cdglowbg][cdwave]overlay=(W-w)/2:{height * 31 // 100}:"
+                "shortest=1[cdwavebg];"
+                "[cdwavebg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
+                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
+            )
+        else:
+            filter_graph += (
+                ";[bg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
+                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
             )
     else:
         disc_size = max(300, min(width, height) * 51 // 100)
@@ -621,15 +708,16 @@ def create_spinning_cover_video(
             f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
             f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[discbase];"
             f"color=c=0x00000000:s={ring_size}x{ring_size}:d={duration_text}:r=30,"
-            "format=rgba,geq=r='139':g='233':b='253':"
+            f"format=rgba,geq=r='{ring_color[0]}':g='{ring_color[1]}':"
+            f"b='{ring_color[2]}':"
             f"a='{ring_expression}',gblur=sigma=3[haloring];"
             "[haloring][discbase]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
         )
         if show_waveform:
             filter_graph += (
                 f";[1:a]showwaves=s={width * 82 // 100}x190:mode=p2p:rate=30:"
-                "colors=0x8BE9FD,format=rgba,"
-                "colorkey=0x000000:0.32:0.12[wave];"
+                f"colors=0x{wave_color},format=rgba,"
+                "colorkey=0x000000:0.20:0.08[wave];"
                 f"[bg][wave]overlay=(W-w)/2:{height * 37 // 100}:shortest=1[wavebg];"
                 f"[wavebg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
             )
@@ -650,6 +738,7 @@ def create_spinning_cover_video(
         "-i",
         str(audio),
         *stage_args,
+        *player_args,
         "-filter_complex",
         filter_graph,
         "-map",

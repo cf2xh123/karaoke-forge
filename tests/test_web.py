@@ -794,9 +794,14 @@ def test_make_page_prepares_editor_with_audio_and_cover_but_no_mv(tmp_path: Path
         timing_refinement="off",
         output_root=str(tmp_path / "outputs"),
         cover_file=str(cover),
+        cover_background="ocean",
     )
 
     assert result.project is not None
+    workspace = load_workspace_project(
+        Path(result.project).parent / "karaoke-forge-project.json"
+    )
+    assert workspace.settings["cover_background"] == "ocean"
     assert "音频、MV/封面和字体已保存" in result.status
 
 
@@ -816,6 +821,7 @@ def test_make_job_renders_cover_mode_and_custom_font_without_mv(
         assert video is None
         assert options.cover_image == cover
         assert options.font_files == (font,)
+        assert options.cover_background == "paper"
         assert options.cover_style == "spectrum"
         assert options.cover_waveform is False
         output = Path(output)
@@ -855,6 +861,7 @@ def test_make_job_renders_cover_mode_and_custom_font_without_mv(
         output_root=str(tmp_path / "outputs"),
         cover_file=str(cover),
         font_files=[str(font)],
+        cover_background="paper",
         cover_style="spectrum",
         cover_waveform=False,
     )
