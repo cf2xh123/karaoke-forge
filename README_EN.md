@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.9.1 can transfer only verified official UtaTen ruby readings onto an
-> existing lyric project and adds an independent switch for automatic English katakana.
+> Version 0.10.0 adds resumable projects, bundled custom fonts, and three
+> audio-reactive album-art video styles for songs without an MV.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -15,17 +15,23 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Read TXT, LRC, enhanced LRC, SRT, VTT, ASS, and project JSON;
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
+- Render a no-MV version from local or NetEase/QQ Music cover art using a vinyl
+  turntable, cover glow, or frequency-stage style with real audio-driven visuals;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - Render translation at the top and paired original lyrics in a split KTV layout;
-- Add Japanese furigana and optional automatic English katakana above the lyric row;
+- Add Japanese furigana and optional English katakana above the lyric row; disabling
+  English readings also filters readings already stored in older/imported projects;
+- Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
+- Persist lyrics, media, cover art, fonts, and settings, then restore the latest project
+  automatically on the next web launch;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.9.1` alpha. Check the generated timeline before a final render.
+This is a usable `0.10.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -93,9 +99,10 @@ then transfers only ruby spans whose source characters can be verified. Local ly
 translations, line timing, and word timing stay unchanged; unmatched text remains without
 pronunciation instead of receiving a guessed reading.
 
-Automatic English katakana has a separate Make-page switch. Turning it off does not affect
-Japanese furigana or manual/project/UtaTen readings. ASS-producing CLI commands expose the
-same policy as `--no-auto-english-pronunciation`.
+English katakana has a separate Make-page switch. Turning it off keeps Japanese furigana,
+but filters English readings even when an older project, manual edit, or imported source
+already stored them. ASS-producing CLI commands expose the same final-output policy as
+`--no-auto-english-pronunciation`.
 
 The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or project JSON.
 Each row keeps source text, translation, timing, pronunciation, and visibility together.

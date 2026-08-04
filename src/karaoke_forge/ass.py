@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .models import LyricLine, LyricsDocument
-from .pronunciation import PronunciationLine, PronunciationUnit, generate_pronunciation
+from .pronunciation import (
+    PronunciationLine,
+    PronunciationUnit,
+    contains_english_word,
+    generate_pronunciation,
+)
 from .timecode import ass_clock
 
 
@@ -58,20 +63,30 @@ def _line_pronunciation(
     auto_english_pronunciation: bool = True,
 ) -> PronunciationLine | None:
     if line.pronunciation_units:
-        return PronunciationLine(
-            tuple(
-                PronunciationUnit(
-                    source=unit.source,
-                    reading=unit.reading,
-                    start=unit.start,
-                    end=unit.end,
-                )
-                for unit in line.pronunciation_units
-                if unit.reading.strip()
-            ),
-            separator="",
+        units = tuple(
+            PronunciationUnit(
+                source=unit.source,
+                reading=unit.reading,
+                start=unit.start,
+                end=unit.end,
+            )
+            for unit in line.pronunciation_units
+            if unit.reading.strip()
+            and (auto_english_pronunciation or not contains_english_word(unit.source))
         )
+        return PronunciationLine(units, separator="") if units else None
     if line.pronunciation:
+        # Older projects can contain a whole-line katakana reading generated
+        # before this switch existed. Suppress it when the source line is
+        # English-only, while retaining whole-line Japanese readings.
+        if (
+            not auto_english_pronunciation
+            and contains_english_word(line.text)
+            and not any(
+                "\u3040" <= char <= "\u30ff" or "\u3400" <= char <= "\u9fff" for char in line.text
+            )
+        ):
+            return None
         return PronunciationLine(
             (
                 PronunciationUnit(

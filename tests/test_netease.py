@@ -43,6 +43,7 @@ def test_public_info_prefers_available_yrc_word_timing(monkeypatch) -> None:
                         "name": "Example",
                         "duration": 5000,
                         "artists": [{"name": "Artist"}],
+                        "album": {"picUrl": "https://p1.music.126.net/cover.jpg"},
                     }
                 ]
             },
@@ -62,6 +63,7 @@ def test_public_info_prefers_available_yrc_word_timing(monkeypatch) -> None:
 
     assert info.word_lyrics == "[1000,500](1000,500,0)Hello\n"
     assert info.page_lyrics == "[00:01.00]Hello\n"
+    assert info.cover_url == "https://p1.music.126.net/cover.jpg"
 
 
 def test_rejects_non_song_netease_links() -> None:

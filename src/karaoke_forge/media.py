@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from array import array
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import log1p, sqrt
 from pathlib import Path
@@ -128,9 +128,7 @@ def _ensure_demucs_legacy_model(
                 raise MediaError("Demucs 模型下载结果为空。")
             actual_checksum = _file_checksum_prefix(temporary_path, len(checksum))
             if actual_checksum != checksum:
-                raise MediaError(
-                    f"Demucs 模型校验失败：期望 {checksum}，实际 {actual_checksum}。"
-                )
+                raise MediaError(f"Demucs 模型校验失败：期望 {checksum}，实际 {actual_checksum}。")
             temporary_path.replace(target)
             temporary_path = None
             if progress:
@@ -444,6 +442,178 @@ def detect_audio_sync(
     return match_audio_envelopes(reference, video)
 
 
+def create_spinning_cover_video(
+    image_path: str | Path,
+    audio_path: str | Path,
+    output_path: str | Path,
+    *,
+    resolution: tuple[int, int] = (1920, 1080),
+    duration: float | None = None,
+    rotation_seconds: float = 12.0,
+    style: str = "vinyl",
+    show_waveform: bool = True,
+    overwrite: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    """Create a silent blurred-background video with a rotating circular cover."""
+
+    image = Path(image_path).resolve()
+    audio = Path(audio_path).resolve()
+    output = Path(output_path).resolve()
+    if not image.is_file():
+        raise FileNotFoundError(f"Cover image not found: {image}")
+    if not audio.is_file():
+        raise FileNotFoundError(f"Audio file not found: {audio}")
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
+    effective_duration = duration or probe_media_duration(audio)
+    if effective_duration is None or effective_duration <= 0:
+        raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
+    width, height = resolution
+    style = style.strip().lower()
+    if style not in {"vinyl", "halo", "spectrum"}:
+        raise ValueError(f"Unsupported cover video style: {style}")
+    disc_size = max(240, min(width, height) * 2 // 3)
+    radius_expression = (
+        "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
+        "(min(W,H)/2)*(min(W,H)/2)),255,0)"
+    )
+    duration_text = f"{effective_duration:.3f}"
+    background = (
+        "[0:v]split=2[background][cover];"
+        f"[background]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},gblur=sigma=42,eq=brightness=-0.28:saturation=0.9[bg];"
+    )
+    if style == "vinyl":
+        vinyl_size = max(360, min(width, height) * 3 // 4)
+        label_size = vinyl_size * 58 // 100
+        arm_width = max(12, height // 50)
+        arm_height = max(180, height * 42 // 100)
+        arm_x = width // 2 + vinyl_size * 25 // 100
+        arm_y = height // 2 - vinyl_size * 55 // 100
+        pivot_size = max(46, height * 8 // 100)
+        filter_graph = (
+            background
+            + f"color=c=0x111214:s={vinyl_size}x{vinyl_size}:d={duration_text}:r=30,"
+            "format=rgba,"
+            "geq=r='18+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
+            "g='19+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
+            "b='21+7*sin(hypot(X-W/2,Y-H/2)*0.22)':"
+            f"a='{radius_expression}'[vinyl];"
+            f"[cover]scale={label_size}:{label_size}:force_original_aspect_ratio=increase,"
+            f"crop={label_size}:{label_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
+            "ow=rotw(iw):oh=roth(ih):c=none[label];"
+            "[vinyl][label]overlay=(W-w)/2:(H-h)/2:shortest=1[record];"
+            "[bg][record]overlay=(W-w)/2:(H-h)/2+30:shortest=1[recordscene];"
+            f"color=c=0x303238:s={pivot_size}x{pivot_size}:d={duration_text}:r=30,"
+            "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+            f"a='{radius_expression}'[pivot];"
+            f"[recordscene][pivot]overlay="
+            f"{arm_x + arm_width + arm_height * 52 // 100 - pivot_size // 2}:"
+            f"{max(8, arm_y - pivot_size // 3)}:"
+            "shortest=1[turntable];"
+            f"color=c=white@0.88:s={arm_width}x{arm_height}:d={duration_text}:r=30,"
+            "format=rgba,"
+            "rotate=0.30:ow=rotw(iw):oh=roth(ih):c=none[arm];"
+            f"[turntable][arm]overlay={arm_x}:{arm_y}:shortest=1[scene]"
+        )
+        if show_waveform:
+            filter_graph += (
+                f";[1:a]showwaves=s={width * 2 // 3}x110:mode=cline:rate=30:"
+                "colors=0xFFD166,format=rgba,colorchannelmixer=aa=0.78[wave];"
+                "[scene][wave]overlay=(W-w)/2:H*0.58:shortest=1[visual]"
+            )
+        else:
+            filter_graph += ";[scene]null[visual]"
+    elif style == "spectrum":
+        cover_size = max(300, min(width, height) * 56 // 100)
+        filter_graph = (
+            background
+            + f"[cover]scale={cover_size}:{cover_size}:force_original_aspect_ratio=increase,"
+            f"crop={cover_size}:{cover_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
+            "ow=rotw(iw):oh=roth(ih):c=none[disc];"
+            "[bg][disc]overlay=W*0.08:(H-h)/2:shortest=1[scene]"
+        )
+        if show_waveform:
+            filter_graph += (
+                f";[1:a]showfreqs=s={width * 42 // 100}x{height * 48 // 100}:"
+                "mode=bar:ascale=log:fscale=log:colors=0x69E6D2,format=rgba,"
+                "colorkey=0x000000:0.08:0.0[frequency];"
+                "[scene][frequency]overlay=W-w-100:(H-h)/2:shortest=1[visual]"
+            )
+        else:
+            filter_graph += ";[scene]null[visual]"
+    else:
+        filter_graph = (
+            background
+            + f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
+            f"crop={disc_size}:{disc_size},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
+            f"rotate=2*PI*t/{max(1.0, rotation_seconds):.3f}:"
+            "ow=rotw(iw):oh=roth(ih):c=none[disc];"
+            "[bg][disc]overlay=(W-w)/2:(H-h)/2:shortest=1[scene]"
+        )
+        if show_waveform:
+            filter_graph += (
+                f";[1:a]showwaves=s={width * 3 // 4}x150:mode=p2p:rate=30:"
+                "colors=0x8BE9FD,format=rgba,colorchannelmixer=aa=0.72[wave];"
+                "[scene][wave]overlay=(W-w)/2:H*0.58:shortest=1[visual]"
+            )
+        else:
+            filter_graph += ";[scene]null[visual]"
+    filter_graph += ";[visual]format=yuv420p[outv]"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        find_ffmpeg(),
+        "-hide_banner",
+        "-y" if overwrite else "-n",
+        "-loop",
+        "1",
+        "-i",
+        str(image),
+        "-i",
+        str(audio),
+        "-filter_complex",
+        filter_graph,
+        "-map",
+        "[outv]",
+        "-t",
+        duration_text,
+        "-r",
+        "30",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    if progress:
+        progress("正在生成虚化背景和旋转唱片封面")
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        tail = "\n".join(completed.stdout.splitlines()[-30:])
+        output.unlink(missing_ok=True)
+        raise MediaError(f"旋转封面视频生成失败。FFmpeg 输出：\n{tail}")
+    return output
+
+
 def render_karaoke_video(
     video_path: str | Path,
     ass_path: str | Path,
@@ -454,6 +624,7 @@ def render_karaoke_video(
     crf: int = 18,
     preset: str = "medium",
     audio_bitrate: str = "320k",
+    font_files: Sequence[str | Path] | None = None,
     overwrite: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
@@ -479,6 +650,16 @@ def render_karaoke_video(
         temp_dir = Path(temp_name)
         local_ass = temp_dir / "karaoke.ass"
         shutil.copy2(subtitles, local_ass)
+        local_fonts: Path | None = None
+        for font_file in font_files or ():
+            source_font = Path(font_file).resolve()
+            if source_font.suffix.lower() not in {".ttf", ".otf", ".ttc"}:
+                raise ValueError(f"Unsupported font file: {source_font.name}")
+            if not source_font.is_file():
+                raise FileNotFoundError(f"Font file not found: {source_font}")
+            local_fonts = local_fonts or (temp_dir / "fonts")
+            local_fonts.mkdir(exist_ok=True)
+            shutil.copy2(source_font, local_fonts / source_font.name)
 
         command = [ffmpeg, "-hide_banner", "-y" if overwrite else "-n", "-i", str(video)]
         if use_external_audio:
@@ -486,7 +667,10 @@ def render_karaoke_video(
                 command.extend(["-itsoffset", f"{audio_offset:.3f}"])
             command.extend(["-i", str(external_audio)])
 
-        command.extend(["-vf", "ass=filename=karaoke.ass", "-map", "0:v:0"])
+        ass_filter = "ass=filename=karaoke.ass"
+        if local_fonts is not None:
+            ass_filter += ":fontsdir=fonts"
+        command.extend(["-vf", ass_filter, "-map", "0:v:0"])
         if use_external_audio:
             command.extend(["-map", "1:a:0"])
         else:
