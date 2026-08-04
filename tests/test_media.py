@@ -8,6 +8,7 @@ import pytest
 
 from karaoke_forge.media import (
     MediaError,
+    create_spinning_cover_video,
     match_audio_envelopes,
     probe_media_has_audio,
     render_karaoke_video,
@@ -89,6 +90,85 @@ def test_render_reports_disk_full_and_removes_new_partial_output(tmp_path, monke
         render_karaoke_video(video, subtitles, output)
 
     assert not output.exists()
+
+
+def test_spinning_cover_builds_blurred_circular_ffmpeg_graph(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    output = tmp_path / "background.mp4"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr("karaoke_forge.media.probe_media_duration", lambda _path: 42.5)
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    result = create_spinning_cover_video(cover, audio, output)
+
+    command = captured["command"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert result == output
+    assert "gblur=sigma=42" in graph
+    assert "geq=r='18+7*sin" in graph
+    assert "rotate=2*PI*t/12.000" in graph
+    assert "showwaves=" in graph
+    assert command[command.index("-t") + 1] == "42.500"
+
+
+def test_spinning_cover_supports_audio_frequency_stage(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    output = tmp_path / "spectrum.mp4"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr("karaoke_forge.media.probe_media_duration", lambda _path: 5.0)
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    create_spinning_cover_video(cover, audio, output, style="spectrum")
+
+    command = captured["command"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "showfreqs=" in graph
+    assert command[command.index("-i") + 1] == str(cover)
+    assert str(audio) in command
+
+
+def test_render_passes_uploaded_fonts_to_libass(tmp_path, monkeypatch) -> None:
+    video = tmp_path / "video.mp4"
+    subtitles = tmp_path / "lyrics.ass"
+    font = tmp_path / "Pretty Font.otf"
+    output = tmp_path / "karaoke.mp4"
+    video.write_bytes(b"video")
+    subtitles.write_text("[Script Info]\n", encoding="utf-8")
+    font.write_bytes(b"font")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    render_karaoke_video(video, subtitles, output, font_files=[font])
+
+    command = captured["command"]
+    assert command[command.index("-vf") + 1] == "ass=filename=karaoke.ass:fontsdir=fonts"
 
 
 def test_separate_vocals_rejects_cuda_when_torch_is_cpu_only(tmp_path, monkeypatch) -> None:

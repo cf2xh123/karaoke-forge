@@ -84,6 +84,7 @@ class NeteaseTrack:
     access_tier: str = "anonymous"
     audio_duration: float | None = None
     is_preview: bool = False
+    cover_url: str | None = None
 
     @property
     def artist_text(self) -> str:
@@ -113,6 +114,7 @@ class NeteaseSongInfo:
     page_lyrics: str | None = None
     word_lyrics: str | None = None
     translated_lyrics: str | None = None
+    cover_url: str | None = None
 
     @property
     def artist_text(self) -> str:
@@ -233,6 +235,10 @@ def fetch_public_netease_info(
         )
     duration_value = song.get("duration")
     duration = float(duration_value) / 1000 if isinstance(duration_value, (int, float)) else None
+    album_data = song.get("album")
+    cover_url = None
+    if isinstance(album_data, dict) and isinstance(album_data.get("picUrl"), str):
+        cover_url = album_data["picUrl"].strip() or None
 
     lyric_info = _download_public_json(
         f"https://music.163.com/api/song/lyric?id={song_id}&lv=-1&kv=-1&tv=-1&rv=-1&yv=-1",
@@ -265,6 +271,7 @@ def fetch_public_netease_info(
         page_lyrics=page_lyrics,
         word_lyrics=word_lyrics,
         translated_lyrics=translated_lyrics,
+        cover_url=cover_url,
     )
 
 
@@ -573,6 +580,7 @@ def download_netease_track(
         access_tier=access_tier,
         audio_duration=audio_duration,
         is_preview=is_preview,
+        cover_url=public_info.cover_url,
     )
 
 
@@ -639,6 +647,7 @@ def align_netease_song(
             page_lyrics=info.page_lyrics,
             word_lyrics=info.word_lyrics,
             translated_lyrics=info.translated_lyrics,
+            cover_url=info.cover_url,
         )
         if progress:
             progress("已使用用户提供的本地音频；未请求网易云音频")

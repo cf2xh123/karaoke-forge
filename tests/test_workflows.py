@@ -83,3 +83,51 @@ def test_make_reports_auto_refinement_fallback(tmp_path, monkeypatch) -> None:
     assert result.alignment_skipped
     assert result.timing_refinement_warning is not None
     assert "已保留原时间轴" in result.timing_refinement_warning
+
+
+def test_make_uses_spinning_cover_when_video_is_missing(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.m4a"
+    cover = tmp_path / "cover.jpg"
+    lyrics = tmp_path / "lyrics.lrc"
+    output = tmp_path / "karaoke.mp4"
+    assets = tmp_path / "assets"
+    font = tmp_path / "pretty.otf"
+    for path in (audio, cover, font):
+        path.write_bytes(b"asset")
+    lyrics.write_text("[00:01.00]Hello\n", encoding="utf-8")
+
+    def fake_cover(_image, _audio, target, **kwargs):
+        assert kwargs["style"] == "spectrum"
+        assert kwargs["show_waveform"] is False
+        target = Path(target)
+        target.write_bytes(b"background")
+        return target
+
+    def fake_render(video, _ass, target, **kwargs):
+        assert Path(video).name == "spinning-cover-background.mp4"
+        assert kwargs["font_files"] == (font,)
+        target = Path(target)
+        target.write_bytes(b"rendered")
+        return target
+
+    monkeypatch.setattr("karaoke_forge.workflows.create_spinning_cover_video", fake_cover)
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", fake_render)
+
+    result = make_karaoke_video(
+        audio,
+        None,
+        lyrics,
+        output,
+        assets,
+        options=MakeOptions(
+            cover_image=cover,
+            font_files=(font,),
+            cover_style="spectrum",
+            cover_waveform=False,
+            timing_refinement="off",
+            auto_sync=True,
+        ),
+    )
+
+    assert result.video == output
+    assert result.sync_result is None

@@ -7,7 +7,7 @@ from karaoke_forge.editor import (
     document_to_editor_rows,
     pronunciation_to_editor_rows,
 )
-from karaoke_forge.formats import parse_yrc
+from karaoke_forge.formats import parse_yrc, read_lyrics
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
 from karaoke_forge.netease import NeteaseSongInfo
 from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
@@ -770,6 +770,96 @@ def test_make_page_explains_when_mv_has_no_audio(tmp_path: Path, monkeypatch) ->
 
     assert result.project is None
     assert "MV 不含可用音轨" in result.status
+
+
+def test_make_page_prepares_editor_with_audio_and_cover_but_no_mv(tmp_path: Path) -> None:
+    audio = tmp_path / "song.wav"
+    cover = tmp_path / "cover.jpg"
+    lyrics = tmp_path / "lyrics.lrc"
+    audio.write_bytes(b"audio")
+    cover.write_bytes(b"image")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+
+    result = prepare_make_editor_job(
+        str(audio),
+        None,
+        str(lyrics),
+        "",
+        "cover-project",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        cover_file=str(cover),
+    )
+
+    assert result.project is not None
+    assert "音频、MV/封面和字体已保存" in result.status
+
+
+def test_make_job_renders_cover_mode_and_custom_font_without_mv(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio = tmp_path / "song.wav"
+    cover = tmp_path / "cover.jpg"
+    font = tmp_path / "pretty.otf"
+    lyrics = tmp_path / "lyrics.lrc"
+    for path in (audio, cover, font):
+        path.write_bytes(b"asset")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+
+    def fake_make(_audio, video, source, output, assets, *, options, **_kwargs):
+        assert video is None
+        assert options.cover_image == cover
+        assert options.font_files == (font,)
+        assert options.cover_style == "spectrum"
+        assert options.cover_waveform is False
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "lyrics.json"
+        document = read_lyrics(source)
+        exported.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            document=document,
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        None,
+        str(lyrics),
+        "",
+        "cover-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Pretty",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        cover_file=str(cover),
+        font_files=[str(font)],
+        cover_style="spectrum",
+        cover_waveform=False,
+    )
+
+    assert result.video is not None
+    assert "旋转专辑封面" in result.status
 
 
 def test_subtitle_preview_reflects_translation_pronunciation_and_style(

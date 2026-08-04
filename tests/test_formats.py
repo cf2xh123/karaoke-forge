@@ -10,6 +10,7 @@ from karaoke_forge.formats import (
     write_lrc,
     write_srt,
 )
+from karaoke_forge.models import PronunciationSpan
 
 
 def test_yrc_preserves_non_uniform_word_timing() -> None:
@@ -132,6 +133,21 @@ def test_translation_uses_top_center_split_ktv_layout() -> None:
     assert '"translation": "你好，世界"' in write_json(document)
     assert '"pronunciation": "ハロー　ワールド"' in write_json(document)
     assert "你好，世界\nHello world" in write_srt(document)
+
+
+def test_ass_filters_saved_english_readings_when_english_pronunciation_is_off() -> None:
+    document = parse_lrc("[00:01.00]Hello 魂\n[00:03.00]English only\n")
+    document.lines[0].pronunciation_units = [
+        PronunciationSpan("Hello", "ハロー", 0, 5),
+        PronunciationSpan("魂", "たましい", 6, 7),
+    ]
+    document.lines[1].pronunciation = "イングリッシュ オンリー"
+
+    output = write_ass(document, AssStyle(auto_english_pronunciation=False))
+
+    assert "ハロー" not in output
+    assert "イングリッシュ オンリー" not in output
+    assert "たましい" in output
 
 
 def test_ass_rolls_one_ktv_row_at_each_new_line() -> None:

@@ -45,6 +45,7 @@ class QQMusicSongInfo:
     page_lyrics: str
     translated_lyrics: str | None = None
     album: str | None = None
+    cover_url: str | None = None
 
     @property
     def artist_text(self) -> str:
@@ -98,7 +99,7 @@ def resolve_qqmusic_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.9.1"},
+        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.0"},
         method="GET",
     )
     try:
@@ -115,7 +116,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
         headers={
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://y.qq.com/",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.9.1",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.0",
         },
     )
     try:
@@ -167,6 +168,23 @@ def fetch_public_qqmusic_info(
     title = metadata.get("ti") or f"qqmusic-{song_mid}"
     artist_text = metadata.get("ar", "")
     artists = tuple(part.strip() for part in artist_text.split("/") if part.strip())
+    cover_url = None
+    try:
+        detail = _download_public_json(
+            "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg"
+            f"?songmid={quote(song_mid)}&format=json",
+            timeout=timeout,
+        )
+        songs = detail.get("data")
+        if isinstance(songs, list) and songs and isinstance(songs[0], dict):
+            album_data = songs[0].get("album")
+            if isinstance(album_data, dict) and album_data.get("mid"):
+                album_mid = str(album_data["mid"])
+                cover_url = f"https://y.gtimg.cn/music/photo_new/T002R800x800M000{album_mid}.jpg"
+    except QQMusicAccessError:
+        # Lyrics remain useful when the optional public metadata endpoint is
+        # unavailable or changes shape.
+        cover_url = None
     return QQMusicSongInfo(
         song_mid=song_mid,
         title=title,
@@ -175,4 +193,5 @@ def fetch_public_qqmusic_info(
         page_lyrics=page_lyrics,
         translated_lyrics=translated_lyrics,
         album=metadata.get("al"),
+        cover_url=cover_url,
     )
