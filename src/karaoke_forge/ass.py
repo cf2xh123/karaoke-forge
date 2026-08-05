@@ -155,6 +155,71 @@ def _text_width(text: str, style: AssStyle) -> float:
     return _fallback_text_width(text, style.font_size)
 
 
+def _karaoke_text(line: LyricLine) -> str:
+    """Build ASS karaoke tags without collapsing pauses between tokens."""
+
+    assert line.start is not None
+    line_start_cs = round(line.start * 100)
+    cursor_cs = 0
+    parts: list[str] = []
+    for token in line.tokens:
+        token_start_cs = max(cursor_cs, round(token.start * 100) - line_start_cs)
+        token_end_cs = max(token_start_cs + 1, round(token.end * 100) - line_start_cs)
+        gap_cs = token_start_cs - cursor_cs
+        if gap_cs:
+            # An empty \k syllable advances libass' karaoke clock while leaving
+            # the visible text unchanged. Without it, every detected pause is
+            # removed and all later words sweep progressively too early.
+            parts.append(r"{\k" + str(gap_cs) + "}")
+        parts.append(r"{\kf" + str(token_end_cs - token_start_cs) + "}")
+        parts.append(_escape_ass_text(token.text))
+        cursor_cs = token_end_cs
+    return "".join(parts)
+
+
+def _pronunciation_source_timing(
+    unit: PronunciationUnit,
+    line: LyricLine,
+) -> tuple[float, float] | None:
+    """Map a pronunciation source span onto the matching lyric-token timing."""
+
+    if not line.tokens:
+        return None
+    source_start = max(0, min(len(line.text), unit.start))
+    source_end = max(
+        source_start,
+        min(len(line.text), unit.end or source_start + len(unit.source)),
+    )
+    if source_end <= source_start:
+        return None
+
+    mapped: list[tuple[float, float]] = []
+    search_from = 0
+    for token in line.tokens:
+        character_start = line.text.find(token.text, search_from)
+        if character_start < 0:
+            # Generated display units normally concatenate back to line.text.
+            # Keep a monotonic fallback for hand-edited projects that do not.
+            character_start = search_from
+        character_end = min(len(line.text), character_start + len(token.text))
+        search_from = max(search_from, character_end)
+        overlap_start = max(source_start, character_start)
+        overlap_end = min(source_end, character_end)
+        if overlap_end <= overlap_start or character_end <= character_start:
+            continue
+        duration = max(0.01, token.end - token.start)
+        span = character_end - character_start
+        mapped.append(
+            (
+                token.start + duration * (overlap_start - character_start) / span,
+                token.start + duration * (overlap_end - character_start) / span,
+            )
+        )
+    if not mapped:
+        return None
+    return mapped[0][0], mapped[-1][1]
+
+
 def _pronunciation_position(
     line: LyricLine,
     unit: PronunciationUnit,
@@ -188,12 +253,20 @@ def _pronunciation_karaoke(
     text = line.text
     start = max(0, min(len(text), unit.start))
     end = max(start, min(len(text), unit.end or start + len(unit.source)))
-    total_width = max(1.0, _text_width(text, style))
-    start_ratio = _text_width(text[:start], style) / total_width
-    end_ratio = _text_width(text[:end], style) / total_width
-    total_duration = max(0.01, line.end - line.start)
-    delay = max(0, round(total_duration * start_ratio * 100))
-    sweep = max(1, round(total_duration * max(0.01, end_ratio - start_ratio) * 100))
+    source_timing = _pronunciation_source_timing(unit, line)
+    if source_timing is not None:
+        line_start_cs = round(line.start * 100)
+        source_start_cs = max(0, round(source_timing[0] * 100) - line_start_cs)
+        source_end_cs = max(source_start_cs + 1, round(source_timing[1] * 100) - line_start_cs)
+        delay = source_start_cs
+        sweep = source_end_cs - source_start_cs
+    else:
+        total_width = max(1.0, _text_width(text, style))
+        start_ratio = _text_width(text[:start], style) / total_width
+        end_ratio = _text_width(text[:end], style) / total_width
+        total_duration = max(0.01, line.end - line.start)
+        delay = max(0, round(total_duration * start_ratio * 100))
+        sweep = max(1, round(total_duration * max(0.01, end_ratio - start_ratio) * 100))
     delay_tag = r"{\k" + str(delay) + "}" if delay else ""
     return delay_tag + r"{\kf" + str(sweep) + "}" + _escape_ass_text(unit.reading)
 
@@ -291,11 +364,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 f"{_escape_ass_text(line.translation)}"
             )
         if line.tokens:
-            karaoke_parts: list[str] = []
-            for token in line.tokens:
-                duration = max(1, round((token.end - token.start) * 100))
-                karaoke_parts.append(r"{\kf" + str(duration) + "}" + _escape_ass_text(token.text))
-            lyric_text = "".join(karaoke_parts)
+            lyric_text = _karaoke_text(line)
         else:
             lyric_text = _escape_ass_text(line.text)
         karaoke_style = "Karaoke" if index % 2 == 0 else "KaraokeLower"

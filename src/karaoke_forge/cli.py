@@ -16,6 +16,7 @@ from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
     refine_audio_word_timing_with_fallback,
+    resolve_align_options,
     should_refine_timing,
 )
 from .runtime import inspect_demucs_runtime
@@ -96,7 +97,14 @@ def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_alignment_arguments(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("alignment")
-    group.add_argument("--model", default="small", help="faster-whisper model name or path")
+    group.add_argument(
+        "--model",
+        default="profile:balanced",
+        help=(
+            "alignment profile profile:fast, profile:balanced, or profile:precise; "
+            "also accepts a faster-whisper model name or local path"
+        ),
+    )
     group.add_argument("--language", default="auto", help="language code such as zh, en, ja")
     group.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     group.add_argument("--compute-type", default="default")
@@ -136,15 +144,17 @@ def _timing_refinement_from_args(args: argparse.Namespace) -> str:
 
 
 def _alignment_options(args: argparse.Namespace) -> AlignOptions:
-    return AlignOptions(
-        model=args.model,
-        language=_language(args.language),
-        device=args.device,
-        compute_type=args.compute_type,
-        beam_size=args.beam_size,
-        minimum_coverage=args.minimum_coverage,
-        separate_vocals=args.separate_vocals,
-        demucs_model=args.demucs_model,
+    return resolve_align_options(
+        AlignOptions(
+            model=args.model,
+            language=_language(args.language),
+            device=args.device,
+            compute_type=args.compute_type,
+            beam_size=args.beam_size,
+            minimum_coverage=args.minimum_coverage,
+            separate_vocals=args.separate_vocals,
+            demucs_model=args.demucs_model,
+        )
     )
 
 
@@ -377,6 +387,19 @@ def _handle_align(args: argparse.Namespace) -> int:
             f"({result.report.coverage:.1%}), exact {result.report.exact_units}, "
             f"mean similarity {result.report.mean_similarity:.2f}"
         )
+        if result.report.timing_anchor_lines:
+            print(
+                f"Timeline drift: corrected with {result.report.timing_anchor_lines} line anchors, "
+                f"median {result.report.timing_median_shift:+.2f}s, "
+                f"maximum {result.report.timing_max_shift:.2f}s"
+            )
+        if result.report.forced_alignment_attempted_lines:
+            print(
+                "KTV precise alignment: "
+                f"{result.report.forced_alignment_accepted_lines}/"
+                f"{result.report.forced_alignment_attempted_lines} lines accepted "
+                f"({result.report.forced_alignment_aligned_lines} returned by CTranslate2)"
+            )
         if result.transcription.detected_language:
             probability = result.transcription.language_probability
             suffix = f" ({probability:.1%})" if probability is not None else ""

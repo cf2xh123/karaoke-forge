@@ -490,7 +490,7 @@ def fetch_public_utaten_info(value: str, *, timeout: float = 20.0) -> UtaTenLyri
         headers={
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "ja,en;q=0.8",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.11.0",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.0",
         },
         method="GET",
     )

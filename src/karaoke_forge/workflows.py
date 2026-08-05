@@ -22,6 +22,7 @@ from .pipeline import (
     align_audio_and_lyrics,
     normalize_timing_refinement,
     refine_audio_word_timing_with_fallback,
+    resolve_align_options,
     should_refine_timing,
 )
 
@@ -101,7 +102,7 @@ def make_karaoke_video(
     assets.mkdir(parents=True, exist_ok=True)
 
     alignment_audio = audio
-    alignment_options = options.align
+    alignment_options = resolve_align_options(options.align)
     instrumental_audio: Path | None = None
     if options.export_instrumental:
         stems = separate_audio_stems(
@@ -112,9 +113,13 @@ def make_karaoke_video(
             progress=progress,
         )
         instrumental_audio = stems.instrumental
-        if options.align.separate_vocals:
+        if alignment_options.separate_vocals or alignment_options.prefer_vocal_separation:
             alignment_audio = stems.vocals
-            alignment_options = replace(options.align, separate_vocals=False)
+            alignment_options = replace(
+                alignment_options,
+                separate_vocals=False,
+                prefer_vocal_separation=False,
+            )
             if progress:
                 progress("歌词识别将复用本次 Demucs 生成的人声轨，不再重复分离")
 

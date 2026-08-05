@@ -989,7 +989,7 @@ def separate_audio_stems(
     model: str = "htdemucs",
     device: str = "auto",
     progress: Callable[[str], None] | None = None,
-) -> Path:
+) -> DemucsStems:
     audio = Path(audio_path).resolve()
     directory = Path(output_dir).resolve()
     if not audio.is_file():
@@ -1103,7 +1103,7 @@ def separate_vocals(
     model: str = "htdemucs",
     device: str = "auto",
     progress: Callable[[str], None] | None = None,
-) -> DemucsStems:
+) -> Path:
     """Keep the original recognition API while producing both reusable stems."""
 
     return separate_audio_stems(

@@ -5,12 +5,17 @@
 [English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前版本：`0.11.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式作品。
+> 当前版本：`0.12.0`（Alpha）。本版重点修复逐字扫色提前、识别时间戳失步和行级时间轴渐进漂移；正式导出前仍建议检查一次校准工程。
 
 ## 能做什么
 
 - 根据歌曲音频给无时间轴歌词生成逐词时间戳；
 - 保留用户提供的正式歌词，用 Whisper 结果定位，不会直接用识别文本替换歌词；
+- 提供“快速 / 均衡 / KTV 精准”三档识别；精准档会把正式歌词逐行交给
+  CTranslate2 强制对齐，并只采纳通过质量检查的时间；
+- ASS 扫色会保留真实首词延迟和词间停顿，不会因累加时长而让后半句越来越提前；
+- 普通 LRC/SRT/VTT 可根据可靠演唱锚点自动校正固定偏移、渐进漂移和局部速度变化；
+- 低置信、异常超长或缺少上下文支持的识别结果只参与文本恢复，不会直接控制成品时间；
 - 读取 TXT、LRC、增强 LRC、SRT、VTT、ASS 和项目 JSON；
 - 导出 LRC、增强 LRC、SRT、VTT、逐词高亮 ASS 和 JSON；
 - 把字幕烧录进 MV，并可用高质量歌曲音轨替换 MV 原音轨；
@@ -282,6 +287,21 @@ YRC 中每个字的真实开始时间和持续时间会直接用于扫色，能�
 - `force`：即使已有真实逐字时间也重新根据演唱音频检查，但只采纳高可靠且不会大幅偏离
   YRC/人工时间的句内修正；低质量识别会保留原时间。
 
+识别模型可以直接选择三档预设；网页默认使用“均衡”，命令行分别传入
+`--model profile:fast|profile:balanced|profile:precise`：
+
+| 档位 | 实际配置 | 适合场景 |
+| --- | --- | --- |
+| 快速 | `small`，beam 3 | 先生成可编辑工程、CPU 或较慢的电脑 |
+| 均衡（默认） | `large-v3-turbo`，beam 5 | 大多数歌曲的速度与准确率平衡 |
+| KTV 精准 | `large-v3`，beam 5 | 自动尝试 Demucs 人声轨，再用正式歌词逐行执行 CTranslate2 强制对齐 |
+
+KTV 精准把 Demucs 当作“优先尝试”：没有安装、运行失败或当前工作流不能分离时，会明确
+提示并改用原音频继续；某一行强制对齐失败或没有通过质量门时，也只保留该行的 0.12
+粗对齐结果，不影响其他行。手动勾选“先分离人声”仍是严格要求——此时 Demucs 不可用
+会直接报错，不会静默回退。`auto` 依然不会改动已有真实逐字时间的 YRC/增强 LRC；只有
+选择 `force` 才会检查这些来源时间。
+
 `align`、`make`、`netease` 命令使用
 `--timing-refinement off|auto|force`；旧版
 `--no-refine-word-timing` 仍作为兼容参数保留。
@@ -305,9 +325,10 @@ output/
     └── song-karaoke.json
 ```
 
-第一次运行会下载所选 Whisper 模型。默认模型是 `small`，速度、显存和准确率比较均衡。
-模型会优先从本机缓存加载；若当前无法访问 Hugging Face，可暂时把“逐字时间精修”设为
-“关闭”，已有 LRC/YRC 时间轴的制作仍可继续。
+第一次运行会下载所选 Whisper 模型；默认“均衡”的 `large-v3-turbo` 和 KTV 精准的
+`large-v3` 体积明显大于快速档，首次下载和加载可能需要较长时间，之后会优先复用本机
+缓存。若当前无法访问 Hugging Face，可先改用“快速”，或把“逐字时间精修”设为“关闭”；
+已有 LRC/YRC 时间轴的制作仍可继续。
 
 ## 歌词与注音编辑
 
@@ -523,10 +544,11 @@ python -m pip install --upgrade "karaoke-forge[align]"
 
 维护者发布新版本时需要同时更新：
 
-1. `pyproject.toml` 中的版本；
-2. `src/karaoke_forge/__init__.py` 中的 `__version__`；
-3. `CHANGELOG.md`；
-4. 打 Git 标签并创建 GitHub Release。
+1. `pyproject.toml`、`src/karaoke_forge/__init__.py` 和 `projects.py` 中的版本；
+2. 中英文 README、`CHANGELOG.md` 和 `TODO.md`；
+3. 用 `rg "Karaoke-Forge/" src` 检查各网络请求的 User-Agent 版本；
+4. 运行全量测试并构建 wheel，确认包名中的版本正确；
+5. 打 Git 标签并创建 GitHub Release。
 
 ## 开源前检查
 

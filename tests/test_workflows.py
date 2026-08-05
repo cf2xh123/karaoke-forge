@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from karaoke_forge.pipeline import AlignOptions
 from karaoke_forge.workflows import MakeOptions, make_karaoke_video
 
 
@@ -62,6 +63,65 @@ def test_make_can_export_original_and_instrumental_with_one_separation(
         "instrumental": tmp_path / "karaoke-instrumental.mp4",
     }
     assert calls == [("render", audio), ("replace", instrumental)]
+
+
+def test_precise_alignment_reuses_vocals_created_for_instrumental_export(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    instrumental = tmp_path / "no_vocals.wav"
+    vocals = tmp_path / "vocals.wav"
+    output = tmp_path / "karaoke.mp4"
+    for path in (audio, video, instrumental, vocals):
+        path.write_bytes(b"media")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+    captured: list[tuple[Path, AlignOptions]] = []
+
+    monkeypatch.setattr(
+        "karaoke_forge.workflows.separate_audio_stems",
+        lambda *_args, **_kwargs: type(
+            "Stems",
+            (),
+            {"vocals": vocals, "instrumental": instrumental},
+        )(),
+    )
+
+    def fake_refine(alignment_audio, _document, *, options, **_kwargs):
+        captured.append((Path(alignment_audio), options))
+
+    def fake_render(_video, _ass, target, **_kwargs):
+        target = Path(target)
+        target.write_bytes(b"rendered")
+        return target
+
+    monkeypatch.setattr(
+        "karaoke_forge.workflows.refine_audio_word_timing_with_fallback",
+        fake_refine,
+    )
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", fake_render)
+
+    make_karaoke_video(
+        audio,
+        video,
+        lyrics,
+        output,
+        tmp_path / "assets",
+        options=MakeOptions(
+            align=AlignOptions(model="profile:precise"),
+            export_original=False,
+            export_instrumental=True,
+        ),
+    )
+
+    assert len(captured) == 1
+    alignment_audio, alignment_options = captured[0]
+    assert alignment_audio == vocals
+    assert alignment_options.profile == "precise"
+    assert not alignment_options.separate_vocals
+    assert not alignment_options.prefer_vocal_separation
 
 
 def test_make_requires_at_least_one_final_video(tmp_path) -> None:

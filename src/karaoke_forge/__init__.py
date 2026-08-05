@@ -3,4 +3,4 @@
 from .models import KaraokeToken, LyricLine, LyricsDocument
 
 __all__ = ["KaraokeToken", "LyricLine", "LyricsDocument"]
-__version__ = "0.11.0"
+__version__ = "0.12.0"

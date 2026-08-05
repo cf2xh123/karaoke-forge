@@ -52,6 +52,7 @@ from .pipeline import (
     align_audio_and_lyrics,
     normalize_timing_refinement,
     refine_audio_word_timing_with_fallback,
+    resolve_align_options,
     should_refine_timing,
 )
 from .projects import (
@@ -80,6 +81,22 @@ _EDITOR_PREFETCH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="karaoke-forge-prefetch",
 )
 _WEB_ERROR_LOG_LOCK = threading.Lock()
+
+_ALIGNMENT_MODEL_CHOICES = [
+    ("快速（small，速度优先）", "profile:fast"),
+    ("均衡（large-v3-turbo，推荐）", "profile:balanced"),
+    ("KTV 精准（large-v3 + 逐行强制对齐）", "profile:precise"),
+    ("tiny（自定义模型）", "tiny"),
+    ("base（自定义模型）", "base"),
+    ("small（自定义模型）", "small"),
+    ("medium（自定义模型）", "medium"),
+    ("large-v3（自定义模型）", "large-v3"),
+    ("large-v3-turbo（自定义模型）", "large-v3-turbo"),
+]
+_ALIGNMENT_MODEL_INFO = (
+    "均衡档为默认选择。KTV 精准会尝试人声分离和逐行强制对齐，"
+    "任一步骤不可用时都会安全回退；首次使用新模型时下载可能较久。"
+)
 
 WEB_CSS = """
 :root {
@@ -2324,13 +2341,15 @@ def _build_align_options(
     *,
     recover_low_coverage: bool = False,
 ) -> AlignOptions:
-    return AlignOptions(
-        model=model,
-        language=None if language == "自动识别" else language,
-        device=device,
-        compute_type="int8" if device == "cpu" else "default",
-        separate_vocals=separate_vocals,
-        recover_low_coverage=recover_low_coverage,
+    return resolve_align_options(
+        AlignOptions(
+            model=model,
+            language=None if language == "自动识别" else language,
+            device=device,
+            compute_type="int8" if device == "cpu" else "default",
+            separate_vocals=separate_vocals,
+            recover_low_coverage=recover_low_coverage,
+        )
     )
 
 
@@ -2338,6 +2357,18 @@ def _web_timing_refinement(value: str | bool | None) -> str:
     if isinstance(value, bool):
         return "auto" if value else "off"
     return normalize_timing_refinement(value)
+
+
+def _timing_drift_summary(report: object) -> str:
+    anchor_lines = int(getattr(report, "timing_anchor_lines", 0) or 0)
+    if not anchor_lines:
+        return ""
+    median_shift = float(getattr(report, "timing_median_shift", 0.0) or 0.0)
+    maximum_shift = float(getattr(report, "timing_max_shift", 0.0) or 0.0)
+    return (
+        f"\n\n已根据 **{anchor_lines} 行**可靠演唱锚点自动校正渐进漂移；"
+        f"中位偏移 **{median_shift:+.2f} 秒**，最大偏移 **{maximum_shift:.2f} 秒**。"
+    )
 
 
 def _low_coverage_summary(
@@ -2631,6 +2662,9 @@ def prepare_make_editor_job(
                     timing_summary = "自动精修暂不可用，已保留原行级时间轴并继续生成工程。"
                 else:
                     document = refined.document
+                    drift_summary = _timing_drift_summary(refined.report)
+                    if drift_summary:
+                        report(drift_summary.strip())
                     timing_summary = (
                         f"时间轴已按上传音频精修，匹配覆盖率 **{refined.report.coverage:.1%}**。"
                     )
@@ -2713,6 +2747,11 @@ def prepare_make_editor_job(
             cover=cover,
             font_files=fonts,
             settings={
+                "alignment_language": language,
+                "alignment_model": model,
+                "alignment_device": device,
+                "alignment_separate_vocals": bool(separate_vocals),
+                "timing_refinement": _web_timing_refinement(timing_refinement),
                 "font": font,
                 "cover_background": cover_background,
                 "cover_style": cover_style,
@@ -3120,6 +3159,11 @@ def run_make_job(
             cover=cover,
             font_files=fonts,
             settings={
+                "alignment_language": language,
+                "alignment_model": model,
+                "alignment_device": device,
+                "alignment_separate_vocals": bool(separate_vocals),
+                "timing_refinement": _web_timing_refinement(timing_refinement),
                 "font": font,
                 "font_size": int(font_size),
                 "quality": quality,
@@ -3237,6 +3281,9 @@ def run_align_job(
                     alignment_text = "自动精修暂不可用，已保留输入时间轴并继续导出。"
                 else:
                     document = refined.document
+                    drift_summary = _timing_drift_summary(refined.report)
+                    if drift_summary:
+                        report(drift_summary.strip())
                     alignment_text = (
                         f"逐字时间已按“{'强制' if timing_mode == 'force' else '自动'}”"
                         f"策略精修，匹配覆盖率 **{refined.report.coverage:.1%}**。"
@@ -4684,9 +4731,10 @@ def create_web_app() -> object:
                         with gr.Accordion("高级设置", open=False):
                             with gr.Row():
                                 make_model = gr.Dropdown(
-                                    label="识别模型",
-                                    choices=["tiny", "base", "small", "medium", "large-v3"],
-                                    value="small",
+                                    label="识别档位 / 模型",
+                                    choices=_ALIGNMENT_MODEL_CHOICES,
+                                    value="profile:balanced",
+                                    info=_ALIGNMENT_MODEL_INFO,
                                 )
                                 make_device = gr.Radio(
                                     label="运行设备",
@@ -4807,9 +4855,10 @@ def create_web_app() -> object:
                             value="自动识别",
                         )
                         align_model = gr.Dropdown(
-                            label="识别模型",
-                            choices=["tiny", "base", "small", "medium", "large-v3"],
-                            value="small",
+                            label="识别档位 / 模型",
+                            choices=_ALIGNMENT_MODEL_CHOICES,
+                            value="profile:balanced",
+                            info=_ALIGNMENT_MODEL_INFO,
                         )
                     with gr.Accordion("高级设置", open=False):
                         align_device = gr.Radio(
@@ -4891,9 +4940,10 @@ def create_web_app() -> object:
                             value="自动识别",
                         )
                         netease_model = gr.Dropdown(
-                            label="识别模型",
-                            choices=["tiny", "base", "small", "medium", "large-v3"],
-                            value="small",
+                            label="识别档位 / 模型",
+                            choices=_ALIGNMENT_MODEL_CHOICES,
+                            value="profile:balanced",
+                            info=_ALIGNMENT_MODEL_INFO,
                         )
                     netease_use_page_lyrics = gr.Checkbox(
                         label="没有提供自己的歌词时，使用网易云页面公开 LRC",
@@ -5800,7 +5850,7 @@ def create_web_app() -> object:
         def restore_recent_workspace() -> tuple[object, ...]:
             workspace = load_recent_workspace(_default_output_root())
             if workspace is None:
-                return tuple(gr.skip() for _ in range(25))
+                return tuple(gr.skip() for _ in range(30))
             loaded = list(load_editor_project_workspace(workspace.lyrics_project))
             loaded[2] = (
                 f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
@@ -5819,6 +5869,15 @@ def create_web_app() -> object:
             cover_waveform = bool(settings.get("cover_waveform", True))
             export_original = bool(settings.get("export_original", True))
             export_instrumental = bool(settings.get("export_instrumental", False))
+            alignment_language = str(settings.get("alignment_language") or "自动识别")
+            alignment_model = str(settings.get("alignment_model") or "profile:fast")
+            alignment_device = str(settings.get("alignment_device") or "auto")
+            alignment_separate_vocals = bool(
+                settings.get("alignment_separate_vocals", False)
+            )
+            timing_refinement = _web_timing_refinement(
+                settings.get("timing_refinement", "auto")
+            )
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
             return (
                 *loaded,
@@ -5829,6 +5888,11 @@ def create_web_app() -> object:
                 cover,
                 font_files,
                 workspace.name,
+                alignment_language,
+                alignment_model,
+                alignment_device,
+                alignment_separate_vocals,
+                timing_refinement,
                 font_name,
                 cover_background,
                 cover_style,
@@ -5859,6 +5923,11 @@ def create_web_app() -> object:
                 make_cover,
                 make_font_files,
                 make_name,
+                make_language,
+                make_model,
+                make_device,
+                make_separate,
+                make_timing_refinement,
                 make_font,
                 make_cover_background,
                 make_cover_style,
