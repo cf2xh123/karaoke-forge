@@ -908,7 +908,81 @@ def render_karaoke_video(
     return output
 
 
-def separate_vocals(
+def replace_video_audio(
+    video_path: str | Path,
+    audio_path: str | Path,
+    output_path: str | Path,
+    *,
+    audio_offset: float = 0.0,
+    audio_bitrate: str = "320k",
+    overwrite: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    """Copy encoded video while replacing its audio track without re-rendering frames."""
+
+    video = Path(video_path).resolve()
+    audio = Path(audio_path).resolve()
+    output = Path(output_path).resolve()
+    if not video.is_file():
+        raise FileNotFoundError(f"Video file not found: {video}")
+    if not audio.is_file():
+        raise FileNotFoundError(f"Audio file not found: {audio}")
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    command = [find_ffmpeg(), "-hide_banner", "-y" if overwrite else "-n", "-i", str(video)]
+    if audio_offset:
+        command.extend(["-itsoffset", f"{audio_offset:.3f}"])
+    command.extend(
+        [
+            "-i",
+            str(audio),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_bitrate,
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(output),
+        ]
+    )
+    if progress:
+        progress(f"正在生成无人声伴奏版：{output.name}")
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        tail = "\n".join(completed.stdout.splitlines()[-30:])
+        if output.is_file():
+            try:
+                output.unlink()
+            except OSError:
+                pass
+        raise MediaError(f"FFmpeg failed to replace video audio (exit {completed.returncode}):\n{tail}")
+    return output
+
+
+@dataclass(frozen=True)
+class DemucsStems:
+    vocals: Path
+    instrumental: Path
+
+
+def separate_audio_stems(
     audio_path: str | Path,
     output_dir: str | Path,
     *,
@@ -1008,9 +1082,34 @@ def separate_vocals(
             hint = ""
         raise MediaError(f"Demucs 运行失败（退出码 {return_code}）：\n{tail}{hint}")
 
-    candidates = sorted(directory.rglob("vocals.wav"), key=lambda path: path.stat().st_mtime)
-    if not candidates:
+    vocals = sorted(directory.rglob("vocals.wav"), key=lambda path: path.stat().st_mtime)
+    instrumentals = sorted(
+        directory.rglob("no_vocals.wav"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not vocals:
         raise MediaError("Demucs 已结束，但没有找到 vocals.wav 人声文件。")
+    if not instrumentals:
+        raise MediaError("Demucs 已结束，但没有找到 no_vocals.wav 伴奏文件。")
     if progress:
-        progress("Demucs 人声分离完成，接下来使用人声轨进行歌词识别")
-    return candidates[-1]
+        progress("Demucs 人声分离完成，人声轨和无人声伴奏轨均已生成")
+    return DemucsStems(vocals=vocals[-1], instrumental=instrumentals[-1])
+
+
+def separate_vocals(
+    audio_path: str | Path,
+    output_dir: str | Path,
+    *,
+    model: str = "htdemucs",
+    device: str = "auto",
+    progress: Callable[[str], None] | None = None,
+) -> DemucsStems:
+    """Keep the original recognition API while producing both reusable stems."""
+
+    return separate_audio_stems(
+        audio_path,
+        output_dir,
+        model=model,
+        device=device,
+        progress=progress,
+    ).vocals

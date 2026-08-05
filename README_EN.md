@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.10.3 replaces the CD-player layout with a proper vinyl turntable: a large
-> grooved record, tonearm and stylus on adaptive blurred cover art with audio-reactive waves.
+> Version 0.11.0 can export the original-audio karaoke video, a Demucs no-vocals
+> accompaniment version, or both in one job while reusing one stem separation and video encode.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -15,6 +15,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Read TXT, LRC, enhanced LRC, SRT, VTT, ASS, and project JSON;
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
+- Export the original-audio version, a Demucs no-vocals accompaniment version, or both;
 - Render a no-MV version from local or NetEase/QQ Music cover art using five backgrounds
   and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
@@ -31,7 +32,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.10.3` alpha. Check the generated timeline before a final render.
+This is a usable `0.11.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 

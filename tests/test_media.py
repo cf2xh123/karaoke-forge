@@ -276,6 +276,7 @@ def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, mo
     audio.write_bytes(b"audio")
     output_dir = tmp_path / "separated"
     vocals = output_dir / "htdemucs" / "song" / "vocals.wav"
+    instrumental = output_dir / "htdemucs" / "song" / "no_vocals.wav"
     captured: dict[str, object] = {}
 
     class FakeProcess:
@@ -284,6 +285,7 @@ def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, mo
         def wait(self) -> int:
             vocals.parent.mkdir(parents=True)
             vocals.write_bytes(b"vocals")
+            instrumental.write_bytes(b"instrumental")
             return 0
 
     def fake_popen(command, **kwargs):
