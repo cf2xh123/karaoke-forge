@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.10.2 adds five distinct no-MV backgrounds that combine freely with five
-> audio-reactive layouts, led by a centered premium CD player on adaptive blurred cover art.
+> Version 0.10.3 replaces the CD-player layout with a proper vinyl turntable: a large
+> grooved record, tonearm and stylus on adaptive blurred cover art with audio-reactive waves.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -31,7 +31,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.10.2` alpha. Check the generated timeline before a final render.
+This is a usable `0.10.3` alpha. Check the generated timeline before a final render.
 
 ## Install
 
