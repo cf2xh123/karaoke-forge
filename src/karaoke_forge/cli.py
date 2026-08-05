@@ -221,6 +221,18 @@ def build_parser() -> argparse.ArgumentParser:
     make.add_argument("--crf", type=int, default=18)
     make.add_argument("--preset", default="medium")
     make.add_argument("--audio-bitrate", default="320k")
+    make.add_argument(
+        "--export-original",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="export the karaoke video with the original song audio",
+    )
+    make.add_argument(
+        "--export-instrumental",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also export a Demucs no-vocals accompaniment version",
+    )
     make.add_argument("--overwrite", action="store_true")
     _add_alignment_arguments(make)
     _add_style_arguments(make)
@@ -442,6 +454,8 @@ def _handle_make(args: argparse.Namespace) -> int:
             overwrite=args.overwrite,
             auto_sync=args.auto_sync,
             timing_refinement=_timing_refinement_from_args(args),
+            export_original=args.export_original,
+            export_instrumental=args.export_instrumental,
         ),
         progress=_progress,
     )
@@ -456,7 +470,9 @@ def _handle_make(args: argparse.Namespace) -> int:
             f"({result.alignment_report.coverage:.1%})"
         )
     _print_exports(result.exports)
-    print(f"video  {result.video}")
+    videos = getattr(result, "videos", None) or {"original": result.video}
+    for version, video in videos.items():
+        print(f"video-{version}  {video}")
     return 0
 
 

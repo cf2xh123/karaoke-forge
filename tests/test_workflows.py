@@ -1,6 +1,86 @@
 from pathlib import Path
 
+import pytest
+
 from karaoke_forge.workflows import MakeOptions, make_karaoke_video
+
+
+def test_make_can_export_original_and_instrumental_with_one_separation(
+    tmp_path, monkeypatch
+) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    output = tmp_path / "karaoke.mp4"
+    instrumental = tmp_path / "no_vocals.wav"
+    vocals = tmp_path / "vocals.wav"
+    for path in (audio, video, instrumental, vocals):
+        path.write_bytes(b"media")
+    lyrics.write_text("[00:01.00]Hello\n", encoding="utf-8")
+    calls: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(
+        "karaoke_forge.workflows.separate_audio_stems",
+        lambda *_args, **_kwargs: type(
+            "Stems",
+            (),
+            {"vocals": vocals, "instrumental": instrumental},
+        )(),
+    )
+
+    def fake_render(_video, _ass, target, **kwargs):
+        calls.append(("render", Path(kwargs["audio_path"])))
+        target = Path(target)
+        target.write_bytes(b"original")
+        return target
+
+    def fake_replace(_video, replacement_audio, target, **_kwargs):
+        calls.append(("replace", Path(replacement_audio)))
+        target = Path(target)
+        target.write_bytes(b"instrumental")
+        return target
+
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", fake_render)
+    monkeypatch.setattr("karaoke_forge.workflows.replace_video_audio", fake_replace)
+
+    result = make_karaoke_video(
+        audio,
+        video,
+        lyrics,
+        output,
+        tmp_path / "assets",
+        options=MakeOptions(
+            timing_refinement="off",
+            export_original=True,
+            export_instrumental=True,
+        ),
+    )
+
+    assert result.video == output
+    assert result.videos == {
+        "original": output,
+        "instrumental": tmp_path / "karaoke-instrumental.mp4",
+    }
+    assert calls == [("render", audio), ("replace", instrumental)]
+
+
+def test_make_requires_at_least_one_final_video(tmp_path) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    lyrics.write_text("[00:01.00]Hello\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least one final video"):
+        make_karaoke_video(
+            audio,
+            video,
+            lyrics,
+            tmp_path / "karaoke.mp4",
+            tmp_path / "assets",
+            options=MakeOptions(export_original=False, export_instrumental=False),
+        )
 
 
 def test_make_skips_auto_sync_when_video_has_no_audio(tmp_path, monkeypatch) -> None:

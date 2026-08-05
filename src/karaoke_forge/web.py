@@ -2435,6 +2435,8 @@ def prepare_make_editor_job(
     cover_background: str = "adaptive",
     cover_style: str = "turntable",
     cover_waveform: bool = True,
+    export_original: bool = True,
+    export_instrumental: bool = False,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2715,6 +2717,8 @@ def prepare_make_editor_job(
                 "cover_background": cover_background,
                 "cover_style": cover_style,
                 "cover_waveform": bool(cover_waveform),
+                "export_original": bool(export_original),
+                "export_instrumental": bool(export_instrumental),
             },
             recent_root=_default_output_root(),
         )
@@ -2815,6 +2819,8 @@ def run_make_job(
     cover_background: str = "adaptive",
     cover_style: str = "turntable",
     cover_waveform: bool = True,
+    export_original: bool = True,
+    export_instrumental: bool = False,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2828,6 +2834,8 @@ def run_make_job(
     job_dir: Path | None = None
     temporary_audio: Path | None = None
     try:
+        if not export_original and not export_instrumental:
+            raise ValueError("请至少选择导出原声版或无人声伴奏版中的一种。")
         audio = _file_path(audio_file)
         video = _file_path(video_file)
         if video is not None and not video.is_file():
@@ -3093,6 +3101,8 @@ def run_make_job(
                 cover_background=cover_background,
                 cover_style=cover_style,
                 cover_waveform=bool(cover_waveform),
+                export_original=bool(export_original),
+                export_instrumental=bool(export_instrumental),
             ),
             progress=report,
         )
@@ -3117,14 +3127,17 @@ def run_make_job(
                 "cover_background": cover_background,
                 "cover_style": cover_style,
                 "cover_waveform": bool(cover_waveform),
+                "export_original": bool(export_original),
+                "export_instrumental": bool(export_instrumental),
             },
             recent_root=_default_output_root(),
         )
         if temporary_audio:
             temporary_audio.unlink(missing_ok=True)
             report("本次获取的临时音频已保存进工程，并清理下载缓存")
+        result_videos = getattr(result, "videos", None) or {"original": result.video}
         files = [
-            str(result.video),
+            *(str(path) for path in result_videos.values()),
             *(str(path) for path in result.exports.values()),
             *([] if "json" in result.exports else [str(project_json)]),
             str(workspace.manifest),
@@ -3152,9 +3165,14 @@ def run_make_job(
             sync_text = "\n\n已使用虚化背景与旋转专辑封面生成无 MV 版本。"
         else:
             sync_text = ""
+        versions = []
+        if "original" in result_videos:
+            versions.append("原声版")
+        if "instrumental" in result_videos:
+            versions.append("无人声伴奏版")
         status = (
-            f"### ✅ 卡拉 OK MV 已生成\n{alignment}{sync_text}"
-            "\n\n成品和所有歌词格式已保存，可以预览或下载。"
+            f"### ✅ 卡拉 OK MV 已生成：{' + '.join(versions)}\n{alignment}{sync_text}"
+            "\n\n所选成品和所有歌词格式已保存，可以预览或下载。"
         )
         report("全部完成")
         return UiJobResult(status, str(result.video), files, "\n".join(logs), str(job_dir))
@@ -4713,6 +4731,16 @@ def create_web_app() -> object:
                         "> 推荐先生成校准工程：这里上传的音频、MV、歌词和网易云链接会"
                         "直接带入编辑器，不需要重复上传。确认歌词后再生成最终视频。"
                     )
+                    gr.Markdown("**最终导出版本（可单选，也可同时选择）**")
+                    with gr.Row():
+                        make_export_original = gr.Checkbox(
+                            label="导出原声版",
+                            value=True,
+                        )
+                        make_export_instrumental = gr.Checkbox(
+                            label=_demucs_option_label("导出无人声伴奏版"),
+                            value=False,
+                        )
                     with gr.Row():
                         make_prepare_button = gr.Button(
                             "① 生成可校准 KTV 工程",
@@ -4720,7 +4748,7 @@ def create_web_app() -> object:
                             elem_classes="kf-primary",
                         )
                         make_button = gr.Button(
-                            "② 生成最终卡拉 OK MV",
+                            "② 生成所选卡拉 OK MV",
                             variant="secondary",
                         )
 
@@ -5326,6 +5354,8 @@ def create_web_app() -> object:
             cover_background: str,
             cover_style: str,
             cover_waveform: bool,
+            export_original: bool,
+            export_instrumental: bool,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
@@ -5373,6 +5403,8 @@ def create_web_app() -> object:
                 cover_background,
                 cover_style,
                 cover_waveform,
+                export_original,
+                export_instrumental,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -5411,6 +5443,8 @@ def create_web_app() -> object:
             cover_background: str,
             cover_style: str,
             cover_waveform: bool,
+            export_original: bool,
+            export_instrumental: bool,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
@@ -5443,6 +5477,8 @@ def create_web_app() -> object:
                 cover_background,
                 cover_style,
                 cover_waveform,
+                export_original,
+                export_instrumental,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5503,6 +5539,8 @@ def create_web_app() -> object:
                 make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
+                make_export_original,
+                make_export_instrumental,
             ],
             outputs=[
                 editor_payload,
@@ -5570,6 +5608,8 @@ def create_web_app() -> object:
                 make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
+                make_export_original,
+                make_export_instrumental,
             ],
             outputs=[
                 make_status,
@@ -5760,7 +5800,7 @@ def create_web_app() -> object:
         def restore_recent_workspace() -> tuple[object, ...]:
             workspace = load_recent_workspace(_default_output_root())
             if workspace is None:
-                return tuple(gr.skip() for _ in range(23))
+                return tuple(gr.skip() for _ in range(25))
             loaded = list(load_editor_project_workspace(workspace.lyrics_project))
             loaded[2] = (
                 f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
@@ -5777,6 +5817,8 @@ def create_web_app() -> object:
             if cover_style == "cdplayer":
                 cover_style = "turntable"
             cover_waveform = bool(settings.get("cover_waveform", True))
+            export_original = bool(settings.get("export_original", True))
+            export_instrumental = bool(settings.get("export_instrumental", False))
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
             return (
                 *loaded,
@@ -5791,6 +5833,8 @@ def create_web_app() -> object:
                 cover_background,
                 cover_style,
                 cover_waveform,
+                export_original,
+                export_instrumental,
                 gr.update(selected="editor"),
                 make_status,
             )
@@ -5819,6 +5863,8 @@ def create_web_app() -> object:
                 make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
+                make_export_original,
+                make_export_instrumental,
                 main_tabs,
                 make_status,
             ],

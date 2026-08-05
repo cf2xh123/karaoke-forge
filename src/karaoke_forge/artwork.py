@@ -52,7 +52,7 @@ def download_public_cover(
         headers={
             "Accept": "image/avif,image/webp,image/png,image/jpeg,*/*;q=0.5",
             "Referer": "https://music.163.com/" if "126.net" in host else "https://y.qq.com/",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.10.3",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.11.0",
         },
     )
     try:

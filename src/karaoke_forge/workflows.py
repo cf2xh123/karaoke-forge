@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .align import AlignmentReport
@@ -13,6 +13,8 @@ from .media import (
     detect_audio_sync,
     probe_media_has_audio,
     render_karaoke_video,
+    replace_video_audio,
+    separate_audio_stems,
 )
 from .models import LyricsDocument
 from .pipeline import (
@@ -42,6 +44,8 @@ class MakeOptions:
     cover_background: str = "adaptive"
     cover_style: str = "turntable"
     cover_waveform: bool = True
+    export_original: bool = True
+    export_instrumental: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ class MakeResult:
     document: LyricsDocument
     exports: dict[str, Path]
     video: Path
+    videos: dict[str, Path]
     alignment_report: AlignmentReport | None
     alignment_skipped: bool
     audio_offset: float
@@ -80,9 +85,38 @@ def make_karaoke_video(
     cover_image = Path(options.cover_image) if options.cover_image is not None else None
     if video_source is None and (cover_image is None or not cover_image.is_file()):
         raise ValueError("Video or cover image is required.")
-    if output.exists() and not options.overwrite:
-        raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
+    if not options.export_original and not options.export_instrumental:
+        raise ValueError("Select at least one final video: original or instrumental.")
+    instrumental_output = output.with_name(f"{output.stem}-instrumental{output.suffix}")
+    selected_outputs = [
+        *([output] if options.export_original else []),
+        *([instrumental_output] if options.export_instrumental else []),
+    ]
+    if not options.overwrite:
+        for target in selected_outputs:
+            if target.exists():
+                raise FileExistsError(
+                    f"Output already exists: {target}. Pass --overwrite to replace it."
+                )
     assets.mkdir(parents=True, exist_ok=True)
+
+    alignment_audio = audio
+    alignment_options = options.align
+    instrumental_audio: Path | None = None
+    if options.export_instrumental:
+        stems = separate_audio_stems(
+            audio,
+            assets / ".work" / "demucs",
+            model=options.align.demucs_model,
+            device=options.align.device,
+            progress=progress,
+        )
+        instrumental_audio = stems.instrumental
+        if options.align.separate_vocals:
+            alignment_audio = stems.vocals
+            alignment_options = replace(options.align, separate_vocals=False)
+            if progress:
+                progress("歌词识别将复用本次 Demucs 生成的人声轨，不再重复分离")
 
     generated_cover_background = video_source is None
     if generated_cover_background:
@@ -144,10 +178,10 @@ def make_karaoke_video(
                 detail = "强制" if timing_mode == "force" else "自动"
                 progress(f"逐字时间精修策略：{detail}，将使用演唱音频重新检查时间")
             refined = refine_audio_word_timing_with_fallback(
-                audio,
+                alignment_audio,
                 source_document,
                 timing_mode=timing_mode,
-                options=options.align,
+                options=alignment_options,
                 work_dir=assets / ".work",
                 progress=progress,
             )
@@ -171,9 +205,9 @@ def make_karaoke_video(
                     progress("歌词已有时间轴，已跳过语音识别")
     else:
         aligned = align_audio_and_lyrics(
-            audio,
+            alignment_audio,
             lyrics_path,
-            options=options.align,
+            options=alignment_options,
             work_dir=assets / ".work",
             progress=progress,
         )
@@ -192,23 +226,53 @@ def make_karaoke_video(
         formats,
         ass_style=options.style,
     )
-    video = render_karaoke_video(
-        video_source,
-        exports["ass"],
-        output,
-        audio_path=audio,
-        audio_offset=effective_offset,
-        crf=options.crf,
-        preset=options.preset,
-        audio_bitrate=options.audio_bitrate,
-        font_files=options.font_files,
-        overwrite=options.overwrite,
-        progress=progress,
-    )
+    videos: dict[str, Path] = {}
+    if options.export_original:
+        videos["original"] = render_karaoke_video(
+            video_source,
+            exports["ass"],
+            output,
+            audio_path=audio,
+            audio_offset=effective_offset,
+            crf=options.crf,
+            preset=options.preset,
+            audio_bitrate=options.audio_bitrate,
+            font_files=options.font_files,
+            overwrite=options.overwrite,
+            progress=progress,
+        )
+    if options.export_instrumental:
+        assert instrumental_audio is not None
+        if options.export_original:
+            videos["instrumental"] = replace_video_audio(
+                videos["original"],
+                instrumental_audio,
+                instrumental_output,
+                audio_offset=effective_offset,
+                audio_bitrate=options.audio_bitrate,
+                overwrite=options.overwrite,
+                progress=progress,
+            )
+        else:
+            videos["instrumental"] = render_karaoke_video(
+                video_source,
+                exports["ass"],
+                instrumental_output,
+                audio_path=instrumental_audio,
+                audio_offset=effective_offset,
+                crf=options.crf,
+                preset=options.preset,
+                audio_bitrate=options.audio_bitrate,
+                font_files=options.font_files,
+                overwrite=options.overwrite,
+                progress=progress,
+            )
+    video = videos.get("original") or videos["instrumental"]
     return MakeResult(
         document=document,
         exports=exports,
         video=video,
+        videos=videos,
         alignment_report=report,
         alignment_skipped=alignment_skipped,
         audio_offset=effective_offset,

@@ -870,6 +870,91 @@ def test_make_job_renders_cover_mode_and_custom_font_without_mv(
     assert "旋转专辑封面" in result.status
 
 
+def test_make_job_can_return_original_and_instrumental_downloads(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.wav"
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.lrc"
+    for path in (audio, video):
+        path.write_bytes(b"media")
+    lyrics.write_text("[00:01.00]Hello world\n", encoding="utf-8")
+
+    def fake_make(_audio, _video, source, output, assets, *, options, **_kwargs):
+        assert options.export_original is True
+        assert options.export_instrumental is True
+        output = Path(output)
+        instrumental = output.with_name(f"{output.stem}-instrumental.mp4")
+        output.write_bytes(b"original")
+        instrumental.write_bytes(b"instrumental")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "lyrics.json"
+        document = read_lyrics(source)
+        exported.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            videos={"original": output, "instrumental": instrumental},
+            exports={"json": exported},
+            document=document,
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+    result = run_make_job(
+        str(audio),
+        str(video),
+        str(lyrics),
+        "",
+        "dual-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        export_original=True,
+        export_instrumental=True,
+    )
+
+    assert "原声版 + 无人声伴奏版" in result.status
+    assert any(path.endswith("dual-karaoke.mp4") for path in result.files)
+    assert any(path.endswith("dual-karaoke-instrumental.mp4") for path in result.files)
+
+
+def test_make_job_rejects_empty_final_video_selection(tmp_path) -> None:
+    result = run_make_job(
+        None,
+        None,
+        None,
+        "",
+        "empty",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        output_root=str(tmp_path),
+        export_original=False,
+        export_instrumental=False,
+    )
+
+    assert result.video is None
+    assert "至少选择" in result.status
+
+
 def test_subtitle_preview_reflects_translation_pronunciation_and_style(
     monkeypatch,
 ) -> None:

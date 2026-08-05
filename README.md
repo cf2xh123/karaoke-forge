@@ -5,7 +5,7 @@
 [English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前版本：`0.10.3`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式作品。
+> 当前版本：`0.11.0`（Alpha）。建议先用一首 1～2 分钟的歌曲试跑并检查时间轴，再处理正式作品。
 
 ## 能做什么
 
@@ -14,6 +14,8 @@
 - 读取 TXT、LRC、增强 LRC、SRT、VTT、ASS 和项目 JSON；
 - 导出 LRC、增强 LRC、SRT、VTT、逐词高亮 ASS 和 JSON；
 - 把字幕烧录进 MV，并可用高质量歌曲音轨替换 MV 原音轨；
+- 最终导出区可分别选择原声版和 Demucs 无人声伴奏版；支持只导出其中一种或一次同时
+  导出两种，双版本会复用同一次人声分离和同一份字幕画面编码；
 - 没有 MV 时可使用本地或网易云/QQ 音乐专辑图，从五种背景和五种唱片/频谱布局中自由
   组合 25 种效果；默认是封面柔焦背景与居中黑胶唱片机，唱片、唱臂和唱针构成完整画面，波形会跟随真实音频变化；
 - 自动定位 MV 中歌曲真正开始的位置，跳过片头或片尾剧情；
@@ -140,6 +142,7 @@ pip install -e ".[separate]"
 
 首次真正分离时还会联网下载所选模型，之后会使用本机缓存。`karaoke-forge doctor` 会显示
 Demucs 实际使用 NVIDIA 还是 CPU；网页的“先分离人声”旁也会显示同样状态。
+最终导出无人声伴奏版同样需要 Demucs；同时选择原声版和伴奏版时只会运行一次分离。
 
 如需同时安装本地网页和自动对齐：
 
@@ -174,6 +177,16 @@ Windows PowerShell 可写成一行：
 ```powershell
 karaoke-forge make song.flac mv.mp4 lyrics.txt -o output/song-karaoke.mp4 --language zh
 ```
+
+如需同时导出原声版和无人声伴奏版：
+
+```bash
+karaoke-forge make song.flac mv.mp4 lyrics.txt \
+  -o output/song-karaoke.mp4 \
+  --export-instrumental
+```
+
+如只需要无人声伴奏版，再加上 `--no-export-original`。
 
 ## 在线歌词来源
 
@@ -282,6 +295,7 @@ YRC 中每个字的真实开始时间和持续时间会直接用于扫色，能�
 ```text
 output/
 ├── song-karaoke.mp4
+├── song-karaoke-instrumental.mp4  # 选择无人声伴奏版时生成
 └── song-karaoke.assets/
     ├── song-karaoke.lrc
     ├── song-karaoke.enhanced.lrc
