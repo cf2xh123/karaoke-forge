@@ -472,7 +472,9 @@ def create_spinning_cover_video(
         raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
     width, height = resolution
     style = style.strip().lower()
-    if style not in {"aurora", "vinyl", "halo", "spectrum", "cdplayer"}:
+    if style == "cdplayer":
+        style = "turntable"
+    if style not in {"aurora", "vinyl", "halo", "spectrum", "turntable"}:
         raise ValueError(f"Unsupported cover video style: {style}")
     background_theme = background_theme.strip().lower()
     theme_specs = {
@@ -525,12 +527,12 @@ def create_spinning_cover_video(
 
     player_args: list[str] = []
     player_input: str | None = None
-    if style == "cdplayer":
+    if style == "turntable":
         player_asset = (
-            Path(__file__).resolve().parent / "assets" / "visuals" / "cd-player-chassis.png"
+            Path(__file__).resolve().parent / "assets" / "visuals" / "turntable-chassis.png"
         )
         if not player_asset.is_file():
-            raise MediaError(f"CD player asset not found: {player_asset}")
+            raise MediaError(f"Turntable asset not found: {player_asset}")
         player_input = f"[{2 + (1 if asset_name is not None else 0)}:v]"
         player_args = ["-loop", "1", "-i", str(player_asset)]
 
@@ -645,55 +647,66 @@ def create_spinning_cover_video(
                 f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
                 "shortest=1[visual]"
             )
-    elif style == "cdplayer":
+    elif style == "turntable":
         assert player_input is not None
-        player_size = max(380, min(width, height) * 88 // 100)
-        disc_size = player_size * 41 // 100
-        platter_size = disc_size + max(14, height * 2 // 100)
-        hub_size = max(16, disc_size * 7 // 100)
-        disc_y = player_size * 20 // 100
+        player_size = min(
+            min(width, height),
+            max(360, min(width, height) * 80 // 100),
+        )
+        player_y = max(0, (height - player_size) // 2)
+        disc_size = player_size * 34 // 100
+        hub_size = max(14, disc_size * 7 // 100)
+        disc_center_x = (width - player_size) // 2 + player_size * 483 // 1000
+        disc_center_y = player_y + player_size * 497 // 1000
+        disc_x = disc_center_x - disc_size // 2
+        disc_y = disc_center_y - disc_size // 2
+        waveform_y = max(0, (height - 130) // 2)
         hub_expression = (
             "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
             "(min(W,H)/2)*(min(W,H)/2)),235,0)"
         )
         filter_graph = (
             background
-            + f"{player_input}scale={player_size}:{player_size},format=rgba[player];"
-            f"color=c=0x171A20:s={platter_size}x{platter_size}:"
-            f"d={duration_text}:r=30,format=rgba,geq="
-            "r='23+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
-            "g='26+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
-            "b='32+6*sin(hypot(X-W/2,Y-H/2)*0.30)':"
-            f"a='{radius_expression}'[cdwell];"
-            f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
+            + f"{player_input}scale={player_size}:{player_size},format=rgba,"
+            "split=2[turntable][turntableshadow];"
+            "[turntableshadow]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.34,"
+            "gblur=sigma=18[turntableshadowsoft];"
+            f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase:"
+            "flags=lanczos,"
             f"crop={disc_size}:{disc_size},format=rgba,"
             f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{radius_expression}',"
-            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[cdart];"
-            "[cdwell][cdart]overlay=(W-w)/2:(H-h)/2:shortest=1[cdbase];"
+            "gblur=sigma=0.8:planes=8,"
+            f"rotate=2*PI*t/{rotation:.3f}:ow=iw:oh=ih:c=none[recordlabel];"
             f"color=c=0x00000000:s={hub_size}x{hub_size}:d={duration_text}:r=30,"
-            "format=rgba,geq=r='232':g='221':b='196':"
+            "format=rgba,geq=r='205':g='204':b='199':"
             f"a='{hub_expression}',gblur=sigma=0.6[hub];"
-            "[cdbase][hub]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
+            "[recordlabel][hub]overlay=(W-w)/2:(H-h)/2:shortest=1[disc]"
         )
         if show_waveform:
             wave_width = width * 76 // 100
             filter_graph += (
                 f";[1:a]showwaves=s={wave_width}x130:mode=p2p:rate=30:"
                 f"colors=0x{wave_color},format=rgba,"
-                "colorkey=0x000000:0.20:0.08[cdwavebase];"
-                "[cdwavebase]split[cdwave][cdwavesoft];"
-                "[cdwavesoft]gblur=sigma=12,colorchannelmixer=aa=0.62[cdwaveglow];"
-                f"[bg][cdwaveglow]overlay=(W-w)/2:{height * 31 // 100}:"
-                "shortest=1[cdglowbg];"
-                f"[cdglowbg][cdwave]overlay=(W-w)/2:{height * 31 // 100}:"
-                "shortest=1[cdwavebg];"
-                "[cdwavebg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
-                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
+                "colorkey=0x000000:0.20:0.08[recordwavebase];"
+                "[recordwavebase]split[recordwave][recordwavesoft];"
+                "[recordwavesoft]gblur=sigma=12,colorchannelmixer=aa=0.62[recordwaveglow];"
+                f"[bg][recordwaveglow]overlay=(W-w)/2:{waveform_y}:"
+                "shortest=1[recordglowbg];"
+                f"[recordglowbg][recordwave]overlay=(W-w)/2:{waveform_y}:"
+                "shortest=1[recordwavebg];"
+                f"[recordwavebg][turntableshadowsoft]overlay=(W-w)/2:{player_y + 12}:"
+                "shortest=1[recordshadowstage];"
+                f"[recordshadowstage][turntable]overlay=(W-w)/2:{player_y}:"
+                "shortest=1[recordstage];"
+                f"[recordstage][disc]overlay={disc_x}:{disc_y}:shortest=1[visual]"
             )
         else:
             filter_graph += (
-                ";[bg][player]overlay=(W-w)/2:0:shortest=1[cdstage];"
-                f"[cdstage][disc]overlay=(W-w)/2:{disc_y}:shortest=1[visual]"
+                f";[bg][turntableshadowsoft]overlay=(W-w)/2:{player_y + 12}:"
+                "shortest=1[recordshadowstage];"
+                f"[recordshadowstage][turntable]overlay=(W-w)/2:{player_y}:"
+                "shortest=1[recordstage];"
+                f"[recordstage][disc]overlay={disc_x}:{disc_y}:shortest=1[visual]"
             )
     else:
         disc_size = max(300, min(width, height) * 51 // 100)

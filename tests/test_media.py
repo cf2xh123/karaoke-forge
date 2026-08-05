@@ -192,10 +192,11 @@ def test_spinning_cover_supports_audio_frequency_stage(tmp_path, monkeypatch) ->
     assert str(audio) in command
 
 
-def test_spinning_cover_builds_centered_cd_player_graph(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("style", ["turntable", "cdplayer"])
+def test_spinning_cover_builds_centered_turntable_graph(tmp_path, monkeypatch, style) -> None:
     cover = tmp_path / "cover.jpg"
     audio = tmp_path / "song.wav"
-    output = tmp_path / "cd-player.mp4"
+    output = tmp_path / "turntable.mp4"
     cover.write_bytes(b"image")
     audio.write_bytes(b"audio")
     captured: dict[str, object] = {}
@@ -213,18 +214,19 @@ def test_spinning_cover_builds_centered_cd_player_graph(tmp_path, monkeypatch) -
         cover,
         audio,
         output,
-        style="cdplayer",
+        style=style,
         background_theme="sunset",
     )
 
     command = captured["command"]
     graph = command[command.index("-filter_complex") + 1]
-    assert "cd-player-chassis.png" in " ".join(str(value) for value in command)
+    assert "turntable-chassis.png" in " ".join(str(value) for value in command)
     assert "sunset-glass.png" in " ".join(str(value) for value in command)
     assert "[3:v]scale=" in graph
-    assert "[cdwavebg][player]overlay=(W-w)/2:0" in graph
+    assert "[recordwavebg][turntableshadowsoft]overlay=(W-w)/2:120" in graph
+    assert "[recordshadowstage][turntable]overlay=(W-w)/2:108" in graph
     assert "rotate=2*PI*t/12.000" in graph
-    assert "[cdbase][hub]overlay=" in graph
+    assert "[recordlabel][hub]overlay=" in graph
 
 
 def test_render_passes_uploaded_fonts_to_libass(tmp_path, monkeypatch) -> None:
