@@ -10,7 +10,7 @@ from karaoke_forge.formats import (
     write_lrc,
     write_srt,
 )
-from karaoke_forge.models import PronunciationSpan
+from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument, PronunciationSpan
 
 
 def test_yrc_preserves_non_uniform_word_timing() -> None:
@@ -84,6 +84,54 @@ def test_ass_has_karaoke_tags_and_style() -> None:
     assert r"{\kf" in output
     assert "KaraokeInactive" in output
     assert r"{\kf67}你" in output
+
+
+def test_ass_round_trip_preserves_detected_pauses_between_words() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="one two three",
+                start=1.0,
+                end=4.0,
+                tokens=[
+                    KaraokeToken("one ", 1.0, 1.1),
+                    KaraokeToken("two ", 1.2, 1.4),
+                    KaraokeToken("three", 2.5, 2.9),
+                ],
+            )
+        ]
+    )
+
+    output = write_ass(document, AssStyle(show_pronunciation=False))
+    restored = parse_ass(output)
+
+    assert r"{\kf10}one {\k10}{\kf20}two {\k110}{\kf40}three" in output
+    assert [round(token.start, 2) for token in restored.lines[0].tokens] == [1.0, 1.2, 2.5]
+    assert [round(token.end, 2) for token in restored.lines[0].tokens] == [1.1, 1.4, 2.9]
+
+
+def test_ass_preserves_a_delayed_first_word_and_uses_token_timing_for_reading() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="one two",
+                start=1.0,
+                end=3.0,
+                tokens=[
+                    KaraokeToken("one ", 1.4, 1.7),
+                    KaraokeToken("two", 2.2, 2.6),
+                ],
+                pronunciation_units=[PronunciationSpan("two", "トゥー", 4, 7)],
+            )
+        ]
+    )
+
+    output = write_ass(document)
+    restored = parse_ass(output)
+
+    assert r"{\k40}{\kf30}one {\k50}{\kf40}two" in output
+    assert r"{\k120}{\kf40}トゥー" in output
+    assert [token.start for token in restored.lines[0].tokens] == [1.4, 2.2]
 
 
 def test_generated_ass_round_trip_ignores_preview_and_pronunciation_events() -> None:

@@ -1,7 +1,7 @@
 # Karaoke Forge
 
-> Version 0.11.0 can export the original-audio karaoke video, a Demucs no-vocals
-> accompaniment version, or both in one job while reusing one stem separation and video encode.
+> Version 0.12.0 preserves real pauses in ASS karaoke sweeps and corrects gradual
+> line-timeline drift with confidence-filtered audio anchors.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -12,6 +12,11 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 
 - Force-align plain lyrics to a song with timestamped Whisper output;
 - Keep the lyrics supplied by the user instead of replacing them with ASR text;
+- Choose Fast, Balanced, or KTV Precise recognition; the precise preset line-bounds
+  CTranslate2 alignment to the supplied lyrics and accepts only timings that pass quality checks;
+- Preserve first-word delays and real pauses between tokens in ASS karaoke sweeps;
+- Correct fixed offsets and gradual or local tempo drift in line-timed lyrics with reliable anchors;
+- Keep low-confidence, abnormally long, or context-free ASR matches from controlling final timing;
 - Read TXT, LRC, enhanced LRC, SRT, VTT, ASS, and project JSON;
 - Export LRC, enhanced LRC, SRT, VTT, karaoke ASS, and JSON;
 - Burn subtitles into an MV and optionally replace its audio;
@@ -32,7 +37,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.11.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -135,6 +140,26 @@ preserves all input timing, `auto` refines only synthetic word timing, and `forc
 rechecks even trusted YRC/enhanced-LRC timing but adopts only high-confidence,
 line-local changes that do not substantially disagree with trusted source timing.
 The legacy `--no-refine-word-timing` flag remains accepted for compatibility.
+
+The web app defaults to **Balanced**. The same presets are available from the CLI as
+`--model profile:fast`, `--model profile:balanced`, and `--model profile:precise`:
+
+| Preset | Effective configuration | Intended use |
+| --- | --- | --- |
+| Fast | `small`, beam 3 | Quick editable drafts, CPUs, and slower computers |
+| Balanced (default) | `large-v3-turbo`, beam 5 | The usual speed/accuracy trade-off |
+| KTV Precise | `large-v3`, beam 5 | Tries a Demucs vocal stem, then runs line-bounded CTranslate2 forced alignment against the supplied lyrics |
+
+Demucs is a soft preference in KTV Precise: if it is missing or fails, the job reports the
+fallback and continues on the original mix. A line that cannot be aligned safely keeps its
+0.12 coarse timing without affecting successful lines. Explicitly selecting **Separate
+vocals first** remains a strict requirement and reports an error instead of silently falling
+back. `auto` still leaves trusted YRC/enhanced-LRC word timing untouched; select `force` to
+check those source timings.
+
+Each preset downloads its Whisper model on first use. `large-v3-turbo` and especially
+`large-v3` are substantially larger than `small`, so their first download and load can take
+some time; subsequent runs reuse the local cache.
 Cookies stay in local process memory and are never written to project outputs; the app
 does not accept passwords, elevate membership access, bypass regional/DRM restrictions,
 or decrypt NCM. A legally exported local MP3/FLAC/WAV/M4A remains supported.

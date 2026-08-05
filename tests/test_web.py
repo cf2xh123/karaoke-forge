@@ -802,6 +802,11 @@ def test_make_page_prepares_editor_with_audio_and_cover_but_no_mv(tmp_path: Path
         Path(result.project).parent / "karaoke-forge-project.json"
     )
     assert workspace.settings["cover_background"] == "ocean"
+    assert workspace.settings["alignment_language"] == "自动识别"
+    assert workspace.settings["alignment_model"] == "small"
+    assert workspace.settings["alignment_device"] == "auto"
+    assert workspace.settings["alignment_separate_vocals"] is False
+    assert workspace.settings["timing_refinement"] == "off"
     assert "音频、MV/封面和字体已保存" in result.status
 
 
