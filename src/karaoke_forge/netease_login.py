@@ -351,7 +351,12 @@ def _remove_stale_devtools_file(profile: Path) -> None:
         ) from exc
 
 
-def _launch_edge(edge: Path, profile: Path) -> subprocess.Popen[Any]:
+def _launch_edge(
+    edge: Path,
+    profile: Path,
+    *,
+    headless: bool = False,
+) -> subprocess.Popen[Any]:
     _require_owned_profile(profile)
     if _devtools_port_is_open(profile):
         raise NeteaseLoginError(
@@ -367,9 +372,11 @@ def _launch_edge(edge: Path, profile: Path) -> subprocess.Popen[Any]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-background-mode",
-        "--window-size=1080,760",
-        f"--app={_NETEASE_LOGIN_URL}",
     ]
+    if headless:
+        command.extend(("--headless=new", "--disable-gpu", "about:blank"))
+    else:
+        command.extend(("--window-size=1080,760", f"--app={_NETEASE_LOGIN_URL}"))
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         return subprocess.Popen(
@@ -596,6 +603,104 @@ def _close_managed_edge(
             pass
 
 
+def _validated_timeout(timeout_seconds: float) -> float:
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise TypeError("timeout_seconds 必须是大于 0 的数字。")
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout_seconds 必须是大于 0 的有限数字。")
+    return timeout
+
+
+def _capture_from_owned_profile(
+    profile: Path,
+    timeout: float,
+    *,
+    interactive: bool,
+) -> str | None:
+    if _edge_user_data_policy() is not None:
+        raise NeteaseLoginError(
+            "这台电脑的系统策略会覆盖 Edge 资料目录。为了保护日常 Edge 数据，"
+            "自动登录已停止，请联系电脑管理员或使用高级登录方式。"
+        )
+    edge = _find_edge_executable()
+    websocket_module = _load_websocket_client()
+    deadline = time.monotonic() + timeout
+    process: subprocess.Popen[Any] | None = None
+    client: _CdpClient | None = None
+    try:
+        process = (
+            _launch_edge(edge, profile)
+            if interactive
+            else _launch_edge(edge, profile, headless=True)
+        )
+        startup_deadline = min(deadline, time.monotonic() + _STARTUP_TIMEOUT_SECONDS)
+        endpoint = _wait_for_devtools_endpoint(profile, process, startup_deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if not interactive:
+                return None
+            raise NeteaseLoginTimeoutError(
+                "等待网易云登录超时。请重新点击登录，并在弹出的 Edge 中完成登录。"
+            )
+        client = _connect_cdp(websocket_module, endpoint, remaining)
+        _verify_edge(client)
+        if not interactive:
+            return _extract_music_u(client.call("Storage.getCookies"))
+        while time.monotonic() < deadline:
+            music_u = _extract_music_u(client.call("Storage.getCookies"))
+            if music_u:
+                return music_u
+            time.sleep(
+                min(
+                    _COOKIE_POLL_INTERVAL_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
+        raise NeteaseLoginTimeoutError(
+            "等待网易云登录超时。请重新点击登录，并在弹出的 Edge 中完成登录。"
+        )
+    finally:
+        _close_managed_edge(client, process)
+
+
+def managed_netease_profile_exists() -> bool:
+    """Return whether Karaoke Forge already owns a reusable Edge profile."""
+
+    profile = _managed_profile_dir()
+    _assert_owned_path_is_plain(profile)
+    if not _lexists(profile):
+        return False
+    _require_owned_profile(profile)
+    return True
+
+
+def try_reuse_netease_music_u(timeout_seconds: float = 15.0) -> str | None:
+    """Silently reuse a non-expired login from Karaoke Forge's own Edge profile."""
+
+    timeout = _validated_timeout(timeout_seconds)
+    profile = _managed_profile_dir()
+    _assert_owned_path_is_plain(profile)
+    if not _lexists(profile):
+        return None
+    _require_owned_profile(profile)
+    with _exclusive_profile_access(profile):
+        _require_owned_profile(profile)
+        return _capture_from_owned_profile(profile, timeout, interactive=False)
+
+
+def acquire_netease_music_u(
+    reuse_timeout_seconds: float = 15.0,
+    login_timeout_seconds: float = 300.0,
+) -> str:
+    """Reuse the saved login, opening the official login page only after it expires."""
+
+    music_u = try_reuse_netease_music_u(reuse_timeout_seconds)
+    if music_u:
+        return music_u
+    return capture_netease_music_u(login_timeout_seconds)
+
+
 def capture_netease_music_u(timeout_seconds: float = 300.0) -> str:
     """Open an isolated Edge profile and return its NetEase MUSIC_U cookie.
 
@@ -604,51 +709,15 @@ def capture_netease_music_u(timeout_seconds: float = 300.0) -> str:
     function returns or raises.
     """
 
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
-        raise TypeError("timeout_seconds 必须是大于 0 的数字。")
-    timeout = float(timeout_seconds)
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout_seconds 必须是大于 0 的有限数字。")
+    timeout = _validated_timeout(timeout_seconds)
 
     profile = _managed_profile_dir()
     with _exclusive_profile_access(profile):
         _prepare_owned_profile(profile)
-        if _edge_user_data_policy() is not None:
-            raise NeteaseLoginError(
-                "这台电脑的系统策略会覆盖 Edge 资料目录。为了保护日常 Edge 数据，"
-                "自动登录已停止，请联系电脑管理员或使用高级登录方式。"
-            )
-        edge = _find_edge_executable()
-        websocket_module = _load_websocket_client()
-        deadline = time.monotonic() + timeout
-        process: subprocess.Popen[Any] | None = None
-        client: _CdpClient | None = None
-        try:
-            process = _launch_edge(edge, profile)
-            startup_deadline = min(deadline, time.monotonic() + _STARTUP_TIMEOUT_SECONDS)
-            endpoint = _wait_for_devtools_endpoint(profile, process, startup_deadline)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise NeteaseLoginTimeoutError(
-                    "等待网易云登录超时。请重新点击登录，并在弹出的 Edge 中完成登录。"
-                )
-            client = _connect_cdp(websocket_module, endpoint, remaining)
-            _verify_edge(client)
-            while time.monotonic() < deadline:
-                music_u = _extract_music_u(client.call("Storage.getCookies"))
-                if music_u:
-                    return music_u
-                time.sleep(
-                    min(
-                        _COOKIE_POLL_INTERVAL_SECONDS,
-                        max(0.0, deadline - time.monotonic()),
-                    )
-                )
-            raise NeteaseLoginTimeoutError(
-                "等待网易云登录超时。请重新点击登录，并在弹出的 Edge 中完成登录。"
-            )
-        finally:
-            _close_managed_edge(client, process)
+        music_u = _capture_from_owned_profile(profile, timeout, interactive=True)
+        if not music_u:  # pragma: no cover - interactive capture only returns or raises
+            raise NeteaseLoginTimeoutError("等待网易云登录超时。")
+        return music_u
 
 
 def _devtools_port_is_open(profile: Path) -> bool:

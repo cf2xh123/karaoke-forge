@@ -19,11 +19,14 @@ from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
     EDITOR_STOP_GATE_JS,
     TOKEN_TIMELINE_JS,
+    _cached_public_netease_preview_info,
     _editor_clip_target,
     _editor_document_with_pending_changes,
     _file_path,
     _is_loopback_host,
+    _NeteaseSessionBroker,
     _prepare_lyrics,
+    _recent_workspace_offer,
     _record_web_error,
     _safe_stem,
     _select_subtitle_preview_sample,
@@ -34,6 +37,7 @@ from karaoke_forge.web import (
     exported_project_for_make,
     handoff_editor_to_make,
     handoff_make_readiness,
+    launch_web_app,
     load_editor_project,
     prepare_make_editor_job,
     prepare_subtitle_material_preview,
@@ -57,8 +61,19 @@ def test_managed_browser_login_rejects_remote_hosts(host: str) -> None:
     assert not _is_loopback_host(host)
 
 
+def test_netease_session_broker_rejects_old_managed_tokens_after_account_change() -> None:
+    broker = _NeteaseSessionBroker("old-managed-token")
+    generation = broker.begin_explicit_login(disable_existing=True)
+
+    assert broker.commit_explicit_login("new-managed-token", generation)
+    assert not broker.managed_token_allowed("old-managed-token")
+    assert broker.managed_token_allowed("new-managed-token")
+    assert broker.managed_token_allowed("manual-session-token")
+
+
 def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -> None:
     secret = "server-only-session-secret"
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
     monkeypatch.setattr(
         "karaoke_forge.web.capture_netease_music_u",
         lambda: secret,
@@ -78,7 +93,13 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         "Textbox",
     ]
 
-    result = callback.fn()
+    begin_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "begin_netease_login"
+    )
+    login_generation = begin_callback.fn()[0]
+    result = callback.fn(login_generation)
 
     assert result[0] == secret
     assert result[1:3] == ("", "")
@@ -87,7 +108,10 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
     assert client_response[0] is None
     assert secret not in repr(client_response)
 
-    remote_result = callback.fn(SimpleNamespace(client=SimpleNamespace(host="192.168.1.20")))
+    remote_result = callback.fn(
+        login_generation,
+        SimpleNamespace(client=SimpleNamespace(host="192.168.1.20")),
+    )
     assert secret not in repr(remote_result)
     assert "远程监听模式" in remote_result[3]
 
@@ -101,6 +125,12 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         if getattr(block_function.fn, "__name__", "") not in protected_jobs:
             continue
         assert any(type(component).__name__ == "State" for component in block_function.inputs)
+        component_parameters = [
+            parameter
+            for name, parameter in inspect.signature(block_function.fn).parameters.items()
+            if name not in {"request", "progress"}
+        ]
+        assert len(block_function.inputs) == len(component_parameters)
         assert not any(
             str(getattr(component, "label", "")).startswith("手动 MUSIC_U")
             for component in block_function.inputs
@@ -122,6 +152,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         if marker != "\N{CIRCLED DIGIT THREE}":
             path.write_bytes(b"restored")
     workspace = SimpleNamespace(
+        manifest=tmp_path / "karaoke-forge-project.json",
         lyrics_project=lyrics,
         audio=restored_files["\N{CIRCLED DIGIT ONE}"],
         video=restored_files["\N{CIRCLED DIGIT TWO}"],
@@ -131,17 +162,19 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         name="Restored project",
     )
     monkeypatch.setattr(
-        "karaoke_forge.web.load_recent_workspace",
-        lambda _root: workspace,
+        "karaoke_forge.web.load_workspace_project",
+        lambda _manifest: workspace,
     )
     restore_callback = next(
         block_function
         for block_function in app.fns.values()
         if getattr(block_function.fn, "__name__", "") == "restore_recent_workspace"
     )
-    restored = restore_callback.fn()
+    restored = restore_callback.fn(str(workspace.manifest))
 
-    assert len(restore_callback.outputs) == len(restored) == 31
+    assert len(restore_callback.outputs) == len(restored) == 22
+    assert restored[-2]["visible"] is False
+    assert "已恢复工程" in restored[-1]
     for marker, expected in restored_files.items():
         index = next(
             index
@@ -150,15 +183,363 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         )
         assert restored[index] == str(expected)
 
-    restore_lyrics_callback = next(
+    monkeypatch.setattr("karaoke_forge.web.load_recent_workspace", lambda _root: workspace)
+    offered = _recent_workspace_offer()
+    assert offered[0] == str(workspace.manifest)
+    assert "Restored project" in offered[1]
+    assert offered[2] is True
+
+    refresh_callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "") == "restore_make_lyrics_input"
+        if getattr(block_function.fn, "__name__", "") == "refresh_recent_workspace_offer"
     )
-    assert restore_lyrics_callback.fn(str(lyrics)) == str(lyrics)
+    refreshed = refresh_callback.fn()
+    assert refreshed[0] == str(workspace.manifest)
+    assert "Restored project" in refreshed[1]
+    assert refreshed[2]["visible"] is True
+    assert refreshed[3]["interactive"] is True
+
+    blank_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "start_blank_workspace_choice"
+    )
+    blank = blank_callback.fn()
+    assert blank[0]["visible"] is False
+    assert "没有被删除" in blank[1]
+
+    def broken_lyrics(_path):
+        raise ValueError("broken lyrics")
+
+    monkeypatch.setattr("karaoke_forge.web.read_lyrics", broken_lyrics)
+    broken_restore = restore_callback.fn(str(workspace.manifest))
+    assert broken_restore[-2]["visible"] is False
+    assert "暂时无法恢复" in broken_restore[-1]
 
     monkeypatch.setattr("karaoke_forge.web.load_recent_workspace", lambda _root: None)
-    assert len(restore_callback.fn()) == 31
+    empty_offer = _recent_workspace_offer()
+    assert empty_offer[0] == ""
+    assert "没有找到" in empty_offer[1]
+    assert empty_offer[2] is False
+
+
+def test_saved_netease_session_is_restored_only_for_local_clients(monkeypatch) -> None:
+    secret = "persisted-server-only-secret"
+    app = create_web_app(
+        managed_netease_login=True,
+        initial_netease_music_u=secret,
+    )
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "ensure_netease_session_for_download"
+    )
+    state_inputs = [component for component in callback.inputs if type(component).__name__ == "State"]
+    assert state_inputs
+    assert state_inputs[0].value == ""
+    assert secret not in json.dumps(app.config, ensure_ascii=False, default=str)
+
+    monkeypatch.setattr("karaoke_forge.web.managed_netease_profile_exists", lambda: True)
+    monkeypatch.setattr("karaoke_forge.web.acquire_netease_music_u", lambda: secret)
+
+    result = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        "",
+        SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")),
+    )
+    assert result[0] == secret
+    client_response = asyncio.run(app.postprocess_data(callback, list(result), None))
+    assert client_response[0] is None
+    assert secret not in repr(client_response)
+
+    remote = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        secret,
+        SimpleNamespace(client=SimpleNamespace(host="192.168.1.20")),
+    )
+    assert remote[0] == ""
+    remote_client = asyncio.run(app.postprocess_data(callback, list(remote), None))
+    assert remote_client[0] is None
+    assert secret not in repr(remote_client)
+
+    make_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "make_wrapper"
+    )
+    captured_credentials: dict[str, str] = {}
+
+    def fake_run_make_job(*args, **_kwargs):
+        captured_credentials["cookie_browser"] = args[19]
+        captured_credentials["cookie_profile"] = args[20]
+        captured_credentials["music_u"] = args[21]
+        return SimpleNamespace(
+            status="done",
+            video=None,
+            files=[],
+            log="",
+            output_dir=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.run_make_job", fake_run_make_job)
+    make_inputs = [getattr(component, "value", None) for component in make_callback.inputs]
+    for index, component in enumerate(make_callback.inputs):
+        if type(component).__name__ == "State":
+            make_inputs[index] = secret
+        elif "Cookie 浏览器" in str(getattr(component, "label", "")):
+            make_inputs[index] = "edge"
+        elif "Profile" in str(getattr(component, "label", "")):
+            make_inputs[index] = "Default"
+    make_callback.fn(
+        *make_inputs,
+        request=SimpleNamespace(client=SimpleNamespace(host="192.168.1.20")),
+        progress=lambda *_args, **_kwargs: None,
+    )
+    assert captured_credentials == {
+        "cookie_browser": "",
+        "cookie_profile": "",
+        "music_u": "",
+    }
+
+    clear_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "clear_netease_login_wrapper"
+    )
+    monkeypatch.setattr("karaoke_forge.web.clear_netease_login_profile", lambda: "cleared")
+    cleared = clear_callback.fn(
+        SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    )
+    assert cleared[:3] == ("", "", "")
+
+    captured_credentials.clear()
+    make_callback.fn(
+        *make_inputs,
+        request=SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")),
+        progress=lambda *_args, **_kwargs: None,
+    )
+    assert captured_credentials["music_u"] == ""
+
+    def unexpected_reuse_after_logout():
+        raise AssertionError("logout must disable managed profile reuse for this server")
+
+    monkeypatch.setattr(
+        "karaoke_forge.web.acquire_netease_music_u",
+        unexpected_reuse_after_logout,
+    )
+    stale_after_logout = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        secret,
+        SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")),
+    )
+    assert stale_after_logout[0] == ""
+
+
+def test_launch_restores_saved_netease_session_only_for_loopback(monkeypatch, tmp_path) -> None:
+    secret = "startup-server-only-secret"
+    reuse_calls: list[float] = []
+    app_options: list[dict[str, object]] = []
+
+    class FakeApp:
+        def queue(self, **_kwargs):
+            return self
+
+        def launch(self, **_kwargs):
+            return None
+
+    def reuse(timeout_seconds: float) -> str:
+        reuse_calls.append(timeout_seconds)
+        return secret
+
+    def fake_create_web_app(**kwargs):
+        app_options.append(kwargs)
+        return FakeApp()
+
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr("karaoke_forge.web.try_reuse_netease_music_u", reuse)
+    monkeypatch.setattr("karaoke_forge.web.create_web_app", fake_create_web_app)
+
+    launch_web_app(host="127.0.0.1", port=17860, open_browser=False)
+    launch_web_app(host="0.0.0.0", port=17861, open_browser=False)
+
+    assert reuse_calls == [12.0]
+    assert app_options[0] == {
+        "managed_netease_login": True,
+        "initial_netease_music_u": secret,
+    }
+    assert app_options[1] == {
+        "managed_netease_login": False,
+        "initial_netease_music_u": "",
+    }
+
+
+def test_logout_wins_over_an_in_flight_netease_session_reuse(monkeypatch) -> None:
+    secret = "managed-session-secret"
+    app = create_web_app(
+        managed_netease_login=True,
+        initial_netease_music_u=secret,
+    )
+    ensure_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "ensure_netease_session_for_download"
+    )
+    clear_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "clear_netease_login_wrapper"
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    monkeypatch.setattr("karaoke_forge.web.managed_netease_profile_exists", lambda: True)
+    monkeypatch.setattr("karaoke_forge.web.clear_netease_login_profile", lambda: "cleared")
+
+    def acquire_then_logout() -> str:
+        assert clear_callback.fn(request)[:3] == ("", "", "")
+        return secret
+
+    monkeypatch.setattr(
+        "karaoke_forge.web.acquire_netease_music_u",
+        acquire_then_logout,
+    )
+    result = ensure_callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        secret,
+        request,
+    )
+    assert result[0] == ""
+    assert "结果已安全丢弃" in result[1]
+
+    def unexpected_acquire():
+        raise AssertionError("a late reuse result must not re-enable login")
+
+    monkeypatch.setattr("karaoke_forge.web.acquire_netease_music_u", unexpected_acquire)
+    assert (
+        ensure_callback.fn(
+            "https://music.163.com/song?id=42",
+            None,
+            None,
+            True,
+            secret,
+            request,
+        )[0]
+        == ""
+    )
+
+
+def test_logout_wins_over_an_in_flight_explicit_netease_login(monkeypatch) -> None:
+    secret = "late-explicit-login-secret"
+    app = create_web_app(managed_netease_login=True)
+    begin_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "begin_netease_login"
+    )
+    capture_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "capture_netease_login_wrapper"
+    )
+    clear_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "clear_netease_login_wrapper"
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    monkeypatch.setattr("karaoke_forge.web.clear_netease_login_profile", lambda: "cleared")
+
+    def capture_then_logout() -> str:
+        assert clear_callback.fn(request)[:3] == ("", "", "")
+        return secret
+
+    monkeypatch.setattr("karaoke_forge.web.capture_netease_music_u", capture_then_logout)
+    login_generation = begin_callback.fn(request)[0]
+    result = capture_callback.fn(login_generation, request)
+
+    assert result[0] == ""
+    assert "登录结果已安全丢弃" in result[3]
+    assert secret not in repr(result)
+
+
+def test_expired_saved_netease_session_is_acquired_only_when_audio_is_needed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = create_web_app(managed_netease_login=True)
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "ensure_netease_session_for_download"
+    )
+    calls: list[str] = []
+    monkeypatch.setattr("karaoke_forge.web.managed_netease_profile_exists", lambda: True)
+
+    def acquire() -> str:
+        calls.append("acquire")
+        return "renewed-server-only-secret"
+
+    monkeypatch.setattr("karaoke_forge.web.acquire_netease_music_u", acquire)
+    local_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    result = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        "",
+        local_request,
+    )
+    assert result[0] == "renewed-server-only-secret"
+    assert "自动确认 / 重新连接" in result[1]
+    assert "renewed-server-only-secret" not in repr(result[1:])
+
+    audio = tmp_path / "local.wav"
+    audio.write_bytes(b"audio")
+    skipped = callback.fn(
+        "https://music.163.com/song?id=42",
+        str(audio),
+        None,
+        True,
+        "",
+        local_request,
+    )
+    assert skipped[0] == ""
+
+    already_connected = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        "renewed-server-only-secret",
+        local_request,
+    )
+    assert already_connected[0] == "renewed-server-only-secret"
+
+    manually_supplied = callback.fn(
+        "https://music.163.com/song?id=42",
+        None,
+        None,
+        True,
+        "manual-session-token",
+        local_request,
+    )
+    assert manually_supplied[0] == "manual-session-token"
+    assert calls == ["acquire", "acquire"]
 
 
 def test_environment_help_prefers_one_click_dedicated_edge_login() -> None:
@@ -1368,6 +1749,88 @@ def test_material_preview_reuses_selected_no_mv_scene(tmp_path, monkeypatch) -> 
     assert result[2].startswith("data:image/jpeg;base64,")
     assert "无 MV 成片样式" in result[3]
     assert "当前无 MV 主题" in result[7]
+
+
+def test_netease_link_only_previews_selected_virtual_mv_scene(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "online-cover.jpg"
+    frame = tmp_path / "virtual-scene.jpg"
+    cover.write_bytes(b"cover")
+    frame.write_bytes(b"jpeg")
+    captured: dict[str, object] = {}
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="Linked Song",
+        artists=("Artist",),
+        canonical_url="https://music.163.com/song?id=42",
+        page_lyrics="[00:00.00]First line\n[00:03.00]Second line",
+        translated_lyrics="[00:00.00]第一行\n[00:03.00]第二行",
+        cover_url="https://p1.music.126.net/cover.jpg",
+    )
+
+    metadata_calls: list[str] = []
+
+    def fetch_info(link: str):
+        metadata_calls.append(link)
+        return info
+
+    _cached_public_netease_preview_info.cache_clear()
+    monkeypatch.setattr("karaoke_forge.web.fetch_public_netease_info", fetch_info)
+    monkeypatch.setattr("karaoke_forge.web._cached_online_preview_cover", lambda _url: cover)
+
+    def fake_cover(source_cover, source_audio, timestamp, theme, style, waveform):
+        captured.update(
+            cover=source_cover,
+            audio=source_audio,
+            timestamp=timestamp,
+            theme=theme,
+            style=style,
+            waveform=waveform,
+        )
+        return frame, 0.65
+
+    monkeypatch.setattr("karaoke_forge.web._cached_cover_preview_frame", fake_cover)
+
+    result = prepare_subtitle_material_preview(
+        None,
+        None,
+        None,
+        None,
+        "",
+        0.0,
+        True,
+        "sunset",
+        "vinyl",
+        True,
+        "https://music.163.com/song?id=42",
+    )
+
+    assert captured["cover"] == cover
+    assert captured["audio"] is None
+    assert captured["theme"] == "sunset"
+    assert captured["style"] == "vinyl"
+    assert captured["waveform"] is True
+    assert "First line" in result[0] or "Second line" in result[0]
+    assert result[2].startswith("data:image/jpeg;base64,")
+    assert "无 MV 成片样式" in result[3]
+    assert "波形布局示意" in result[3]
+    assert "专辑封面静态预览" not in result[3]
+    assert "真实音乐波形" in result[7]
+
+    prepare_subtitle_material_preview(
+        None,
+        None,
+        None,
+        None,
+        "",
+        0.0,
+        True,
+        "ocean",
+        "halo",
+        False,
+        "https://music.163.com/song?id=42",
+    )
+    assert metadata_calls == ["https://music.163.com/song?id=42"]
+    _cached_public_netease_preview_info.cache_clear()
 
 
 def test_material_preview_accepts_none_for_optional_online_links() -> None:

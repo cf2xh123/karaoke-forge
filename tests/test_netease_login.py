@@ -230,6 +230,125 @@ def test_launch_uses_only_isolated_profile_and_random_loopback_port(
     assert str(tmp_path / "Microsoft" / "Edge" / "User Data") not in " ".join(command)
     assert command[-1] == "--app=https://music.163.com/"
 
+    assert login._launch_edge(tmp_path / "msedge.exe", profile, headless=True) is process
+    headless_command = commands[1]
+    assert "--headless=new" in headless_command
+    assert "--disable-gpu" in headless_command
+    assert headless_command[-1] == "about:blank"
+    assert not any(value.startswith("--app=") for value in headless_command)
+
+
+def test_try_reuse_existing_cookie_headlessly_and_closes_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    profile = login._managed_profile_dir()
+    login._prepare_owned_profile(profile)
+    client = _FakeCdpClient(
+        [{"cookies": [{"name": "MUSIC_U", "domain": ".music.163.com", "value": "saved"}]}]
+    )
+    process = _FakeProcess()
+    monkeypatch.setattr(login, "_edge_user_data_policy", lambda: None)
+    monkeypatch.setattr(login, "_find_edge_executable", lambda: tmp_path / "msedge.exe")
+    monkeypatch.setattr(login, "_load_websocket_client", lambda: ModuleType("websocket"))
+
+    def launch(_edge: Path, owned_profile: Path, *, headless: bool = False) -> _FakeProcess:
+        assert owned_profile == profile
+        assert headless is True
+        (profile / "DevToolsActivePort").write_text(
+            "43123\n/devtools/browser/reuse-session\n",
+            encoding="utf-8",
+        )
+        return process
+
+    monkeypatch.setattr(login, "_launch_edge", launch)
+    monkeypatch.setattr(login, "_connect_cdp", lambda *_args, **_kwargs: client)
+
+    assert login.try_reuse_netease_music_u(timeout_seconds=1.0) == "saved"
+    assert client.calls == ["Browser.getVersion", "Storage.getCookies", "Browser.close"]
+    assert client.closed is True
+    assert process.waited is True
+
+
+def test_try_reuse_missing_profile_does_not_create_or_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+
+    def unexpected_launch(*_args, **_kwargs):
+        raise AssertionError("a missing managed profile must not launch Edge")
+
+    monkeypatch.setattr(login, "_launch_edge", unexpected_launch)
+    assert login.try_reuse_netease_music_u(timeout_seconds=1.0) is None
+    assert not login._managed_profile_dir().exists()
+
+
+def test_try_reuse_expired_cookie_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    profile = login._managed_profile_dir()
+    login._prepare_owned_profile(profile)
+    client = _FakeCdpClient(
+        [
+            {
+                "cookies": [
+                    {
+                        "name": "MUSIC_U",
+                        "domain": ".music.163.com",
+                        "value": "expired",
+                        "expires": 1.0,
+                    }
+                ]
+            }
+        ]
+    )
+    process = _FakeProcess()
+    monkeypatch.setattr(login.time, "time", lambda: 2.0)
+    monkeypatch.setattr(login, "_edge_user_data_policy", lambda: None)
+    monkeypatch.setattr(login, "_find_edge_executable", lambda: tmp_path / "msedge.exe")
+    monkeypatch.setattr(login, "_load_websocket_client", lambda: ModuleType("websocket"))
+
+    def launch(_edge: Path, _profile: Path, *, headless: bool = False) -> _FakeProcess:
+        assert headless is True
+        (profile / "DevToolsActivePort").write_text(
+            "43123\n/devtools/browser/expired-session\n",
+            encoding="utf-8",
+        )
+        return process
+
+    monkeypatch.setattr(login, "_launch_edge", launch)
+    monkeypatch.setattr(login, "_connect_cdp", lambda *_args, **_kwargs: client)
+
+    assert login.try_reuse_netease_music_u(timeout_seconds=1.0) is None
+    assert "Browser.close" in client.calls
+
+
+def test_acquire_reuses_valid_login_without_visible_capture(monkeypatch) -> None:
+    monkeypatch.setattr(login, "try_reuse_netease_music_u", lambda _timeout: "reused")
+
+    def unexpected_capture(_timeout):
+        raise AssertionError("valid saved login must skip the visible login window")
+
+    monkeypatch.setattr(login, "capture_netease_music_u", unexpected_capture)
+    assert login.acquire_netease_music_u(1.0, 2.0) == "reused"
+
+
+def test_acquire_opens_visible_login_once_after_expiry(monkeypatch) -> None:
+    calls: list[float] = []
+    monkeypatch.setattr(login, "try_reuse_netease_music_u", lambda _timeout: None)
+
+    def capture(timeout: float) -> str:
+        calls.append(timeout)
+        return "renewed"
+
+    monkeypatch.setattr(login, "capture_netease_music_u", capture)
+    assert login.acquire_netease_music_u(1.0, 2.0) == "renewed"
+    assert calls == [2.0]
+
 
 def test_launch_refuses_to_replace_live_managed_devtools_endpoint(
     monkeypatch: pytest.MonkeyPatch,

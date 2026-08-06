@@ -6,6 +6,7 @@ import html
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -14,10 +15,13 @@ import sys
 import tempfile
 import threading
 import traceback
+import wave
+from array import array
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -61,8 +65,11 @@ from .netease import (
 )
 from .netease_login import (
     NeteaseLoginError,
+    acquire_netease_music_u,
     capture_netease_music_u,
     clear_netease_login_profile,
+    managed_netease_profile_exists,
+    try_reuse_netease_music_u,
 )
 from .pipeline import (
     AlignOptions,
@@ -99,6 +106,85 @@ _EDITOR_PREFETCH_EXECUTOR = ThreadPoolExecutor(
 )
 _WEB_ERROR_LOG_LOCK = threading.Lock()
 _MATERIAL_PREVIEW_LOCK = threading.Lock()
+
+
+class _NeteaseSessionBroker:
+    """Track managed NetEase sessions without placing secrets in component defaults."""
+
+    def __init__(self, music_u: str = "") -> None:
+        self._lock = threading.Lock()
+        self._managed_fingerprints: dict[str, int] = {}
+        self._active_fingerprint = ""
+        self._profile_reuse_enabled = True
+        self._generation = 0
+        self.enable_managed(music_u)
+
+    @staticmethod
+    def _fingerprint(music_u: str) -> str:
+        value = (music_u or "").strip()
+        return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else ""
+
+    def _remember_fingerprint(self, music_u: str) -> None:
+        value = (music_u or "").strip()
+        fingerprint = self._fingerprint(value)
+        if fingerprint:
+            self._managed_fingerprints[fingerprint] = self._generation
+            self._active_fingerprint = fingerprint
+
+    def enable_managed(self, music_u: str) -> None:
+        with self._lock:
+            self._generation += 1
+            self._profile_reuse_enabled = True
+            self._remember_fingerprint(music_u)
+
+    def clear_managed(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._profile_reuse_enabled = False
+
+    def begin_profile_reuse(self) -> int | None:
+        with self._lock:
+            return self._generation if self._profile_reuse_enabled else None
+
+    def commit_profile_reuse(self, music_u: str, generation: int) -> bool:
+        with self._lock:
+            if not self._profile_reuse_enabled or generation != self._generation:
+                return False
+            self._remember_fingerprint(music_u)
+            return True
+
+    def begin_explicit_login(self, *, disable_existing: bool = False) -> int:
+        with self._lock:
+            self._generation += 1
+            if disable_existing:
+                self._profile_reuse_enabled = False
+            elif self._profile_reuse_enabled and self._active_fingerprint:
+                self._managed_fingerprints[self._active_fingerprint] = self._generation
+            return self._generation
+
+    def commit_explicit_login(self, music_u: str, generation: int) -> bool:
+        with self._lock:
+            if generation != self._generation:
+                return False
+            self._profile_reuse_enabled = True
+            self._remember_fingerprint(music_u)
+            return True
+
+    def managed_token_allowed(self, music_u: str) -> bool:
+        fingerprint = self._fingerprint(music_u)
+        with self._lock:
+            if not fingerprint or fingerprint not in self._managed_fingerprints:
+                return True
+            return bool(
+                self._profile_reuse_enabled
+                and self._managed_fingerprints[fingerprint] == self._generation
+            )
+
+    def recognizes_managed(self, music_u: str) -> bool:
+        fingerprint = self._fingerprint(music_u)
+        with self._lock:
+            return bool(fingerprint and fingerprint in self._managed_fingerprints)
+
 
 _ALIGNMENT_MODEL_CHOICES = [
     ("快速（small，速度优先）", "profile:fast"),
@@ -223,6 +309,14 @@ WEB_CSS = """
 .kf-card h2, .kf-card h3 {
   color: var(--kf-ink);
   letter-spacing: -.02em;
+}
+
+.kf-resume-card {
+  max-width: 1240px;
+  margin: 0 auto 22px !important;
+  border-color: rgba(11, 102, 113, .34) !important;
+  background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(220,239,240,.88)) !important;
+  box-shadow: 0 18px 44px rgba(11, 102, 113, .14) !important;
 }
 
 .kf-section-label {
@@ -2071,7 +2165,7 @@ def _new_job_dir(kind: str, output_root: str | Path | None = None) -> Path:
 
 _PREVIEW_DEFAULT_TEXT = "I hear the flowers whisper.\nLet me bloom inside your garden."
 _PREVIEW_DEFAULT_TRANSLATION = "让我在你的花园里盛放。"
-_MATERIAL_PREVIEW_CACHE_VERSION = "2"
+_MATERIAL_PREVIEW_CACHE_VERSION = "3"
 
 
 def _material_preview_cache_dir() -> Path:
@@ -2159,24 +2253,30 @@ def _cached_video_preview_frame(
 
 def _cached_cover_preview_frame(
     cover: Path,
-    audio: Path,
+    audio: Path | None,
     timestamp: float | None,
     background_theme: str,
     cover_style: str,
     show_waveform: bool,
 ) -> tuple[Path, float]:
-    duration = probe_media_duration(audio)
-    preview_time = timestamp if timestamp is not None else None
-    if preview_time is None:
-        preview_time = duration * 0.33 if duration else 0.65
-    preview_time = max(0.0, preview_time)
-    audio_start = max(0.0, preview_time - 0.65)
-    if duration is not None and duration > 0:
-        audio_start = min(audio_start, max(0.0, duration - 1.25))
+    duration = probe_media_duration(audio) if audio is not None else None
+    if audio is None:
+        preview_time = 0.65
+        audio_start = 0.0
+        audio_signature = "synthetic-preview-audio-v1"
+    else:
+        preview_time = timestamp if timestamp is not None else None
+        if preview_time is None:
+            preview_time = duration * 0.33 if duration else 0.65
+        preview_time = max(0.0, preview_time)
+        audio_start = max(0.0, preview_time - 0.65)
+        if duration is not None and duration > 0:
+            audio_start = min(audio_start, max(0.0, duration - 1.25))
+        audio_signature = _preview_file_signature(audio)
     target = _preview_cache_target(
         "cover",
         _preview_file_signature(cover),
-        _preview_file_signature(audio),
+        audio_signature,
         round(audio_start, 2),
         background_theme,
         cover_style,
@@ -2190,9 +2290,10 @@ def _cached_cover_preview_frame(
                 dir=cache_dir,
             ) as temp_name:
                 scene = Path(temp_name) / "scene.mp4"
+                preview_audio = audio or _material_preview_signal_audio()
                 create_spinning_cover_video(
                     cover,
-                    audio,
+                    preview_audio,
                     scene,
                     resolution=(960, 540),
                     duration=1.25,
@@ -2211,6 +2312,37 @@ def _cached_cover_preview_frame(
                 )
             _prune_material_preview_cache(cache_dir)
     return target, audio_start + 0.65
+
+
+def _material_preview_signal_audio() -> Path:
+    """Create a tiny deterministic signal used only to display waveform layout."""
+
+    target = _material_preview_cache_dir() / "synthetic-preview-audio-v1.wav"
+    try:
+        if target.is_file() and target.stat().st_size > 44:
+            return target
+    except OSError:
+        pass
+    sample_rate = 16_000
+    frame_count = int(sample_rate * 1.5)
+    samples = array("h")
+    for index in range(frame_count):
+        moment = index / sample_rate
+        beat = moment % 0.375
+        envelope = max(0.16, 1.0 - beat * 2.1)
+        tone = math.sin(2.0 * math.pi * 180.0 * moment)
+        overtone = 0.45 * math.sin(2.0 * math.pi * 360.0 * moment)
+        samples.append(int(9_000 * envelope * (tone + overtone) / 1.45))
+    if sys.byteorder == "big":  # pragma: no cover - supported for completeness
+        samples.byteswap()
+    temporary = target.with_suffix(".tmp")
+    with wave.open(str(temporary), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(samples.tobytes())
+    temporary.replace(target)
+    return target
 
 
 def _cached_static_cover_frame(cover: Path) -> Path:
@@ -2242,6 +2374,13 @@ def _cached_online_preview_cover(url: str) -> Path:
             if existing.is_file():
                 return existing
         return download_public_cover(url, stem, timeout=12.0)
+
+
+@lru_cache(maxsize=32)
+def _cached_public_netease_preview_info(link: str) -> Any:
+    """Reuse public song metadata while the user experiments with preview styles."""
+
+    return fetch_public_netease_info(link)
 
 
 def _select_subtitle_preview_sample(
@@ -2374,7 +2513,7 @@ def prepare_subtitle_material_preview(
     utaten_link = (utaten_link or "").strip()
     if (document is None or (video is None and cover is None)) and netease_link:
         try:
-            info = fetch_public_netease_info(netease_link)
+            info = _cached_public_netease_preview_info(netease_link)
             if document is None:
                 if info.word_lyrics:
                     try:
@@ -2446,7 +2585,7 @@ def prepare_subtitle_material_preview(
                 badge += " · 成片时自动校正"
         except Exception as exc:
             notes.append(f"MV 画面读取失败，已自动降级：{exc}")
-    if not background_data and cover is not None and audio is not None:
+    if not background_data and cover is not None:
         try:
             frame, preview_time = _cached_cover_preview_frame(
                 cover,
@@ -2457,7 +2596,12 @@ def prepare_subtitle_material_preview(
                 bool(show_waveform),
             )
             background_data = _preview_image_data_url(frame)
-            badge = f"无 MV 成片样式 · {sample.description}"
+            waveform_detail = "真实音频波形" if audio is not None else "波形布局示意"
+            badge = f"无 MV 成片样式 · {waveform_detail} · {sample.description}"
+            if audio is None:
+                notes.append(
+                    "音频尚未下载，当前波形只用于展示布局；生成成片时会换成真实音乐波形。"
+                )
         except Exception as exc:
             notes.append(f"动态封面预览失败，已改用静态封面：{exc}")
     if not background_data and cover is not None:
@@ -2481,7 +2625,10 @@ def prepare_subtitle_material_preview(
     elif cover is not None and audio is not None and background_data:
         status = "✅ 已按当前无 MV 主题、唱片布局和波形设置生成预览。"
     elif cover is not None and background_data:
-        status = "ℹ️ 已使用专辑封面；加入音频后会自动补全唱片与波形效果。"
+        status = (
+            "✅ 已用在线专辑封面生成当前无 MV 成片样式；"
+            "音频下载完成后，波形会自动换成真实音乐响应。"
+        )
     else:
         status = "ℹ️ 上传 MV，或上传音频和封面后，这里会自动换成这首歌的真实画面。"
     if document is None:
@@ -2493,7 +2640,7 @@ def prepare_subtitle_material_preview(
         sample.translation,
         background_data,
         badge,
-        document is not None,
+        bool(background_data),
         sample.highlight_progress,
         sample.active_row,
         status,
@@ -5025,7 +5172,23 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def create_web_app(*, managed_netease_login: bool = False) -> object:
+def _recent_workspace_offer() -> tuple[str, str, bool]:
+    workspace = load_recent_workspace(_default_output_root())
+    if workspace is None:
+        return "", "## 没有找到上次工程\n点击下方按钮即可进入空白制作页。", False
+    message = (
+        "## 要继续上次的工程吗？\n"
+        f"找到了 **{html.escape(workspace.name)}**。继续后会恢复歌词、素材和"
+        "无 MV / MV 预览；选择新建不会删除旧工程，之后仍可手动打开。"
+    )
+    return str(workspace.manifest), message, True
+
+
+def create_web_app(
+    *,
+    managed_netease_login: bool = False,
+    initial_netease_music_u: str = "",
+) -> object:
     try:
         import gradio as gr
     except ImportError as exc:
@@ -5033,6 +5196,24 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             '网页依赖尚未安装。请运行 `pip install -e ".[web]"`，'
             '需要自动对齐和网易云链接时安装 `pip install -e ".[web,align,netease]"`。'
         ) from exc
+
+    recent_manifest, recent_message, recent_available = _recent_workspace_offer()
+    initial_music_u = initial_netease_music_u or ""
+    netease_session_broker = _NeteaseSessionBroker(initial_music_u)
+    if not managed_netease_login:
+        initial_netease_status = (
+            "远程监听模式已禁用本机账号登录；请在这台电脑上用 `启动网页版.bat` 打开。"
+        )
+    elif initial_music_u:
+        initial_netease_status = (
+            "### ✅ 已自动恢复网易云账号\n"
+            "本机专用登录仍有效，本次无需再次扫码；过期后会在需要时自动重新登录。"
+        )
+    else:
+        initial_netease_status = (
+            "公开歌曲可以直接使用；已登录账号会在启动时自动恢复，"
+            "过期后会在需要音频时自动打开官方登录窗口。"
+        )
 
     with gr.Blocks(
         title="Karaoke Forge｜本地卡拉 OK 工作台",
@@ -5051,11 +5232,13 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
         editor_output_directory = gr.State()
         editor_handoff_ready = gr.State(False)
         netease_session_music_u = gr.State("")
+        netease_login_generation = gr.State(0)
         make_preview_background = gr.State("")
         make_preview_badge = gr.State("实时字幕预览 · KTV 双行布局")
         make_preview_material_mode = gr.State(False)
         make_preview_progress = gr.State(0.4)
         make_preview_active_row = gr.State(1)
+        recent_workspace_manifest = gr.State(recent_manifest)
         gr.HTML(
             """
             <div class="kf-shell">
@@ -5077,9 +5260,23 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             """
         )
 
-        with gr.Tabs() as main_tabs:
+        with gr.Tabs(selected="make") as main_tabs:
             with gr.Tab("制作卡拉 OK MV", id="make"), gr.Row(equal_height=False):
                 with gr.Column(scale=7, min_width=340):
+                    with gr.Group(
+                        elem_classes=["kf-card", "kf-resume-card"],
+                        visible=recent_available,
+                    ) as recent_workspace_prompt:
+                        recent_workspace_message = gr.Markdown(recent_message)
+                        with gr.Row():
+                            continue_recent_workspace = gr.Button(
+                                "继续上次工程",
+                                variant="primary",
+                                interactive=recent_available,
+                            )
+                            start_blank_workspace = gr.Button(
+                                "新建空白工程（不会删除旧工程）",
+                            )
                     with gr.Group(elem_classes="kf-card"):
                         gr.HTML('<div class="kf-section-label">Step 01 · 素材</div>')
                         gr.Markdown("## 选择制作素材")
@@ -5210,10 +5407,7 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                                 interactive=managed_netease_login,
                             )
                             make_netease_login_status = gr.Markdown(
-                                "公开歌曲可以直接使用；需要账号权限时再点击上方按钮。"
-                                if managed_netease_login
-                                else "远程监听模式已禁用本机账号登录；请在这台电脑上用"
-                                " `启动网页版.bat` 打开。"
+                                initial_netease_status
                             )
                             gr.Markdown(
                                 "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
@@ -5490,6 +5684,10 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                             "② 生成所选卡拉 OK MV",
                             variant="secondary",
                         )
+                    make_open_editor_button = gr.Button(
+                        "打开当前歌词工程继续微调",
+                        size="sm",
+                    )
 
                 with gr.Column(scale=5, min_width=320):
                     with gr.Group(elem_classes="kf-card"):
@@ -5651,10 +5849,7 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                         interactive=managed_netease_login,
                     )
                     netease_login_status = gr.Markdown(
-                        "公开歌曲可以直接使用；需要账号权限时再点击上方按钮。"
-                        if managed_netease_login
-                        else "远程监听模式已禁用本机账号登录；请在这台电脑上用"
-                        " `启动网页版.bat` 打开。"
+                        initial_netease_status
                     )
                     gr.Markdown(
                         "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
@@ -6103,6 +6298,26 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
         )
         app.load(fn=None, js=TOKEN_TIMELINE_JS, queue=False)
 
+        def refresh_recent_workspace_offer() -> tuple[object, ...]:
+            manifest, message, available = _recent_workspace_offer()
+            return (
+                manifest,
+                message,
+                gr.update(visible=available),
+                gr.update(interactive=available),
+            )
+
+        app.load(
+            refresh_recent_workspace_offer,
+            outputs=[
+                recent_workspace_manifest,
+                recent_workspace_message,
+                recent_workspace_prompt,
+                continue_recent_workspace,
+            ],
+            queue=False,
+        )
+
         def netease_login_button_updates(*, interactive: bool) -> tuple[object, ...]:
             return tuple(gr.update(interactive=interactive) for _index in range(4))
 
@@ -6113,9 +6328,9 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 "远程页面仍可使用公开歌曲或自己上传的音频。"
             )
             return (
-                gr.skip(),
-                gr.skip(),
-                gr.skip(),
+                "",
+                "",
+                "",
                 status,
                 status,
                 *netease_login_button_updates(interactive=False),
@@ -6129,26 +6344,134 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             client = getattr(request, "client", None)
             return _is_loopback_host(str(getattr(client, "host", "")))
 
+        def ensure_netease_session_for_download(
+            link: str,
+            audio_file: object,
+            video_file: object,
+            rights_confirmed: bool,
+            current_music_u: str,
+            request: object | None = None,
+        ) -> tuple[object, ...]:
+            if not local_netease_login_request(request):
+                supplied_music_u = (current_music_u or "").strip()
+                safe_music_u = (
+                    ""
+                    if netease_session_broker.recognizes_managed(supplied_music_u)
+                    else supplied_music_u
+                )
+                return safe_music_u, gr.skip(), gr.skip()
+            if not (link or "").strip() or not rights_confirmed:
+                return current_music_u or "", gr.skip(), gr.skip()
+            audio = _file_path(audio_file)
+            if audio is not None and audio.is_file() and not _is_empty_audio_placeholder(audio):
+                return current_music_u or "", gr.skip(), gr.skip()
+            video = _file_path(video_file)
+            if video is not None and video.is_file() and probe_media_has_audio(video) is True:
+                return current_music_u or "", gr.skip(), gr.skip()
+            supplied_music_u = (current_music_u or "").strip()
+            if supplied_music_u and not netease_session_broker.recognizes_managed(
+                supplied_music_u
+            ):
+                # The advanced MUSIC_U field is intentionally session-scoped and is not
+                # copied into the managed, cross-session login broker.
+                return supplied_music_u, gr.skip(), gr.skip()
+            try:
+                reuse_generation = netease_session_broker.begin_profile_reuse()
+                if reuse_generation is None:
+                    return "", gr.skip(), gr.skip()
+                if not managed_netease_profile_exists():
+                    netease_session_broker.clear_managed()
+                    return "", gr.skip(), gr.skip()
+                token = acquire_netease_music_u()
+            except NeteaseLoginError as exc:
+                status = (
+                    "### ⚠️ 网易云登录没有完成\n"
+                    f"{html.escape(str(exc))}\n\n将继续尝试公开音频；也可以稍后再点一键登录。"
+                )
+                return "", status, status
+            except Exception as exc:
+                _record_web_error("netease-session-refresh", exc)
+                status = (
+                    "### ⚠️ 网易云登录没有完成\n"
+                    "将继续尝试公开音频；如果歌曲需要账号权限，请稍后再点一键登录。"
+                )
+                return "", status, status
+            if not netease_session_broker.commit_profile_reuse(
+                token,
+                reuse_generation,
+            ):
+                status = (
+                    "### ℹ️ 已按退出操作断开网易云账号\n"
+                    "登录检查完成前账号已被退出，本次结果已安全丢弃。"
+                )
+                return "", status, status
+            status = (
+                "### ✅ 网易云账号已自动确认 / 重新连接\n"
+                "仍有效的登录会直接续用；若旧登录过期，官方登录窗口会完成更新。"
+            )
+            return token, status, status
+
+        ensure_netease_session_for_download.__annotations__["request"] = gr.Request
+
+        def ensure_netease_session_without_video(
+            link: str,
+            audio_file: object,
+            rights_confirmed: bool,
+            current_music_u: str,
+            request: object | None = None,
+        ) -> tuple[object, ...]:
+            return ensure_netease_session_for_download(
+                link,
+                audio_file,
+                None,
+                rights_confirmed,
+                current_music_u,
+                request,
+            )
+
+        ensure_netease_session_without_video.__annotations__["request"] = gr.Request
+
         def begin_netease_login(request: object | None = None) -> tuple[object, ...]:
             if not local_netease_login_request(request):
                 result = remote_netease_login_result()
-                return result[3:]
+                return gr.skip(), *result[3:]
+            login_generation = netease_session_broker.begin_explicit_login()
             status = (
                 "### ⏳ 正在打开网易云登录窗口\n"
                 "请在弹出的 Karaoke Forge 专用 Edge 窗口中正常扫码或登录。"
                 "检测成功后窗口会自动关闭。"
             )
             return (
+                login_generation,
                 status,
                 status,
                 *netease_login_button_updates(interactive=False),
             )
 
         def begin_netease_relogin(request: object | None = None) -> tuple[object, ...]:
-            status_and_buttons = begin_netease_login(request)
-            return "", "", "", *status_and_buttons
+            if not local_netease_login_request(request):
+                return gr.skip(), *remote_netease_login_result()
+            login_generation = netease_session_broker.begin_explicit_login(
+                disable_existing=True
+            )
+            status = (
+                "### ⏳ 正在重新连接网易云账号\n"
+                "旧会话将被清理，请在弹出的专用 Edge 窗口中完成官方登录。"
+            )
+            return (
+                login_generation,
+                "",
+                "",
+                "",
+                status,
+                status,
+                *netease_login_button_updates(interactive=False),
+            )
 
-        def capture_netease_login_wrapper(request: object | None = None) -> tuple[object, ...]:
+        def capture_netease_login_wrapper(
+            login_generation: int,
+            request: object | None = None,
+        ) -> tuple[object, ...]:
             if not local_netease_login_request(request):
                 return remote_netease_login_result()
             try:
@@ -6183,6 +6506,22 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                     *netease_login_button_updates(interactive=True),
                 )
 
+            if not netease_session_broker.commit_explicit_login(
+                token,
+                int(login_generation),
+            ):
+                status = (
+                    "### ℹ️ 已按退出操作断开网易云账号\n"
+                    "登录完成前账号已被退出，本次登录结果已安全丢弃。"
+                )
+                return (
+                    "",
+                    "",
+                    "",
+                    status,
+                    status,
+                    *netease_login_button_updates(interactive=True),
+                )
             status = (
                 "### ✅ 网易云账号已连接\n"
                 "登录会话只保存在本机服务端，已接入制作页和网易云歌词页。"
@@ -6200,14 +6539,18 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
         def clear_netease_login_wrapper(request: object | None = None) -> tuple[object, ...]:
             if not local_netease_login_request(request):
                 return remote_netease_login_result()
+            netease_session_broker.clear_managed()
             try:
                 detail = clear_netease_login_profile()
             except NeteaseLoginError as exc:
-                status = f"### ⚠️ 暂时无法清除专用登录\n{html.escape(str(exc))}"
+                status = (
+                    "### ⚠️ 已断开当前账号，但专用登录资料暂时无法完全清理\n"
+                    f"{html.escape(str(exc))}"
+                )
                 return (
-                    gr.skip(),
-                    gr.skip(),
-                    gr.skip(),
+                    "",
+                    "",
+                    "",
                     status,
                     status,
                     *netease_login_button_updates(interactive=True),
@@ -6223,7 +6566,10 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 *netease_login_button_updates(interactive=True),
             )
 
-        def relogin_netease_wrapper(request: object | None = None) -> tuple[object, ...]:
+        def relogin_netease_wrapper(
+            login_generation: int,
+            request: object | None = None,
+        ) -> tuple[object, ...]:
             if not local_netease_login_request(request):
                 return remote_netease_login_result()
             try:
@@ -6231,14 +6577,14 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             except NeteaseLoginError as exc:
                 status = f"### ⚠️ 暂时无法重新登录\n{html.escape(str(exc))}"
                 return (
-                    gr.skip(),
-                    gr.skip(),
-                    gr.skip(),
+                    "",
+                    "",
+                    "",
                     status,
                     status,
                     *netease_login_button_updates(interactive=True),
                 )
-            return capture_netease_login_wrapper(request)
+            return capture_netease_login_wrapper(login_generation, request)
 
         def store_manual_music_u(value: str) -> str:
             return value or ""
@@ -6276,6 +6622,7 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             login_button.click(
                 begin_netease_login,
                 outputs=[
+                    netease_login_generation,
                     make_netease_login_status,
                     netease_login_status,
                     make_netease_login_button,
@@ -6286,19 +6633,25 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 queue=False,
             ).then(
                 capture_netease_login_wrapper,
+                inputs=netease_login_generation,
                 outputs=netease_login_outputs,
                 show_progress="hidden",
+                concurrency_limit=1,
+                concurrency_id="netease-managed-login",
             )
 
         for reset_login_button in (make_reset_netease_login, netease_reset_login):
             reset_login_button.click(
                 begin_netease_relogin,
-                outputs=netease_login_outputs,
+                outputs=[netease_login_generation, *netease_login_outputs],
                 queue=False,
             ).then(
                 relogin_netease_wrapper,
+                inputs=netease_login_generation,
                 outputs=netease_login_outputs,
                 show_progress="hidden",
+                concurrency_limit=1,
+                concurrency_id="netease-managed-login",
             )
 
         for clear_login_button in (make_clear_netease_login, netease_clear_login):
@@ -6306,12 +6659,30 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 clear_netease_login_wrapper,
                 outputs=netease_login_outputs,
                 show_progress="hidden",
+                concurrency_limit=1,
+                concurrency_id="netease-managed-login",
             )
 
         def local_browser_cookie_inputs(browser: str, profile: str) -> tuple[str, str]:
             if managed_netease_login:
                 return browser, profile
             return "", ""
+
+        def netease_credentials_for_request(
+            browser: str,
+            profile: str,
+            music_u: str,
+            request: object | None,
+        ) -> tuple[str, str, str]:
+            safe_music_u = (
+                music_u if netease_session_broker.managed_token_allowed(music_u) else ""
+            )
+            if not local_netease_login_request(request):
+                if netease_session_broker.recognizes_managed(safe_music_u):
+                    safe_music_u = ""
+                return "", "", safe_music_u
+            browser, profile = local_browser_cookie_inputs(browser, profile)
+            return browser, profile, safe_music_u
 
         def make_wrapper(
             audio: object,
@@ -6358,14 +6729,17 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             cover_waveform: bool,
             export_original: bool,
             export_instrumental: bool,
+            request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
-            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+            cookie_browser, cookie_browser_profile, music_u = netease_credentials_for_request(
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
+                request,
             )
             result = run_make_job(
                 audio,
@@ -6455,14 +6829,17 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             cover_waveform: bool,
             export_original: bool,
             export_instrumental: bool,
+            request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
-            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+            cookie_browser, cookie_browser_profile, music_u = netease_credentials_for_request(
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
+                request,
             )
             result = prepare_make_editor_job(
                 audio,
@@ -6527,7 +6904,25 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 gr.update(selected="editor" if result.project else "make"),
             )
 
+        make_wrapper.__annotations__["request"] = gr.Request
+        prepare_make_editor_wrapper.__annotations__["request"] = gr.Request
+
         make_prepare_button.click(
+            ensure_netease_session_for_download,
+            inputs=[
+                make_netease_link,
+                make_audio,
+                make_video,
+                make_rights,
+                netease_session_music_u,
+            ],
+            outputs=[
+                netease_session_music_u,
+                make_netease_login_status,
+                netease_login_status,
+            ],
+            show_progress="full",
+        ).then(
             prepare_make_editor_wrapper,
             inputs=[
                 make_audio,
@@ -6585,6 +6980,21 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
         )
 
         make_button.click(
+            ensure_netease_session_for_download,
+            inputs=[
+                make_netease_link,
+                make_audio,
+                make_video,
+                make_rights,
+                netease_session_music_u,
+            ],
+            outputs=[
+                netease_session_music_u,
+                make_netease_login_status,
+                netease_login_status,
+            ],
+            show_progress="full",
+        ).then(
             make_wrapper,
             inputs=[
                 make_audio,
@@ -6805,14 +7215,17 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             cookie_browser_profile: str,
             music_u: str,
             timing_refinement: str,
+            request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[str, list[str], str, str | None]:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
-            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+            cookie_browser, cookie_browser_profile, music_u = netease_credentials_for_request(
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
+                request,
             )
             result = run_netease_align_job(
                 link,
@@ -6836,7 +7249,23 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             progress(1.0, desc="完成" if result.files else "未完成")
             return result.status, result.files, result.log, result.output_dir
 
+        netease_wrapper.__annotations__["request"] = gr.Request
+
         netease_button.click(
+            ensure_netease_session_without_video,
+            inputs=[
+                netease_link,
+                netease_local_audio,
+                netease_rights,
+                netease_session_music_u,
+            ],
+            outputs=[
+                netease_session_music_u,
+                make_netease_login_status,
+                netease_login_status,
+            ],
+            show_progress="full",
+        ).then(
             netease_wrapper,
             inputs=[
                 netease_link,
@@ -6900,24 +7329,84 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             )
             return (*result, token_timeline, token_json, {})
 
-        def restore_recent_workspace() -> tuple[object, ...]:
-            workspace = load_recent_workspace(_default_output_root())
-            if workspace is None:
-                return tuple(gr.skip() for _ in range(31))
-            loaded = list(load_editor_project_workspace(workspace.lyrics_project))
-            loaded[2] = (
-                f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
-                "歌词、音频、MV/封面和字体均可继续微调；每次导出都会更新同一工程。"
-            )
+        workspace_restore_outputs = [
+            make_audio,
+            make_video,
+            make_lyrics,
+            make_cover,
+            make_font_files,
+            make_name,
+            make_language,
+            make_model,
+            make_device,
+            make_separate,
+            make_timing_refinement,
+            make_quality,
+            make_font,
+            make_font_size,
+            make_auto_english_pronunciation,
+            make_cover_background,
+            make_cover_style,
+            make_cover_waveform,
+            make_export_original,
+            make_export_instrumental,
+            recent_workspace_prompt,
+            make_status,
+        ]
+
+        def restore_recent_workspace(manifest: str) -> tuple[object, ...]:
+            try:
+                workspace = load_workspace_project(manifest)
+                read_lyrics(workspace.lyrics_project)
+            except Exception as exc:
+                _record_web_error("restore-recent-workspace", exc)
+                result = [gr.skip() for _ in workspace_restore_outputs]
+                result[-2] = gr.update(visible=False)
+                result[-1] = (
+                    "### ⚠️ 上次工程暂时无法恢复\n"
+                    "已打开空白制作页，旧工程文件没有被删除；可以稍后从编辑页手动打开。"
+                )
+                return tuple(result)
+
             audio = str(workspace.audio) if workspace.audio and workspace.audio.is_file() else None
             video = str(workspace.video) if workspace.video and workspace.video.is_file() else None
             cover = str(workspace.cover) if workspace.cover and workspace.cover.is_file() else None
+            missing_assets = [
+                label
+                for label, path in (
+                    ("音频", workspace.audio),
+                    ("MV", workspace.video),
+                    ("封面", workspace.cover),
+                )
+                if path is not None and not path.is_file()
+            ]
+            missing_note = (
+                f"；未找到：{'、'.join(missing_assets)}，其余内容仍已恢复"
+                if missing_assets
+                else ""
+            )
+            safe_workspace_name = html.escape(workspace.name)
             font_files = [str(path) for path in workspace.font_files]
             settings = workspace.settings or {}
             font_name = str(settings.get("font") or "Microsoft YaHei")
+            try:
+                font_size = int(settings.get("font_size") or 58)
+            except (TypeError, ValueError):
+                font_size = 58
+            font_size = max(32, min(88, font_size))
+            quality = str(settings.get("quality") or "推荐质量")
+            if quality not in {"快速预览", "推荐质量", "高质量"}:
+                quality = "推荐质量"
+            auto_english_pronunciation = bool(
+                settings.get("auto_english_pronunciation", True)
+            )
             cover_background = str(settings.get("cover_background") or "adaptive")
+            if cover_background not in {"adaptive", "midnight", "sunset", "ocean", "paper"}:
+                cover_background = "adaptive"
             cover_style = str(settings.get("cover_style") or "turntable")
             if cover_style == "cdplayer":
+                cover_style = "turntable"
+            if cover_style not in {"aurora", "vinyl", "halo", "spectrum", "turntable"}:
                 cover_style = "turntable"
             cover_waveform = bool(settings.get("cover_waveform", True))
             export_original = bool(settings.get("export_original", True))
@@ -6927,11 +7416,11 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             alignment_device = str(settings.get("alignment_device") or "auto")
             alignment_separate_vocals = bool(settings.get("alignment_separate_vocals", False))
             timing_refinement = _web_timing_refinement(settings.get("timing_refinement", "auto"))
-            make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
+            make_status = (
+                f"### ✅ 已恢复工程 `{safe_workspace_name}`\n"
+                f"可以继续编辑或直接制作{missing_note}。"
+            )
             return (
-                *loaded,
-                str(workspace.lyrics_project),
-                audio,
                 audio,
                 video,
                 str(workspace.lyrics_project),
@@ -6943,18 +7432,65 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 alignment_device,
                 alignment_separate_vocals,
                 timing_refinement,
+                quality,
                 font_name,
+                font_size,
+                auto_english_pronunciation,
                 cover_background,
                 cover_style,
                 cover_waveform,
                 export_original,
                 export_instrumental,
-                gr.update(selected="editor"),
+                gr.update(visible=False),
                 make_status,
             )
 
-        restore_workspace_event = app.load(
+        restore_workspace_event = continue_recent_workspace.click(
             restore_recent_workspace,
+            inputs=recent_workspace_manifest,
+            outputs=workspace_restore_outputs,
+            show_progress="full",
+        )
+        restore_workspace_event = restore_workspace_event.then(
+            prepare_subtitle_material_preview,
+            inputs=material_preview_inputs,
+            outputs=material_preview_outputs,
+            show_progress="hidden",
+            concurrency_limit=1,
+            concurrency_id="make-material-preview",
+        )
+        restore_workspace_event = restore_workspace_event.then(
+            subtitle_preview_html,
+            inputs=preview_inputs,
+            outputs=make_style_preview,
+            queue=False,
+        )
+
+        def open_current_make_project_editor(
+            source: object,
+            audio: object,
+        ) -> tuple[object, ...]:
+            try:
+                path = _file_path(source)
+                if path is None or not path.is_file():
+                    raise ValueError("请先恢复工程，或选择一个项目 JSON / 时间轴歌词文件。")
+                loaded = load_editor_project_workspace(path)
+            except Exception as exc:
+                result = [gr.skip() for _ in range(14)]
+                result[-2] = gr.update(selected="make")
+                result[-1] = f"### ⚠️ 暂时无法打开歌词编辑器\n{html.escape(str(exc))}"
+                return tuple(result)
+            return (
+                *loaded,
+                str(path),
+                audio,
+                gr.update(selected="editor"),
+                "### ✅ 歌词工程已载入编辑器\n可逐句试听和微调；制作页素材会继续保留。",
+            )
+
+        make_open_editor_button.click(
+            open_current_make_project_editor,
+            inputs=[make_lyrics, make_audio],
             outputs=[
                 editor_payload,
                 editor_lines,
@@ -6968,51 +7504,24 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 editor_line_undo_payload,
                 editor_source,
                 editor_audio,
-                make_audio,
-                make_video,
-                make_lyrics,
-                make_cover,
-                make_font_files,
-                make_name,
-                make_language,
-                make_model,
-                make_device,
-                make_separate,
-                make_timing_refinement,
-                make_font,
-                make_cover_background,
-                make_cover_style,
-                make_cover_waveform,
-                make_export_original,
-                make_export_instrumental,
                 main_tabs,
                 make_status,
             ],
-            queue=False,
+            show_progress="full",
         )
 
-        def restore_make_lyrics_input(source: object) -> object:
-            path = _file_path(source)
-            return str(path) if path is not None and path.is_file() else gr.skip()
+        def start_blank_workspace_choice() -> tuple[object, str]:
+            return (
+                gr.update(visible=False),
+                "### ✅ 已打开空白工程\n上次工程仍保留在磁盘中，没有被删除。",
+            )
 
-        restore_workspace_event = restore_workspace_event.then(
-            restore_make_lyrics_input,
-            inputs=editor_source,
-            outputs=make_lyrics,
-            queue=False,
-        )
-        restore_workspace_event = restore_workspace_event.then(
-            prepare_subtitle_material_preview,
-            inputs=material_preview_inputs,
-            outputs=material_preview_outputs,
-            show_progress="hidden",
-            concurrency_limit=1,
-            concurrency_id="make-material-preview",
-        )
-        restore_workspace_event.then(
-            subtitle_preview_html,
-            inputs=preview_inputs,
-            outputs=make_style_preview,
+        start_blank_workspace.click(
+            start_blank_workspace_choice,
+            outputs=[
+                recent_workspace_prompt,
+                make_status,
+            ],
             queue=False,
         )
 
@@ -8099,6 +8608,9 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
             cover_background: str,
             cover_style: str,
             cover_waveform: bool,
+            export_original: bool,
+            export_instrumental: bool,
+            request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
             if not handoff_ready:
@@ -8158,8 +8670,13 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 cover_background,
                 cover_style,
                 cover_waveform,
+                export_original,
+                export_instrumental,
+                request=request,
                 progress=progress,
             )
+
+        make_after_editor_handoff.__annotations__["request"] = gr.Request
 
         editor_handoff_event.then(
             make_after_editor_handoff,
@@ -8207,6 +8724,8 @@ def create_web_app(*, managed_netease_login: bool = False) -> object:
                 make_cover_background,
                 make_cover_style,
                 make_cover_waveform,
+                make_export_original,
+                make_export_instrumental,
             ],
             outputs=[
                 make_status,
@@ -8305,7 +8824,19 @@ def launch_web_app(
     cache_root.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("GRADIO_TEMP_DIR", str(cache_root))
 
-    app = create_web_app(managed_netease_login=_is_loopback_host(host))
+    managed_netease_login = _is_loopback_host(host)
+    initial_music_u = ""
+    if managed_netease_login:
+        try:
+            initial_music_u = try_reuse_netease_music_u(timeout_seconds=12.0) or ""
+        except NeteaseLoginError:
+            initial_music_u = ""
+        except Exception as exc:
+            _record_web_error("netease-session-restore", exc)
+    app = create_web_app(
+        managed_netease_login=managed_netease_login,
+        initial_netease_music_u=initial_music_u,
+    )
     theme = gr.themes.Base(
         primary_hue="orange",
         secondary_hue="teal",
