@@ -1,12 +1,40 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .align import RecognizedWord
+from .domestic_models import (
+    DomesticModelError,
+    download_verified_modelscope_model,
+    find_verified_modelscope_model,
+)
 from .models import LyricsDocument
+from .network import (
+    ModelDownloadSettings,
+    NetworkSettingsError,
+    load_model_download_settings,
+    model_cache_directory,
+    model_download_environment,
+)
 from .text import split_display_units
+
+PINNED_MODEL_REVISIONS = {
+    "small": "536b0662742c02347bc0e980a01041f333bce120",
+    "large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "large": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+}
+
+_MODELSCOPE_MODEL_ALIASES = {
+    "large": "large-v3",
+    "turbo": "large-v3-turbo",
+}
 
 
 class TranscriptionError(RuntimeError):
@@ -82,7 +110,72 @@ def _local_only_option_is_unsupported(exc: Exception) -> bool:
     )
 
 
-def _model_load_error(model: str, exc: Exception, *, hub_model: bool) -> str:
+def _canonical_modelscope_model(model: str) -> str:
+    return _MODELSCOPE_MODEL_ALIASES.get(model, model)
+
+
+def _verified_offline_modelscope_model(model: str) -> Path | None:
+    canonical = _canonical_modelscope_model(model)
+    if canonical not in {"small", "large-v3", "large-v3-turbo"}:
+        return None
+    domestic_cache = model_cache_directory(ModelDownloadSettings(mode="modelscope"))
+    return find_verified_modelscope_model(canonical, domestic_cache)
+
+
+def _download_hf_model_in_isolated_process(
+    model: str,
+    *,
+    cache_directory: Path,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    """Download through a fresh process so Hub endpoint/proxy globals cannot leak."""
+
+    if progress:
+        progress(
+            f"本机未缓存 Whisper {model}，正在隔离的下载进程中准备模型；"
+            "完成后会自动继续。"
+        )
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    # Every built-in model is public.  Never send an unrelated user login token
+    # to an official endpoint, proxy, or explicitly selected mirror.
+    environment["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-m", "karaoke_forge.model_worker", model],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "未知下载错误"
+        raise TranscriptionError(f"Whisper {model} 下载失败：{detail[-2000:]}")
+    if not output_lines:
+        raise TranscriptionError(f"Whisper {model} 下载进程没有返回模型目录。")
+
+    downloaded = Path(output_lines[-1]).expanduser().resolve()
+    trusted_root = cache_directory.resolve()
+    try:
+        downloaded.relative_to(trusted_root)
+    except ValueError as exc:
+        raise TranscriptionError("模型下载进程返回了缓存目录之外的路径。") from exc
+    if not downloaded.is_dir():
+        raise TranscriptionError(f"模型下载完成，但缓存目录不存在：{downloaded}")
+    if progress:
+        progress(f"Whisper {model} 已下载完成，正在载入本地缓存。")
+    return downloaded
+
+
+def _model_load_error(
+    model: str,
+    exc: Exception,
+    *,
+    hub_model: bool,
+    settings: ModelDownloadSettings,
+) -> str:
     detail = str(exc).strip()
     network_markers = (
         "connecterror",
@@ -102,9 +195,23 @@ def _model_load_error(model: str, exc: Exception, *, hub_model: bool) -> str:
         _is_model_cache_miss(exc) or any(marker in chain_text for marker in network_markers)
     )
     if unavailable:
+        if settings.mode == "modelscope":
+            return (
+                f"无法加载 Whisper 模型“{model}”：国内 ModelScope 直连下载未完成。"
+                "已下载的断点会保留；请检查网络后重试，或双击“模型下载设置.bat”"
+                "切换到官方源。"
+            )
+        if settings.mode == "offline":
+            return (
+                f"无法加载 Whisper 模型“{model}”：当前启用了离线模式，"
+                "但本机缓存不完整。请双击“模型下载设置.bat”联网预下载，"
+                "或把“逐字时间精修”设为“关闭”。"
+            )
         return (
             f"无法加载 Whisper 模型“{model}”：本机没有完整缓存，且当前无法连接 "
-            "Hugging Face 模型服务。首次使用该模型需要联网下载；请检查网络或代理后重试。"
+            "Hugging Face 模型服务。首次使用该模型需要联网下载；"
+            "请双击“模型下载设置.bat”测试官方源、自动识别本机代理，"
+            "或明确选择第三方镜像后重试。"
             "如果歌词已有时间轴，也可将“逐字时间精修”设为“关闭”继续。"
         )
     return f"无法加载 Whisper 模型“{model}”：{detail or type(exc).__name__}"
@@ -120,11 +227,10 @@ def load_faster_whisper_model(
     """Load one reusable faster-whisper model with offline-first diagnostics."""
 
     try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
+        settings = load_model_download_settings()
+    except NetworkSettingsError as exc:
         raise TranscriptionError(
-            "The alignment engine is not installed. Run "
-            '`pip install -e ".[align]"` (or `pip install karaoke-forge[align]`).'
+            f"模型下载设置无效：{exc} 请双击“模型下载设置.bat”恢复官方源。"
         ) from exc
 
     expanded_model_path = Path(model).expanduser()
@@ -136,46 +242,177 @@ def load_faster_whisper_model(
         else:
             progress(f"正在检查 Whisper 模型 {model} 的本地缓存…")
     try:
-        # Resolve from the local Hugging Face cache first. Besides making offline
-        # use deterministic, this avoids waiting for a Hub request when a complete
-        # model snapshot is already available on disk.
-        if model_is_local:
+        cache_directory = model_cache_directory(settings)
+        cache_directory.mkdir(parents=True, exist_ok=True)
+        resolved_source = model_source
+        source_is_local = model_is_local
+        if not model_is_local and settings.mode == "modelscope":
+            canonical = _canonical_modelscope_model(model)
+            try:
+                verified_model = download_verified_modelscope_model(
+                    canonical,
+                    cache_directory,
+                    progress,
+                )
+            except (DomesticModelError, ValueError) as exc:
+                raise TranscriptionError(
+                    f"国内 ModelScope 模型 {model} 下载或校验失败：{exc} "
+                    "断点已保留；可重试，或在“模型下载设置”中切换其他来源。"
+                ) from exc
+            resolved_source = str(verified_model)
+            source_is_local = True
+        elif not model_is_local and settings.mode == "offline":
+            verified_model = _verified_offline_modelscope_model(model)
+            if verified_model is not None:
+                resolved_source = str(verified_model)
+                source_is_local = True
+                if progress:
+                    progress(f"已找到校验通过的 ModelScope 离线缓存：{verified_model}")
+
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise TranscriptionError(
+                "The alignment engine is not installed. Run "
+                '`pip install -e ".[align]"` (or `pip install karaoke-forge[align]`).'
+            ) from exc
+
+        # Never mutate process-wide proxy/HF variables here.  This function runs
+        # inside the multi-threaded web app, so online work belongs to a clean
+        # child process and the parent performs only explicit local loads.
+        if source_is_local:
             whisper_model = WhisperModel(
-                model_source,
+                resolved_source,
                 device=device,
                 compute_type=compute_type,
             )
         else:
-            load_without_local_only = False
+            model_options: dict[str, object] = {
+                "device": device,
+                "compute_type": compute_type,
+                "download_root": str(cache_directory / "hub"),
+            }
+            revision = PINNED_MODEL_REVISIONS.get(model)
+            if revision:
+                model_options["revision"] = revision
+                model_options["use_auth_token"] = False
+            downloaded: Path | None = None
             try:
                 whisper_model = WhisperModel(
                     model,
-                    device=device,
-                    compute_type=compute_type,
+                    **model_options,
                     local_files_only=True,
                 )
             except Exception as exc:
                 if _local_only_option_is_unsupported(exc):
-                    load_without_local_only = True
-                elif not _is_model_cache_miss(exc):
+                    raise TranscriptionError(
+                        "语音识别组件版本过旧，无法安全使用固定版本缓存；"
+                        "请重新双击“启动网页版.bat”，程序会自动升级组件。"
+                    ) from exc
+                if not _is_model_cache_miss(exc):
                     raise
-                else:
-                    load_without_local_only = True
-                    if progress:
-                        progress(
-                            f"本机未缓存 Whisper {model}，正在联网下载；"
-                            "当前下载器无法提供可靠百分比，完成后会自动继续。"
+                if settings.mode == "offline":
+                    raise TranscriptionError(
+                        _model_load_error(
+                            model,
+                            exc,
+                            hub_model=True,
+                            settings=settings,
                         )
-            # Run the network-capable attempt after leaving the cache-miss
-            # exception handler. Otherwise an unrelated second failure inherits
-            # the cache miss as __context__ and can be misclassified as a Hub outage.
-            if load_without_local_only:
-                whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
+                    ) from exc
+                downloaded = _download_hf_model_in_isolated_process(
+                    model,
+                    cache_directory=cache_directory / "hub",
+                    progress=progress,
+                )
+            # Leave the cache-miss exception handler before loading again;
+            # otherwise a separate device/configuration failure inherits the
+            # miss as ``__context__`` and looks like a network outage.
+            if downloaded is not None:
+                whisper_model = WhisperModel(
+                    str(downloaded),
+                    device=device,
+                    compute_type=compute_type,
+                )
+    except TranscriptionError:
+        raise
     except Exception as exc:
         raise TranscriptionError(
-            _model_load_error(model, exc, hub_model=not model_is_local)
+            _model_load_error(
+                model,
+                exc,
+                hub_model=not model_is_local,
+                settings=settings,
+            )
         ) from exc
     return whisper_model
+
+
+def predownload_faster_whisper_model(
+    model: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    """Download one pinned built-in model without loading it into RAM."""
+
+    try:
+        settings = load_model_download_settings()
+    except NetworkSettingsError as exc:
+        raise TranscriptionError(f"模型下载设置无效：{exc}") from exc
+    revision = PINNED_MODEL_REVISIONS.get(model)
+    if revision is None:
+        raise TranscriptionError(f"预下载只支持内置模型，当前值为“{model}”。")
+    if progress:
+        progress(f"正在准备 Whisper {model}；首次下载可能需要较长时间…")
+    try:
+        cache_directory = model_cache_directory(settings)
+        cache_directory.mkdir(parents=True, exist_ok=True)
+        if settings.mode == "modelscope":
+            canonical = _canonical_modelscope_model(model)
+            try:
+                location = download_verified_modelscope_model(
+                    canonical,
+                    cache_directory,
+                    progress,
+                )
+            except (DomesticModelError, ValueError) as exc:
+                raise TranscriptionError(
+                    f"国内 ModelScope 模型 {model} 下载或校验失败：{exc}"
+                ) from exc
+        else:
+            if settings.mode == "offline":
+                domestic_cached = _verified_offline_modelscope_model(model)
+                if domestic_cached is not None:
+                    location = domestic_cached
+                else:
+                    location = None
+            else:
+                location = None
+            if location is None:
+                with model_download_environment(settings) as applied:
+                    try:
+                        from faster_whisper.utils import download_model
+                    except ImportError as exc:
+                        raise TranscriptionError(
+                            "语音识别组件尚未安装，请重新运行“首次安装.bat”。"
+                        ) from exc
+                    location = download_model(
+                        model,
+                        cache_dir=str(applied.cache_directory / "hub"),
+                        local_files_only=settings.mode == "offline",
+                        revision=revision,
+                        use_auth_token=False,
+                    )
+    except TranscriptionError:
+        raise
+    except Exception as exc:
+        raise TranscriptionError(
+            _model_load_error(model, exc, hub_model=True, settings=settings)
+        ) from exc
+    result = Path(location)
+    if progress:
+        progress(f"Whisper {model} 已准备完成：{result}")
+    return result
 
 
 def transcribe_with_faster_whisper(

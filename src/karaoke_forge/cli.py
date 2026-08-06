@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import re
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +11,14 @@ from . import __version__
 from .ass import AssStyle
 from .formats import attach_reference_translation, export_formats, read_lyrics, write_format
 from .media import MediaError, find_ffmpeg, render_karaoke_video
+from .network import (
+    APPROVED_MIRROR_ENDPOINT,
+    ModelDownloadSettings,
+    auto_detect_local_proxies,
+    configure_model_download_settings,
+    describe_model_download_settings,
+    test_model_download_network,
+)
 from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
@@ -19,10 +26,19 @@ from .pipeline import (
     resolve_align_options,
     should_refine_timing,
 )
-from .runtime import inspect_demucs_runtime
+from .runtime import find_runtime_executable, inspect_demucs_runtime
+from .transcribe import predownload_faster_whisper_model
 from .workflows import MakeOptions, make_karaoke_video
 
 DEFAULT_FORMATS = "lrc,elrc,srt,vtt,ass,json"
+MODEL_DOWNLOAD_PROFILES = {
+    "fast": "small",
+    "balanced": "large-v3-turbo",
+    "precise": "large-v3",
+    "small": "small",
+    "large-v3-turbo": "large-v3-turbo",
+    "large-v3": "large-v3",
+}
 
 
 def _progress(message: str) -> None:
@@ -250,6 +266,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="check local runtime dependencies")
     doctor.set_defaults(handler=_handle_doctor)
+
+    model_download = subparsers.add_parser(
+        "model-download",
+        help="configure model network access and optionally pre-download a model",
+    )
+    model_download.add_argument(
+        "--mode",
+        choices=["auto", "modelscope", "official", "proxy", "mirror", "offline", "status"],
+        help="network mode; omit for the beginner-friendly interactive wizard",
+    )
+    model_download.add_argument("--proxy-url", help="HTTP(S) proxy URL without credentials")
+    model_download.add_argument(
+        "--confirm-mirror",
+        action="store_true",
+        help="explicitly consent to the approved third-party mirror",
+    )
+    model_download.add_argument(
+        "--download-model",
+        choices=sorted(MODEL_DOWNLOAD_PROFILES),
+        help="pre-download fast, balanced, or precise recognition weights",
+    )
+    model_download.add_argument("--timeout", type=float, default=6.0)
+    model_download.set_defaults(handler=_handle_model_download)
 
     web = subparsers.add_parser("web", help="open the visual local web interface")
     web.add_argument("--host", default="127.0.0.1")
@@ -501,9 +540,10 @@ def _handle_make(args: argparse.Namespace) -> int:
 
 def _handle_doctor(_args: argparse.Namespace) -> int:
     demucs_runtime = inspect_demucs_runtime()
+    ffmpeg = find_runtime_executable("ffmpeg")
     checks = [
         ("Python >= 3.10", sys.version_info >= (3, 10), sys.version.split()[0]),
-        ("FFmpeg", shutil.which("ffmpeg") is not None, shutil.which("ffmpeg") or "not found"),
+        ("FFmpeg", ffmpeg is not None, ffmpeg or "not found"),
         (
             "faster-whisper",
             importlib.util.find_spec("faster_whisper") is not None,
@@ -538,6 +578,139 @@ def _handle_doctor(_args: argparse.Namespace) -> int:
     for name, ok, detail in checks:
         print(f"{'OK' if ok else '--':>2}  {name:<18} {detail}")
     find_ffmpeg()
+    return 0
+
+
+def _print_model_download_status(settings: ModelDownloadSettings) -> None:
+    status = describe_model_download_settings(settings)
+    print(f"模型下载方式：{status.label_zh}")
+    print(status.detail_zh)
+    print(f"缓存目录：{status.cache_directory}")
+
+
+def _test_and_print_model_network(
+    settings: ModelDownloadSettings,
+    *,
+    timeout: float,
+) -> bool:
+    result = test_model_download_network(settings, timeout=timeout)
+    print(f"{result.summary_zh}：{result.detail_zh}")
+    return result.ok
+
+
+def _auto_configure_model_network(timeout: float) -> ModelDownloadSettings | None:
+    domestic = ModelDownloadSettings(mode="modelscope")
+    print("正在测试国内直连 ModelScope 魔搭（下载后会校验官方版本 SHA-256）…")
+    if _test_and_print_model_network(domestic, timeout=timeout):
+        return configure_model_download_settings("modelscope")
+
+    official = ModelDownloadSettings(mode="official")
+    print("正在测试 Hugging Face 官方源…")
+    if _test_and_print_model_network(official, timeout=timeout):
+        return configure_model_download_settings("official")
+
+    candidates = auto_detect_local_proxies()
+    if not candidates:
+        print("没有发现正在运行的常见本机 HTTP 代理。")
+        return None
+    for candidate in candidates:
+        print(f"正在测试 {candidate.source_zh}：{candidate.url}")
+        proxy_settings = ModelDownloadSettings(mode="proxy", proxy_url=candidate.url)
+        if _test_and_print_model_network(proxy_settings, timeout=timeout):
+            return configure_model_download_settings("proxy", proxy_url=candidate.url)
+    print("发现了本机代理端口，但它们暂时无法连接 Hugging Face 官方源。")
+    return None
+
+
+def _interactive_model_download_settings(timeout: float) -> ModelDownloadSettings | None:
+    print("\nKaraoke Forge 模型下载设置")
+    print("1. 自动测试国内直连、官方源和常见本机代理（推荐）")
+    print("2. 国内直连 ModelScope 魔搭（文件会逐个校验 SHA-256）")
+    print("3. 直接使用 Hugging Face 官方源")
+    print("4. 手动填写本机 HTTP 代理")
+    print("5. 使用 hf-mirror.com 第三方镜像")
+    print("6. 完全离线，只使用已经下载的模型")
+    print("7. 只查看当前设置")
+    choice = input("请选择 1-7（直接回车选 1）：").strip() or "1"
+    if choice == "1":
+        return _auto_configure_model_network(timeout)
+    if choice == "2":
+        settings = configure_model_download_settings("modelscope")
+    elif choice == "3":
+        settings = configure_model_download_settings("official")
+    elif choice == "4":
+        proxy_url = input("请输入代理地址，例如 http://127.0.0.1:7890：").strip()
+        settings = configure_model_download_settings("proxy", proxy_url=proxy_url)
+    elif choice == "5":
+        print(
+            f"警告：{APPROVED_MIRROR_ENDPOINT} 是第三方公益镜像，并非 Hugging Face 官方服务。"
+        )
+        print("它只用于公开语音模型；Karaoke Forge 不会向它发送你的 HF 登录令牌。")
+        consent = input("确认信任并使用该镜像，请输入 YES：").strip()
+        if consent != "YES":
+            print("未启用第三方镜像。")
+            return None
+        settings = configure_model_download_settings("mirror", confirm_mirror=True)
+    elif choice == "6":
+        settings = configure_model_download_settings("offline")
+    elif choice == "7":
+        from .network import load_model_download_settings
+
+        return load_model_download_settings()
+    else:
+        raise ValueError("请选择 1 到 7。")
+    _print_model_download_status(settings)
+    _test_and_print_model_network(settings, timeout=timeout)
+    return settings
+
+
+def _interactive_model_choice() -> str | None:
+    print("\n是否现在预下载语音识别模型？也可以稍后首次使用时自动下载。")
+    print("0. 稍后下载")
+    print("1. 快速 small（体积较小）")
+    print("2. 均衡 large-v3-turbo（默认，体积较大）")
+    print("3. 精准 large-v3（最大，耗时更久）")
+    choice = input("请选择 0-3（直接回车选 0）：").strip() or "0"
+    return {"0": None, "1": "fast", "2": "balanced", "3": "precise"}.get(choice)
+
+
+def _handle_model_download(args: argparse.Namespace) -> int:
+    interactive = args.mode is None
+    if interactive:
+        settings = _interactive_model_download_settings(args.timeout)
+        if settings is None:
+            print("没有更改设置；官方源失败时不会自动切换第三方镜像。")
+            return 2
+        download_choice = args.download_model or _interactive_model_choice()
+    elif args.mode == "auto":
+        settings = _auto_configure_model_network(args.timeout)
+        if settings is None:
+            print("自动设置未找到可用路径。请运行“模型下载设置.bat”选择其他方式。")
+            return 2
+        download_choice = args.download_model
+    elif args.mode == "status":
+        from .network import load_model_download_settings
+
+        settings = load_model_download_settings()
+        _print_model_download_status(settings)
+        _test_and_print_model_network(settings, timeout=args.timeout)
+        download_choice = args.download_model
+    else:
+        settings = configure_model_download_settings(
+            args.mode,
+            proxy_url=args.proxy_url,
+            confirm_mirror=args.confirm_mirror,
+        )
+        _print_model_download_status(settings)
+        reachable = _test_and_print_model_network(settings, timeout=args.timeout)
+        if not reachable and args.mode != "offline" and not args.download_model:
+            return 2
+        download_choice = args.download_model
+
+    if download_choice:
+        model = MODEL_DOWNLOAD_PROFILES[download_choice]
+        location = predownload_faster_whisper_model(model, progress=_progress)
+        print(f"模型已准备完成：{location}")
     return 0
 
 

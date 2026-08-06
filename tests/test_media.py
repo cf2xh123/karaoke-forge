@@ -10,11 +10,31 @@ from karaoke_forge.media import (
     MediaError,
     create_spinning_cover_video,
     extract_video_frame,
+    find_ffmpeg,
+    find_ffprobe,
     match_audio_envelopes,
     probe_media_has_audio,
     render_karaoke_video,
     separate_vocals,
 )
+
+
+def test_media_tools_use_the_shared_runtime_resolver(monkeypatch) -> None:
+    resolved = {"ffmpeg": "private-ffmpeg", "ffprobe": "private-ffprobe"}
+    monkeypatch.setattr(
+        "karaoke_forge.media.find_runtime_executable",
+        lambda name: resolved.get(name),
+    )
+
+    assert find_ffmpeg() == "private-ffmpeg"
+    assert find_ffprobe() == "private-ffprobe"
+
+
+def test_missing_ffmpeg_points_windows_users_to_one_click_repair(monkeypatch) -> None:
+    monkeypatch.setattr("karaoke_forge.media.find_runtime_executable", lambda _name: None)
+
+    with pytest.raises(MediaError, match="首次安装\\.bat"):
+        find_ffmpeg()
 
 
 def _distinctive_envelope(length: int, seed: int) -> list[float]:

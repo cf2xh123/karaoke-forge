@@ -83,6 +83,56 @@ def test_utaten_command_accepts_lyric_page_links() -> None:
     assert args.i_have_rights
 
 
+def test_model_download_command_exposes_safe_beginner_modes() -> None:
+    args = build_parser().parse_args(
+        [
+            "model-download",
+            "--mode",
+            "proxy",
+            "--proxy-url",
+            "http://127.0.0.1:7890",
+            "--download-model",
+            "fast",
+        ]
+    )
+
+    assert args.mode == "proxy"
+    assert args.proxy_url == "http://127.0.0.1:7890"
+    assert args.download_model == "fast"
+
+
+def test_model_download_cli_requires_explicit_mirror_confirmation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path))
+
+    result = main(["model-download", "--mode", "mirror"])
+
+    assert result == 2
+    assert not (tmp_path / "model-download.json").exists()
+
+
+def test_model_download_cli_prefetches_selected_profile(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path))
+    monkeypatch.setattr("karaoke_forge.cli._test_and_print_model_network", lambda *_a, **_k: True)
+    received: list[str] = []
+    monkeypatch.setattr(
+        "karaoke_forge.cli.predownload_faster_whisper_model",
+        lambda model, **_kwargs: received.append(model) or (tmp_path / model),
+    )
+
+    result = main(
+        [
+            "model-download",
+            "--mode",
+            "official",
+            "--download-model",
+            "balanced",
+        ]
+    )
+
+    assert result == 0
+    assert received == ["large-v3-turbo"]
+
+
 def test_make_command_can_disable_only_automatic_english_pronunciation() -> None:
     args = build_parser().parse_args(
         [
