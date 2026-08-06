@@ -2482,6 +2482,7 @@ def prepare_make_editor_job(
     export_instrumental: bool = False,
     cookie_browser: str = "",
     cookie_browser_profile: str = "",
+    music_u: str = "",
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2536,6 +2537,7 @@ def prepare_make_editor_job(
                     job_dir / ".source",
                     cookie_browser=cookie_browser,
                     cookie_browser_profile=cookie_browser_profile,
+                    music_u=music_u,
                     progress=report,
                 )
                 netease_info = track
@@ -2895,6 +2897,7 @@ def run_make_job(
     rights_confirmed: bool = False,
     cookie_browser: str = "",
     cookie_browser_profile: str = "",
+    music_u: str = "",
     auto_sync: bool = True,
     timing_refinement: str | bool = "auto",
     show_translation: bool = True,
@@ -2971,6 +2974,7 @@ def run_make_job(
                     job_dir / ".source",
                     cookie_browser=cookie_browser,
                     cookie_browser_profile=cookie_browser_profile,
+                    music_u=music_u,
                     progress=report,
                 )
                 netease_info = track
@@ -3411,6 +3415,7 @@ def run_netease_align_job(
     rights_confirmed: bool,
     cookie_browser: str = "",
     cookie_browser_profile: str = "",
+    music_u: str = "",
     timing_refinement: str | bool = "auto",
     *,
     progress_callback: Callable[[str], None] | None = None,
@@ -3455,6 +3460,7 @@ def run_netease_align_job(
                 rights_confirmed=rights_confirmed,
                 cookie_browser=cookie_browser or None,
                 cookie_browser_profile=cookie_browser_profile or None,
+                music_u=music_u or None,
                 timing_refinement=_web_timing_refinement(timing_refinement),
             ),
             progress=report,
@@ -4670,7 +4676,7 @@ def create_web_app() -> object:
                             )
                             with gr.Row():
                                 make_cookie_browser = gr.Dropdown(
-                                    label="网易云音频权限（VIP 歌曲请选择已登录浏览器）",
+                                    label="自动读取浏览器（可选，浏览器需完全退出）",
                                     choices=[
                                         ("匿名（仅公开音频）", ""),
                                         ("Chrome 已登录账号", "chrome"),
@@ -4690,6 +4696,27 @@ def create_web_app() -> object:
                                         "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
                                     ),
                                 )
+                            with gr.Accordion(
+                                "Edge / Chrome 保持开启时使用（推荐）",
+                                open=False,
+                            ):
+                                make_music_u = gr.Textbox(
+                                    label="网易云 MUSIC_U",
+                                    type="password",
+                                    placeholder="粘贴 Value，或 MUSIC_U=...",
+                                    info=(
+                                        "填写后会优先使用此会话，不再读取浏览器数据库；"
+                                        "仅在本机内存中按需使用。"
+                                    ),
+                                )
+                                gr.Markdown(
+                                    "1. 在 Edge 打开并登录 `music.163.com`；"
+                                    "2. 按 **F12 → Application/应用 → Cookies → "
+                                    "https://music.163.com**；"
+                                    "3. 找到 `MUSIC_U`，复制 **Value** 粘贴到上方。  \n"
+                                    "`MUSIC_U` 等同登录凭据，请勿截图或分享；"
+                                    "程序不会把它写入工程、输出文件或日志。"
+                                )
                             make_use_netease_lyrics = gr.Checkbox(
                                 label="没有上传歌词时，使用网易云页面公开歌词",
                                 value=True,
@@ -4702,9 +4729,9 @@ def create_web_app() -> object:
                                 value=False,
                             )
                             gr.Markdown(
-                                "> 选择浏览器后，会检测其中的网易云登录状态和本曲 VIP/SVIP"
-                                "音质权限，并使用账号实际有权播放的最高音质。Cookie 只在本机"
-                                "内存中读取，不会保存；本工具不接收密码，也不转换 NCM。"
+                                "> 可自动读取已退出的浏览器，或在浏览器保持开启时手动提供"
+                                " `MUSIC_U`。程序只使用账号实际有权播放的音质；登录凭据不会"
+                                "保存，本工具不接收密码，也不转换 NCM。"
                             )
                         gr.HTML(
                             '<div class="kf-tip">歌曲和 MV 应是同一版本。'
@@ -5062,7 +5089,7 @@ def create_web_app() -> object:
                     )
                     with gr.Row():
                         netease_cookie_browser = gr.Dropdown(
-                            label="网易云音频权限（VIP 歌曲请选择已登录浏览器）",
+                            label="自动读取浏览器（可选，浏览器需完全退出）",
                             choices=[
                                 ("匿名（仅公开音频）", ""),
                                 ("Chrome 已登录账号", "chrome"),
@@ -5081,6 +5108,27 @@ def create_web_app() -> object:
                             placeholder=(
                                 "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
                             ),
+                        )
+                    with gr.Accordion(
+                        "Edge / Chrome 保持开启时使用（推荐）",
+                        open=False,
+                    ):
+                        netease_music_u = gr.Textbox(
+                            label="网易云 MUSIC_U",
+                            type="password",
+                            placeholder="粘贴 Value，或 MUSIC_U=...",
+                            info=(
+                                "填写后会优先使用此会话，不再读取浏览器数据库；"
+                                "仅在本机内存中按需使用。"
+                            ),
+                        )
+                        gr.Markdown(
+                            "1. 在 Edge 打开并登录 `music.163.com`；"
+                            "2. 按 **F12 → Application/应用 → Cookies → "
+                            "https://music.163.com**；"
+                            "3. 找到 `MUSIC_U`，复制 **Value** 粘贴到上方。  \n"
+                            "`MUSIC_U` 等同登录凭据，请勿截图或分享；"
+                            "程序不会把它写入工程、输出文件或日志。"
                         )
                     netease_rights = gr.Checkbox(
                         label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
@@ -5114,9 +5162,9 @@ def create_web_app() -> object:
                             value="auto",
                         )
                     gr.Markdown(
-                        "> 选择浏览器后，会读取其中现有的网易云登录会话，自动检测本曲"
-                        " VIP/SVIP 权限并获取账号有权播放的最高音质。Cookie 只在本机内存"
-                        "中使用，不会保存；不接收密码、不提升账号权限，也不会转换 NCM。"
+                        "> 可自动读取已退出的浏览器，或在浏览器保持开启时手动提供"
+                        " `MUSIC_U`。程序只使用账号有权播放的最高音质；登录凭据不会"
+                        "保存，不接收密码、不提升账号权限，也不会转换 NCM。"
                     )
                     netease_button = gr.Button(
                         "读取链接并生成时间轴",
@@ -5466,8 +5514,8 @@ def create_web_app() -> object:
                                 - **歌词已有时间轴**：YRC 等真实逐字时间在“自动”模式下会直接
                                   使用；普通 LRC/SRT 会运行 Whisper 精修，选择“关闭”则完全
                                   保留原时间轴且无需模型。
-                                - **网易云会员歌曲**：可选择已登录浏览器来使用账号现有权限；
-                                  也可上传官方允许导出的标准音频；不支持 NCM。
+                                - **网易云会员歌曲**：可自动读取已退出的登录浏览器；Edge/Chrome
+                                  保持开启时可粘贴 MUSIC_U；也可上传标准音频；不支持 NCM。
                                 - **匹配率低**：确认歌词与歌曲是同一版本，或尝试分离人声。
                                 - **字幕没有中文字体**：在样式里换成本机已安装字体。
                                 """
@@ -5501,6 +5549,7 @@ def create_web_app() -> object:
             rights_confirmed: bool,
             cookie_browser: str,
             cookie_browser_profile: str,
+            music_u: str,
             auto_sync: bool,
             timing_refinement: str,
             show_translation: bool,
@@ -5550,6 +5599,7 @@ def create_web_app() -> object:
                 rights_confirmed,
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
                 auto_sync,
                 timing_refinement,
                 show_translation,
@@ -5598,6 +5648,7 @@ def create_web_app() -> object:
             rights_confirmed: bool,
             cookie_browser: str,
             cookie_browser_profile: str,
+            music_u: str,
             timing_refinement: str,
             output_root: str,
             qqmusic_link: str,
@@ -5650,6 +5701,7 @@ def create_web_app() -> object:
                 export_instrumental,
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5698,6 +5750,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
+                make_music_u,
                 make_timing_refinement,
                 make_output_root,
                 make_qqmusic_link,
@@ -5761,6 +5814,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
+                make_music_u,
                 make_auto_sync,
                 make_timing_refinement,
                 make_show_translation,
@@ -5880,6 +5934,7 @@ def create_web_app() -> object:
             rights_confirmed: bool,
             cookie_browser: str,
             cookie_browser_profile: str,
+            music_u: str,
             timing_refinement: str,
             progress: object = gr.Progress(),
         ) -> tuple[str, list[str], str, str | None]:
@@ -5901,6 +5956,7 @@ def create_web_app() -> object:
                 rights_confirmed,
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
                 timing_refinement,
                 progress_callback=update,
             )
@@ -5924,6 +5980,7 @@ def create_web_app() -> object:
                 netease_rights,
                 netease_cookie_browser,
                 netease_cookie_profile,
+                netease_music_u,
                 netease_timing_refinement,
             ],
             outputs=[
@@ -7111,6 +7168,7 @@ def create_web_app() -> object:
             rights_confirmed: bool,
             cookie_browser: str,
             cookie_browser_profile: str,
+            music_u: str,
             auto_sync: bool,
             timing_refinement: str,
             show_translation: bool,
@@ -7169,6 +7227,7 @@ def create_web_app() -> object:
                 rights_confirmed,
                 cookie_browser,
                 cookie_browser_profile,
+                music_u,
                 auto_sync,
                 timing_refinement,
                 show_translation,
@@ -7217,6 +7276,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
+                make_music_u,
                 make_auto_sync,
                 make_timing_refinement,
                 make_show_translation,

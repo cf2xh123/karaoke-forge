@@ -1,8 +1,7 @@
 # Karaoke Forge
 
-> Version 0.12.2 fixes authenticated NetEase downloads that exposed SVIP formats but
-> failed while fetching oversized master audio. Calibration and MV creation now prefer
-> compatible standard streams, retry transient failures, and retain a safe error summary.
+> Version 0.12.3 lets Edge/Chrome stay open by accepting only NetEase's `MUSIC_U` value.
+> The session is scoped to NetEase, sent only over HTTPS, and never stored in projects or logs.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -26,9 +25,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
-- When no local or MV audio is available, explicitly select a logged-in Chrome, Edge,
-  Firefox, or Brave profile to download a complete NetEase stream the account can play;
-  the app does not bypass access restrictions or decrypt/convert NCM containers;
+- When no local or MV audio is available, use a logged-in browser or paste only NetEase's
+  `MUSIC_U` while Edge/Chrome stays open; no second browser is required, and the app does
+  not bypass access restrictions or decrypt/convert NCM containers;
 - Prefer `exhigh`, `higher`, or `standard` NetEase audio for alignment and MV creation
   even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
   downloads while retaining authenticated song access;
@@ -45,7 +44,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.12.2` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.3` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -132,6 +131,10 @@ The NetEase tab accepts single-song links. It uses anonymous public access by de
 or can read an existing NetEase login from a local Chrome, Edge, Firefox, or Brave
 profile. In browser mode it detects the VIP/SVIP quality actually available for that
 track and downloads only the highest quality the account is already allowed to play.
+On Windows, an open Edge/Chrome window locks its Cookie database. The password-style
+`MUSIC_U` field lets the user copy only that NetEase value from DevTools; it takes
+priority over browser extraction, remains in memory, and is not written to projects,
+outputs, or logs.
 If NetEase returns only a short preview while the uploaded MV contains a complete audio
 track, the full workflow automatically uses the MV audio instead. Public translated LRC
 is placed at the top centre when available. Paired original lines use an upper-left and
