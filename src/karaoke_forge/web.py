@@ -9,7 +9,6 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,6 +70,15 @@ from .netease_login import (
     managed_netease_profile_exists,
     try_reuse_netease_music_u,
 )
+from .network import (
+    ModelDownloadSettings,
+    NetworkSettingsError,
+    auto_detect_local_proxies,
+    configure_model_download_settings,
+    load_model_download_settings,
+    model_download_status_markdown,
+    test_model_download_network,
+)
 from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
@@ -87,7 +95,7 @@ from .projects import (
 )
 from .pronunciation import generate_pronunciation
 from .qqmusic import QQMusicSongInfo, fetch_public_qqmusic_info
-from .runtime import inspect_demucs_runtime
+from .runtime import find_runtime_executable, inspect_demucs_runtime
 from .utaten import (
     UtaTenLyricsInfo,
     UtaTenPronunciationReport,
@@ -4796,7 +4804,7 @@ def preview_editor_audio_line(
     clip_start = max(0.0, line.start - max(0.0, float(lead_in)))
     clip_end = line.end + max(0.0, float(tail))
     target = _editor_clip_target(audio, index, clip_start, clip_end)
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = find_runtime_executable("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("没有找到 FFmpeg，无法截取当前句试听片段。")
     with _editor_clip_lock(target):
@@ -5081,9 +5089,10 @@ def handoff_make_readiness(
 
 def environment_markdown() -> str:
     demucs_runtime = inspect_demucs_runtime()
+    ffmpeg = find_runtime_executable("ffmpeg")
     checks = [
         ("Python 3.10+", sys.version_info >= (3, 10), sys.version.split()[0]),
-        ("FFmpeg", shutil.which("ffmpeg") is not None, shutil.which("ffmpeg") or "未找到"),
+        ("FFmpeg", ffmpeg is not None, ffmpeg or "未找到"),
         (
             "faster-whisper",
             importlib.util.find_spec("faster_whisper") is not None,
@@ -5124,6 +5133,16 @@ def environment_markdown() -> str:
     for name, ok, detail in checks:
         icon = "✅" if ok else "⚪"
         rows.append(f"- {icon} **{name}**：{detail}")
+    try:
+        rows.extend(["", model_download_status_markdown()])
+    except NetworkSettingsError as exc:
+        rows.extend(
+            [
+                "",
+                f"**模型下载设置需要修复**：{exc}  ",
+                "请在下方恢复为国内直连或官方源，或双击项目根目录的 `模型下载设置.bat`。",
+            ]
+        )
     rows.extend(
         [
             "",
@@ -5138,6 +5157,137 @@ def environment_markdown() -> str:
         ]
     )
     return "\n".join(rows)
+
+
+def _model_network_form_defaults() -> tuple[str, str, bool, str]:
+    try:
+        settings = load_model_download_settings()
+        return (
+            settings.mode,
+            settings.proxy_url or "http://127.0.0.1:7890",
+            settings.mode == "mirror" and settings.mirror_confirmed,
+            model_download_status_markdown(settings),
+        )
+    except NetworkSettingsError as exc:
+        return (
+            "modelscope",
+            "http://127.0.0.1:7890",
+            False,
+            f"### ⚠️ 设置文件无效\n{exc}\n\n请选择一种方式并保存以修复。",
+        )
+
+
+def configure_model_network_for_web(
+    mode: str,
+    proxy_url: str,
+    mirror_confirmed: bool,
+) -> str:
+    try:
+        settings = configure_model_download_settings(
+            mode,  # type: ignore[arg-type]
+            proxy_url=proxy_url.strip() if mode == "proxy" else None,
+            confirm_mirror=bool(mirror_confirmed),
+        )
+        status = model_download_status_markdown(settings)
+        test = test_model_download_network(settings, timeout=6.0)
+        icon = "✅" if test.ok else "⚠️"
+        return f"{status}\n\n### {icon} {test.summary_zh}\n{test.detail_zh}"
+    except (NetworkSettingsError, OSError, ValueError) as exc:
+        return f"### ⚠️ 没有保存设置\n{exc}"
+
+
+def auto_configure_model_network_for_web() -> tuple[str, str, str, bool]:
+    domestic = ModelDownloadSettings(mode="modelscope")
+    domestic_test = test_model_download_network(domestic, timeout=6.0)
+    if domestic_test.ok:
+        settings = configure_model_download_settings("modelscope")
+        return (
+            (
+                f"{model_download_status_markdown(settings)}\n\n"
+                f"### ✅ {domestic_test.summary_zh}\n{domestic_test.detail_zh}"
+            ),
+            "modelscope",
+            "http://127.0.0.1:7890",
+            False,
+        )
+
+    official = ModelDownloadSettings(mode="official")
+    official_test = test_model_download_network(official, timeout=6.0)
+    if official_test.ok:
+        settings = configure_model_download_settings("official")
+        return (
+            (
+                f"{model_download_status_markdown(settings)}\n\n"
+                f"### ✅ {official_test.summary_zh}\n{official_test.detail_zh}"
+            ),
+            "official",
+            "http://127.0.0.1:7890",
+            False,
+        )
+
+    details = [
+        f"国内直连：{domestic_test.detail_zh}",
+        f"官方源：{official_test.detail_zh}",
+    ]
+    for candidate in auto_detect_local_proxies():
+        settings = ModelDownloadSettings(mode="proxy", proxy_url=candidate.url)
+        result = test_model_download_network(settings, timeout=6.0)
+        details.append(f"{candidate.source_zh}：{result.detail_zh}")
+        if result.ok:
+            saved = configure_model_download_settings("proxy", proxy_url=candidate.url)
+            return (
+                (
+                    f"{model_download_status_markdown(saved)}\n\n"
+                    f"### ✅ 已自动找到可用本机代理\n{candidate.source_zh}：{candidate.url}"
+                ),
+                "proxy",
+                candidate.url,
+                False,
+            )
+    current_mode, current_proxy, current_confirmed, _ = _model_network_form_defaults()
+    return (
+        "### ⚠️ 自动探测没有找到可用路径\n"
+        "国内直连和官方源都不可用时，程序也不会自动切换到未校验镜像。"
+        "你可以先检查网络、打开代理软件再重试，"
+        "手动填写其 HTTP 端口，或阅读提示后明确选择 hf-mirror。\n\n"
+        + "  \n".join(details),
+        current_mode,
+        current_proxy,
+        current_confirmed,
+    )
+
+
+def predownload_model_for_web(profile: str) -> str:
+    command = [
+        sys.executable,
+        "-m",
+        "karaoke_forge",
+        "model-download",
+        "--mode",
+        "status",
+        "--download-model",
+        profile,
+        "--timeout",
+        "6",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=7200,
+        )
+    except subprocess.TimeoutExpired:
+        return "### ⚠️ 模型下载超时\n两小时内没有完成；已有缓存会保留，下次可以继续。"
+    log = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+    if len(log) > 6000:
+        log = log[-6000:]
+    if completed.returncode == 0:
+        return f"### ✅ 模型已准备完成\n```text\n{log}\n```"
+    return f"### ⚠️ 模型下载未完成\n```text\n{log}\n```"
 
 
 def _demucs_option_label(prefix: str = "先分离人声") -> str:
@@ -6269,6 +6419,55 @@ def create_web_app(
                 with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
                     environment = gr.Markdown(environment_markdown())
                     refresh_environment = gr.Button("重新检查")
+                    (
+                        initial_model_mode,
+                        initial_proxy_url,
+                        initial_mirror_confirmed,
+                        initial_model_network_status,
+                    ) = _model_network_form_defaults()
+                    gr.Markdown("### AI 模型下载向导")
+                    gr.Markdown(
+                        "不懂代理时先点自动探测。程序会先试国内 ModelScope 直连，"
+                        "下载文件通过内置 SHA-256 校验后才加载；再尝试官方源和本机代理。"
+                    )
+                    model_network_mode = gr.Radio(
+                        label="下载方式",
+                        choices=[
+                            ("国内直连 · ModelScope 魔搭（推荐）", "modelscope"),
+                            ("Hugging Face 官方源", "official"),
+                            ("本机 HTTP 代理", "proxy"),
+                            ("hf-mirror 第三方镜像", "mirror"),
+                            ("完全离线，只读缓存", "offline"),
+                        ],
+                        value=initial_model_mode,
+                    )
+                    model_proxy_url = gr.Textbox(
+                        label="本机代理地址（仅代理模式使用）",
+                        value=initial_proxy_url,
+                        placeholder="http://127.0.0.1:7890",
+                        info="不保存账号或密码；Clash 常见端口为 7890 / 7897。",
+                    )
+                    model_mirror_confirmed = gr.Checkbox(
+                        label=(
+                            "我明白 hf-mirror 是第三方服务，并明确同意仅用它下载公开模型"
+                        ),
+                        value=initial_mirror_confirmed,
+                    )
+                    with gr.Row():
+                        auto_model_network = gr.Button("自动探测（推荐）", variant="primary")
+                        save_model_network = gr.Button("保存并测试所选方式")
+                    model_network_status = gr.Markdown(initial_model_network_status)
+                    with gr.Row():
+                        model_prefetch_profile = gr.Dropdown(
+                            label="提前下载模型（可选）",
+                            choices=[
+                                ("快速 · small", "fast"),
+                                ("均衡 · large-v3-turbo", "balanced"),
+                                ("KTV 精准 · large-v3", "precise"),
+                            ],
+                            value="fast",
+                        )
+                        predownload_model = gr.Button("下载所选模型")
                 with gr.Column(scale=5), gr.Group(elem_classes="kf-card"):
                     gr.Markdown(
                         """
@@ -6276,7 +6475,8 @@ def create_web_app(
 
                                 1. Windows 用户先双击项目根目录的 `首次安装.bat`。
                                 2. 安装完成后双击 `启动网页版.bat`。
-                                3. 首次自动对齐会下载 Whisper 模型，等待时间取决于网络。
+                                3. 安装向导会自动准备私有 FFmpeg，并让你选择模型下载方式；
+                                   也可稍后在左侧重新测试或提前下载模型。
 
                                 ### 常见情况
 
@@ -6288,6 +6488,8 @@ def create_web_app(
                                   Karaoke Forge 专用 Edge 窗口登录即可；平时的 Edge 不用关闭。
                                   也可上传标准音频；不支持 NCM。
                                 - **匹配率低**：确认歌词与歌曲是同一版本，或尝试分离人声。
+                                - **模型无法下载**：先点左侧“自动探测”；它会依次尝试国内
+                                  ModelScope、官方源和本机代理，不会自行改用 hf-mirror。
                                 - **字幕没有中文字体**：在样式里换成本机已安装字体。
                                 """
                     )
@@ -8766,6 +8968,25 @@ def create_web_app(
             inputs=preview_inputs,
             outputs=make_style_preview,
             queue=False,
+        )
+        auto_model_network.click(
+            auto_configure_model_network_for_web,
+            outputs=[
+                model_network_status,
+                model_network_mode,
+                model_proxy_url,
+                model_mirror_confirmed,
+            ],
+        )
+        save_model_network.click(
+            configure_model_network_for_web,
+            inputs=[model_network_mode, model_proxy_url, model_mirror_confirmed],
+            outputs=model_network_status,
+        )
+        predownload_model.click(
+            predownload_model_for_web,
+            inputs=model_prefetch_profile,
+            outputs=model_network_status,
         )
         refresh_environment.click(
             environment_markdown,

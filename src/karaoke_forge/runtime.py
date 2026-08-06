@@ -2,9 +2,77 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import os
 import shutil
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
+
+
+def _candidate_project_roots() -> tuple[Path, ...]:
+    """Return trusted portable-install roots without consulting the working directory."""
+
+    candidates: list[Path] = []
+    configured_root = os.environ.get("KARAOKE_FORGE_ROOT", "").strip()
+    if configured_root:
+        candidates.append(Path(configured_root).expanduser())
+
+    # A global installation can be started from an arbitrary, potentially
+    # untrusted directory.  Never discover executables from cwd or a generic
+    # drive ancestor.  Implicit roots must be an actual Karaoke Forge source
+    # checkout; the Windows launchers use the explicit directory variable.
+    executable = Path(sys.executable).resolve()
+    implicit_candidates = [*executable.parents[:4], Path(__file__).resolve().parents[2]]
+    for candidate in implicit_candidates:
+        if (
+            (candidate / "pyproject.toml").is_file()
+            and (candidate / "src" / "karaoke_forge" / "runtime.py").is_file()
+        ):
+            candidates.append(candidate)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        key = os.path.normcase(str(resolved))
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return tuple(unique)
+
+
+def bundled_ffmpeg_directory() -> Path | None:
+    """Locate the project-private FFmpeg directory used by Windows launchers."""
+
+    configured = os.environ.get("KARAOKE_FORGE_FFMPEG_DIR", "").strip()
+    if configured:
+        directory = Path(configured).expanduser()
+        if directory.is_dir():
+            return directory.resolve()
+
+    for root in _candidate_project_roots():
+        directory = root / ".runtime" / "ffmpeg" / "bin"
+        if directory.is_dir():
+            return directory
+    return None
+
+
+def find_runtime_executable(name: str) -> str | None:
+    """Resolve a bundled media tool first, then fall back to the current PATH."""
+
+    if not name or Path(name).name != name:
+        raise ValueError("Runtime executable names must not contain a path.")
+    directory = bundled_ffmpeg_directory()
+    if directory is not None:
+        filename = f"{name}.exe" if os.name == "nt" else name
+        bundled = directory / filename
+        if bundled.is_file():
+            return str(bundled.resolve())
+    return shutil.which(name)
 
 
 @dataclass(frozen=True)

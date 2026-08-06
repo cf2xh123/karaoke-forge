@@ -1,8 +1,9 @@
 # Karaoke Forge
 
-> The current release is `0.12.5` (Alpha). A NetEase song link alone now previews the
-> selected no-MV scene from online cover art; startup asks before restoring the latest
-> project, and the dedicated NetEase login is reused until it expires.
+> The current release is `0.13.0` (Alpha). Windows setup and later launches can now
+> provision private Python and FFmpeg runtimes. ModelScope is the recommended default
+> for anonymous direct model downloads in mainland China, with no administrator access,
+> system `PATH` changes, or proxy configuration required.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -46,16 +47,20 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview the song's actual lyrics against a matching MV frame, or against the selected
   cover-art scene when no MV is available; a link-only source uses online cover art and a
   waveform-layout sample until real audio is downloaded;
-- Optionally separate vocals with Demucs before recognition.
+- Optionally separate vocals with Demucs before recognition;
+- On Windows, install and verify a project-private FFmpeg build; model downloads prefer
+  direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
+  selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.12.5` alpha. Check the generated timeline before a final render.
+This is a usable `0.13.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
 Manual installation requires Python 3.10+ and
 [FFmpeg](https://ffmpeg.org/download.html). On Windows, the first-time setup batch file
-downloads a pinned private Python 3.12.10 runtime into the project, so no system Python
-or Conda installation is required and the global `PATH` is not changed.
+downloads pinned private Python 3.12.10 and Gyan.dev FFmpeg Essentials runtimes into the
+project and verifies their hashes. No system Python, Conda, or FFmpeg installation is
+required; setup does not request administrator access or change the global `PATH`.
 
 ```bash
 python -m venv .venv
@@ -79,11 +84,35 @@ karaoke-forge web
 
 On Windows, non-technical users can double-click `首次安装.bat` once and use
 `启动网页版.bat` afterwards. The first setup downloads an approximately 14 MB official
-Python NuGet runtime into `.runtime` and creates the isolated `.venv`. The browser
+Python NuGet runtime and the pinned Gyan.dev FFmpeg Essentials build into `.runtime`,
+verifies both downloads, and creates the isolated `.venv`. The FFmpeg package is the
+approximately 110 MB Gyan 8.1.2 Essentials ZIP, a GPLv3 static build whose license and
+source notices remain in the installed runtime. The launcher automatically
+repairs a missing or incomplete private FFmpeg runtime. The browser
 interface covers complete video creation,
 timeline-only export, lyric/pronunciation editing, format conversion, and environment
 checks. Media is processed by the local service and is not automatically uploaded to
 the public internet.
+
+The wizard recommends anonymous direct downloads from ModelScope in mainland China and
+supports all three built-in models: `small`, `large-v3-turbo`, and `large-v3`. Pressing
+Enter runs automatic selection, which tests ModelScope first, then official Hugging Face,
+then common loopback proxy ports. Official Hugging Face, an explicitly entered local
+proxy, opt-in `hf-mirror`, and fully offline operation remain available. The wizard can
+predownload the Fast, Balanced, or KTV Precise model into a source-isolated cache in the
+current user's local application data.
+
+Those ModelScope repositories are public user-uploaded replicas, not publisher-verified
+repositories operated by the original model authors. Karaoke Forge therefore pins a
+specific ModelScope commit and independently matches every required file's exact byte
+length and SHA-256 against the pinned official Hugging Face revision. A snapshot is
+published to the local cache and loaded only after every file passes verification.
+
+Automatic selection never enables `hf-mirror`; that third-party service requires explicit
+consent, and no Hugging Face token is sent to it. Proxy variables are scoped to model
+loading or prefetch and restored afterwards, so they do not alter browser, Windows,
+NetEase, or artwork traffic. Double-click `模型下载设置.bat` or use the Environment tab
+to test, change, or prefetch later.
 
 After media and lyrics are selected, the Make page automatically shows an in-context
 subtitle preview without rendering a full video. Timed lyrics use a matching MV frame;
@@ -189,7 +218,11 @@ check those source timings.
 
 Each preset downloads its Whisper model on first use. `large-v3-turbo` and especially
 `large-v3` are substantially larger than `small`, so their first download and load can take
-some time; subsequent runs reuse the local cache.
+some time; subsequent runs reuse the per-user, source-isolated cache. On Windows, anonymous
+ModelScope direct download is the recommended default; the wizard can instead use official
+Hugging Face, an auto-detected local proxy, explicitly selected `hf-mirror`, or a
+predownloaded offline cache. The mirror is never enabled automatically, and Karaoke Forge
+does not send a Hugging Face token to it.
 One-click login takes place only on NetEase's official site, and its login state is kept
 in a dedicated local Edge profile. Cookies obtained by Karaoke Forge are never written
 back into the web page or to projects, output directories, or logs; a manually supplied
@@ -242,8 +275,8 @@ python -m pip install --upgrade -e ".[web,align,netease,pronunciation]"
 karaoke-forge doctor
 ```
 
-On Windows, `启动网页版.bat` uses the existing `.venv` to install `.[web,netease]`
-automatically when an older installation is missing the one-click NetEase login
-components; the first-time setup does not need to be run again.
+On Windows, `启动网页版.bat` uses the existing `.venv` to repair missing or outdated web,
+alignment, NetEase-login, and pronunciation components, and repairs a missing private
+FFmpeg runtime; the first-time setup does not need to be run again.
 
 Review [CHANGELOG.md](CHANGELOG.md) before upgrading. Code is available under the [MIT License](LICENSE); no rights to songs, lyrics, videos, fonts, or models are granted.

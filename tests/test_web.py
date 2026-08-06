@@ -31,6 +31,8 @@ from karaoke_forge.web import (
     _safe_stem,
     _select_subtitle_preview_sample,
     apply_editor_line_action,
+    auto_configure_model_network_for_web,
+    configure_model_network_for_web,
     create_web_app,
     environment_markdown,
     export_editor_project,
@@ -673,8 +675,38 @@ def test_web_align_job_skips_recognition_for_timed_lyrics(
 def test_environment_report_mentions_local_processing() -> None:
     report = environment_markdown()
     assert "FFmpeg" in report
+    assert "模型下载" in report
     assert "网易云一键登录组件" in report
     assert "素材不会自动上传到公网" in report
+
+
+def test_web_model_network_requires_explicit_mirror_consent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path))
+
+    status = configure_model_network_for_web("mirror", "", False)
+
+    assert "没有保存" in status
+    assert "显式确认" in status
+    assert not (tmp_path / "model-download.json").exists()
+
+
+def test_web_model_auto_detection_never_falls_back_to_a_mirror(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path))
+    monkeypatch.setattr("karaoke_forge.web.auto_detect_local_proxies", lambda: ())
+    monkeypatch.setattr(
+        "karaoke_forge.web.test_model_download_network",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False,
+            detail_zh="official blocked",
+        ),
+    )
+
+    status, mode, _proxy, confirmed = auto_configure_model_network_for_web()
+
+    assert "不会自动切换到未校验镜像" in status
+    assert mode == "modelscope"
+    assert not confirmed
+    assert not (tmp_path / "model-download.json").exists()
 
 
 def test_web_editor_loads_and_exports_hidden_rows(
@@ -994,7 +1026,10 @@ def test_web_editor_previews_selected_line_audio(
     audio.write_bytes(b"audio")
     source.write_text("[00:01.00]A\n[00:03.00]B\n", encoding="utf-8")
     payload, rows, *_rest = load_editor_project(str(source))
-    monkeypatch.setattr("karaoke_forge.web.shutil.which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(
+        "karaoke_forge.web.find_runtime_executable",
+        lambda _name: "ffmpeg",
+    )
 
     commands: list[list[str]] = []
 

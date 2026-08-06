@@ -14,7 +14,7 @@ from math import isfinite, log1p, sqrt
 from pathlib import Path
 from statistics import median
 
-from .runtime import inspect_demucs_runtime
+from .runtime import find_runtime_executable, inspect_demucs_runtime
 
 
 class MediaError(RuntimeError):
@@ -156,16 +156,17 @@ class AudioSyncResult:
 
 
 def find_ffmpeg() -> str:
-    executable = shutil.which("ffmpeg")
+    executable = find_runtime_executable("ffmpeg")
     if not executable:
         raise MediaError(
-            "FFmpeg was not found on PATH. Install FFmpeg and make sure `ffmpeg -version` works."
+            "没有找到 FFmpeg。Windows 用户请重新双击“首次安装.bat”；"
+            "“启动网页版.bat”也会自动修复项目内的私有 FFmpeg。"
         )
     return executable
 
 
 def find_ffprobe() -> str | None:
-    return shutil.which("ffprobe")
+    return find_runtime_executable("ffprobe")
 
 
 def probe_media_duration(media_path: str | Path) -> float | None:
