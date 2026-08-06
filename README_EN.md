@@ -1,8 +1,8 @@
 # Karaoke Forge
 
-> The current release is `0.12.4` (Alpha). It adds one-click NetEase login and
-> in-context subtitle previews, without closing everyday Edge, opening DevTools, or
-> rendering a full video just to inspect lyrics over the actual MV/cover scene.
+> The current release is `0.12.5` (Alpha). A NetEase song link alone now previews the
+> selected no-MV scene from online cover art; startup asks before restoring the latest
+> project, and the dedicated NetEase login is reused until it expires.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -28,7 +28,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
 - When no local or MV audio is available, open a dedicated Edge window for one-click
   login on NetEase's official site; everyday Edge can stay open, with no DevTools or
-  Firefox required, and the app neither bypasses access restrictions nor converts NCM;
+  Firefox required; a valid dedicated login is restored on the next launch and the
+  official login window reopens only when that session expires and account audio is needed;
 - Prefer `exhigh`, `higher`, or `standard` NetEase audio for alignment and MV creation
   even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
   downloads while retaining authenticated song access;
@@ -36,17 +37,18 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
 - Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
-- Persist lyrics, media, cover art, fonts, and settings, then restore the latest project
-  automatically on the next web launch;
+- Persist lyrics, media, cover art, fonts, and settings, then ask whether to continue the
+  latest project or start blank on the next web launch without deleting the saved project;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with undo support;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview the song's actual lyrics against a matching MV frame, or against the selected
-  cover-art scene when no MV is available; font, size, colour, and placement update immediately;
+  cover-art scene when no MV is available; a link-only source uses online cover art and a
+  waveform-layout sample until real audio is downloaded;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.12.4` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.5` alpha. Check the generated timeline before a final render.
 
 ## Install
 
