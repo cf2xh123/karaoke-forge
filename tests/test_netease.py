@@ -222,6 +222,9 @@ def test_public_download_uses_anonymous_session_without_cookies(
 
     assert track.audio_path.is_file()
     assert observed_options["usenetrc"] is False
+    assert observed_options["format"] == "exhigh/higher/standard"
+    assert observed_options["retries"] == 5
+    assert observed_options["socket_timeout"] == 45
     assert "cookiefile" not in observed_options
 
 
@@ -308,10 +311,12 @@ def test_browser_session_detects_vip_access_and_uses_browser_cookies(
     )
 
     assert observed_options["cookiesfrombrowser"] == ("edge", "Profile 1", None, None)
+    assert observed_options["format"] == "exhigh/higher/standard"
     assert track.authenticated
     assert track.quality_level == "hires"
     assert track.access_tier == "vip"
     assert any("VIP 音质权限" in message for message in progress)
+    assert any("将使用极高音质" in message for message in progress)
     assert all("MUSIC_U" not in message for message in progress)
 
 
@@ -406,3 +411,67 @@ def test_browser_session_reports_a_missing_cookie_database(
             tmp_path / "source",
             cookie_browser="chrome",
         )
+
+
+def test_browser_session_preserves_a_safe_download_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="VIP Song",
+        artists=(),
+        canonical_url="https://music.163.com/song?id=42",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.fetch_public_netease_info",
+        lambda _link: info,
+    )
+
+    class FakeDownloadError(Exception):
+        pass
+
+    class FakeCookie:
+        name = "MUSIC_U"
+        domain = ".music.163.com"
+
+        def is_expired(self) -> bool:
+            return False
+
+    class FakeYoutubeDL:
+        cookiejar: ClassVar[list[object]] = [FakeCookie()]
+
+        def __init__(self, options: dict[str, object]) -> None:
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def extract_info(self, _url: str, *, download: bool):
+            assert download
+            self.options["logger"].error(  # type: ignore[union-attr]
+                "ERROR: HTTP Error 403 while reading https://cdn.example/audio?token=secret"
+            )
+            raise FakeDownloadError("download failed")
+
+    yt_dlp_module = ModuleType("yt_dlp")
+    yt_dlp_module.YoutubeDL = FakeYoutubeDL  # type: ignore[attr-defined]
+    utils_module = ModuleType("yt_dlp.utils")
+    utils_module.DownloadError = FakeDownloadError  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", yt_dlp_module)
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp.utils", utils_module)
+
+    with pytest.raises(NeteaseAccessError) as caught:
+        download_netease_track(
+            info.canonical_url,
+            tmp_path / "source",
+            cookie_browser="firefox",
+        )
+
+    message = str(caught.value)
+    assert "HTTP Error 403" in message
+    assert "https://cdn.example" not in message
+    assert "token=secret" not in message
