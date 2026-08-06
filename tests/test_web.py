@@ -651,6 +651,7 @@ def test_make_page_downloads_logged_in_netease_audio_for_calibration(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    music_u = "manual-session-secret"
     placeholder = tmp_path / "audio-song.wav"
     placeholder.write_bytes(b"audio")
     video = tmp_path / "silent-mv.webm"
@@ -673,6 +674,7 @@ def test_make_page_downloads_logged_in_netease_audio_for_calibration(
     def fake_download(_link, _output_dir, **kwargs):
         assert kwargs["cookie_browser"] == "chrome"
         assert kwargs["cookie_browser_profile"] == "Default"
+        assert kwargs["music_u"] == music_u
         return track
 
     monkeypatch.setattr("karaoke_forge.web.download_netease_track", fake_download)
@@ -695,6 +697,7 @@ def test_make_page_downloads_logged_in_netease_audio_for_calibration(
         auto_english_pronunciation=False,
         cookie_browser="chrome",
         cookie_browser_profile="Default",
+        music_u=music_u,
     )
 
     assert result.project is not None
@@ -703,6 +706,8 @@ def test_make_page_downloads_logged_in_netease_audio_for_calibration(
     assert result.rows[1][4] == ""
     assert "已忽略网页产生的空音频占位文件" in result.log
     assert "已使用网易云登录账号可播放的完整音频" in result.log
+    assert music_u not in result.log
+    assert music_u not in Path(result.project).read_text(encoding="utf-8")
 
 
 def test_make_page_keeps_line_timing_when_auto_refinement_is_unavailable(

@@ -5,6 +5,7 @@ import re
 import ssl
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from http.cookiejar import Cookie
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from urllib.request import Request, urlopen
@@ -133,6 +134,7 @@ class NeteaseAlignOptions:
     rights_confirmed: bool = False
     cookie_browser: str | None = None
     cookie_browser_profile: str | None = None
+    music_u: str | None = field(default=None, repr=False)
     timing_refinement: str = "auto"
     refine_word_timing: bool | None = None
 
@@ -182,7 +184,7 @@ def resolve_netease_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.2"},
+        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.3"},
         method="GET",
     )
     try:
@@ -197,7 +199,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
     request = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.2",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.3",
             "Referer": "https://music.163.com/",
         },
     )
@@ -334,6 +336,82 @@ def _cookie_browser_options(
     }
 
 
+def _normalize_music_u(value: str | None) -> str | None:
+    """Return a validated MUSIC_U value without retaining unrelated cookies."""
+
+    supplied = value or ""
+    if not supplied.strip():
+        return None
+    if len(supplied) > 16_384 or any(
+        ord(character) < 32 or ord(character) == 127 for character in supplied
+    ):
+        raise ValueError("网易云 MUSIC_U 格式无效：请只粘贴 Cookie 值，不要包含换行。")
+    raw = supplied.strip()
+
+    if raw.casefold().startswith("cookie:"):
+        raw = raw.partition(":")[2].strip()
+    match = re.search(r"(?:^|;)\s*MUSIC_U\s*=\s*([^;]+)", raw, re.IGNORECASE)
+    if match:
+        token = match.group(1).strip().strip('"')
+    elif ";" in raw or re.search(r"(?:^|\s)[A-Za-z0-9_]+\s*=", raw):
+        raise ValueError("粘贴的 Cookie 中没有找到 MUSIC_U；请复制 MUSIC_U 这一项的 Value。")
+    else:
+        token = raw.strip('"')
+
+    if (
+        not token
+        or len(token) > 4096
+        or ";" in token
+        or any(character.isspace() or ord(character) == 127 for character in token)
+    ):
+        raise ValueError("网易云 MUSIC_U 格式无效；请复制 MUSIC_U 这一项的完整 Value。")
+    return token
+
+
+def _set_netease_login_cookie(cookie_jar: object, music_u: str) -> None:
+    setter = getattr(cookie_jar, "set_cookie", None)
+    if not callable(setter):
+        raise NeteaseAccessError("下载器无法创建内存登录会话，请更新 yt-dlp 后重试。")
+    setter(
+        Cookie(
+            version=0,
+            name="MUSIC_U",
+            value=music_u,
+            port=None,
+            port_specified=False,
+            domain=".music.163.com",
+            domain_specified=True,
+            domain_initial_dot=True,
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={"HttpOnly": None},
+        )
+    )
+
+
+def _use_https_netease_api(downloader: object) -> None:
+    """Keep authenticated metadata and lyric requests off plain HTTP."""
+
+    getter = getattr(downloader, "get_info_extractor", None)
+    if not callable(getter):
+        raise NeteaseAccessError("下载器无法启用网易云 HTTPS 登录会话，请更新 yt-dlp 后重试。")
+    try:
+        extractor = getter("NetEaseMusic")
+        api_base = str(getattr(extractor, "_API_BASE", ""))
+        if api_base.startswith("http://"):
+            extractor._API_BASE = f"https://{api_base.removeprefix('http://')}"
+            api_base = str(getattr(extractor, "_API_BASE", ""))
+    except Exception as exc:
+        raise NeteaseAccessError("下载器无法启用网易云 HTTPS 登录会话，请更新 yt-dlp 后重试。") from exc
+    if not api_base.startswith("https://"):
+        raise NeteaseAccessError("下载器无法启用网易云 HTTPS 登录会话，请更新 yt-dlp 后重试。")
+
+
 def _has_netease_login_cookie(cookie_jar: object) -> bool:
     try:
         cookies = iter(cookie_jar)  # type: ignore[arg-type]
@@ -389,7 +467,10 @@ def _calibration_quality(info: dict[str, object]) -> str | None:
     return next((level for level in _CALIBRATION_QUALITY_LEVELS if level in available), None)
 
 
-def _safe_download_error(value: str) -> str:
+def _safe_download_error(value: str, *, secrets: tuple[str, ...] = ()) -> str:
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "[已隐藏的登录信息]")
     value = re.sub(r"https?://\S+", "[已隐藏的音频地址]", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:500]
@@ -398,7 +479,7 @@ def _safe_download_error(value: str) -> str:
 def _report_access(
     *,
     progress: Callable[[str], None] | None,
-    browser: str | None,
+    session_source: str | None,
     authenticated: bool,
     quality_level: str | None,
     access_tier: str,
@@ -406,9 +487,9 @@ def _report_access(
     if not progress:
         return
     if authenticated:
-        progress(f"已从 {browser} 检测到网易云登录会话（Cookie 仅在本机内存中使用）")
+        progress(f"已通过{session_source}检测到网易云登录会话（Cookie 仅在本机内存中使用）")
     else:
-        progress("未启用浏览器登录会话，将按匿名权限获取")
+        progress("未启用网易云登录会话，将按匿名权限获取")
 
     quality = _QUALITY_LABELS.get(quality_level or "", quality_level or "未知")
     if access_tier == "svip":
@@ -427,9 +508,10 @@ def download_netease_track(
     *,
     cookie_browser: str | None = None,
     cookie_browser_profile: str | None = None,
+    music_u: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> NeteaseTrack:
-    """Download audio available to an anonymous or user-authorized browser session."""
+    """Download audio available to an anonymous or user-authorized session."""
 
     try:
         from yt_dlp import YoutubeDL
@@ -442,8 +524,15 @@ def download_netease_track(
     public_info = fetch_public_netease_info(value)
     song_id = public_info.song_id
     canonical_url = public_info.canonical_url
-    browser_options = _cookie_browser_options(cookie_browser, cookie_browser_profile)
-    normalized_browser = (cookie_browser or "").strip().lower() or None
+    normalized_music_u = _normalize_music_u(music_u)
+    requested_browser = (cookie_browser or "").strip().lower() or None
+    normalized_browser = None if normalized_music_u else requested_browser
+    browser_options = _cookie_browser_options(normalized_browser, cookie_browser_profile)
+    session_source = (
+        "手动提供的 MUSIC_U"
+        if normalized_music_u
+        else f"{normalized_browser} 浏览器" if normalized_browser else None
+    )
     source_dir = Path(output_dir).resolve()
     source_dir.mkdir(parents=True, exist_ok=True)
     last_bucket = -1
@@ -464,7 +553,7 @@ def download_netease_track(
             bucket = percent // 10
             if bucket != last_bucket:
                 last_bucket = bucket
-                source_label = "账号可用音频" if normalized_browser else "公开音频"
+                source_label = "账号可用音频" if session_source else "公开音频"
                 progress(f"正在获取{source_label}：{percent}%")
 
     def report_access_before_download(
@@ -479,7 +568,7 @@ def download_netease_track(
         if quality_level:
             _report_access(
                 progress=progress,
-                browser=normalized_browser,
+                session_source=session_source,
                 authenticated=authenticated,
                 quality_level=quality_level,
                 access_tier=access_tier,
@@ -499,10 +588,16 @@ def download_netease_track(
 
         def warning(self, message: str) -> None:
             if progress:
-                progress(f"下载器提示：{message}")
+                detail = _safe_download_error(
+                    message,
+                    secrets=(normalized_music_u or "",),
+                )
+                progress(f"下载器提示：{detail or '未知提示'}")
 
         def error(self, message: str) -> None:
-            download_errors.append(message)
+            download_errors.append(
+                _safe_download_error(message, secrets=(normalized_music_u or "",))
+            )
 
     options = {
         "format": _CALIBRATION_FORMAT_SELECTOR,
@@ -523,17 +618,22 @@ def download_netease_track(
         progress("正在读取网易云单曲信息")
     try:
         with YoutubeDL(options) as downloader:
-            authenticated = (
-                _has_netease_login_cookie(downloader.cookiejar) if normalized_browser else False
-            )
-            if normalized_browser and not authenticated:
+            if session_source:
+                _use_https_netease_api(downloader)
+            if normalized_music_u:
+                _set_netease_login_cookie(downloader.cookiejar, normalized_music_u)
+            authenticated = _has_netease_login_cookie(downloader.cookiejar) if session_source else False
+            if session_source and not authenticated:
+                if normalized_music_u:
+                    raise NeteaseAccessError(
+                        "提供的网易云 MUSIC_U 无法建立登录会话；请重新登录网易云后复制最新值。"
+                    )
                 profile_hint = (
                     f"（配置：{cookie_browser_profile}）" if cookie_browser_profile else ""
                 )
                 raise NeteaseAccessError(
                     f"没有在 {normalized_browser}{profile_hint} 中找到有效的网易云登录会话。"
-                    "请先在该浏览器打开 music.163.com 并登录；若浏览器正在占用 Cookie，"
-                    "请关闭浏览器后重试。"
+                    "请先在该浏览器打开 music.163.com 并登录；也可以改用 MUSIC_U 手动登录方式。"
                 )
             info = downloader.extract_info(canonical_url, download=True)
             if not isinstance(info, dict):
@@ -543,7 +643,7 @@ def download_netease_track(
             if not access_reported:
                 _report_access(
                     progress=progress,
-                    browser=normalized_browser,
+                    session_source=session_source,
                     authenticated=authenticated,
                     quality_level=quality_level,
                     access_tier=access_tier,
@@ -573,13 +673,16 @@ def download_netease_track(
         ):
             raise NeteaseAccessError(
                 f"{normalized_browser} 正在占用登录数据库，暂时无法安全读取网易云会话。"
-                "请关闭该浏览器的全部窗口，并在任务管理器确认浏览器进程已退出后，"
-                "改用命令行运行；或者在 Firefox 登录网易云后选择 Firefox。"
+                "无需关闭或更换浏览器：请在网页的网易云区域粘贴 MUSIC_U 后重试；"
+                "也可以彻底退出浏览器后继续使用自动读取。"
             ) from exc
-        if normalized_browser:
-            detail = _safe_download_error(download_errors[-1] if download_errors else error_text)
+        if session_source:
+            detail = _safe_download_error(
+                download_errors[-1] if download_errors else error_text,
+                secrets=(normalized_music_u or "",),
+            )
             raise NeteaseAccessError(
-                "已读取浏览器登录会话并取得本曲音质权限，但实际音频下载失败。"
+                "已建立网易云登录会话并取得本曲音质权限，但实际音频下载失败。"
                 f"下载器返回：{detail or '未知错误'}。"
                 "这通常是临时网络、代理或网易云音频节点连接问题；请稍后重试。"
             ) from exc
@@ -588,9 +691,10 @@ def download_netease_track(
             "存在地区限制，或已经下架。请改用你合法拥有的本地音频文件。"
         ) from exc
     except Exception as exc:
-        if normalized_browser:
+        if session_source:
+            detail = _safe_download_error(str(exc), secrets=(normalized_music_u or "",))
             raise NeteaseAccessError(
-                f"无法从 {normalized_browser} 读取或使用网易云登录会话：{exc}"
+                f"无法读取或使用网易云登录会话：{detail or '未知错误'}"
             ) from exc
         raise
 
@@ -670,6 +774,7 @@ def align_netease_song(
             source_directory,
             cookie_browser=options.cookie_browser,
             cookie_browser_profile=options.cookie_browser_profile,
+            music_u=options.music_u,
             progress=progress,
         )
         if track.is_preview:
