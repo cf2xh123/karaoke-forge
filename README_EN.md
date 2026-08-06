@@ -1,7 +1,8 @@
 # Karaoke Forge
 
-> Version 0.12.3 lets Edge/Chrome stay open by accepting only NetEase's `MUSIC_U` value.
-> The session is scoped to NetEase, sent only over HTTPS, and never stored in projects or logs.
+> The current release is `0.12.4` (Alpha). It adds one-click NetEase login and
+> in-context subtitle previews, without closing everyday Edge, opening DevTools, or
+> rendering a full video just to inspect lyrics over the actual MV/cover scene.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -25,9 +26,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
-- When no local or MV audio is available, use a logged-in browser or paste only NetEase's
-  `MUSIC_U` while Edge/Chrome stays open; no second browser is required, and the app does
-  not bypass access restrictions or decrypt/convert NCM containers;
+- When no local or MV audio is available, open a dedicated Edge window for one-click
+  login on NetEase's official site; everyday Edge can stay open, with no DevTools or
+  Firefox required, and the app neither bypasses access restrictions nor converts NCM;
 - Prefer `exhigh`, `higher`, or `standard` NetEase audio for alignment and MV creation
   even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
   downloads while retaining authenticated song access;
@@ -41,10 +42,11 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with undo support;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
-- Preview subtitle fonts, colours, sizes, and layout in the web interface;
+- Preview the song's actual lyrics against a matching MV frame, or against the selected
+  cover-art scene when no MV is available; font, size, colour, and placement update immediately;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.12.3` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.4` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -80,6 +82,12 @@ interface covers complete video creation,
 timeline-only export, lyric/pronunciation editing, format conversion, and environment
 checks. Media is processed by the local service and is not automatically uploaded to
 the public internet.
+
+After media and lyrics are selected, the Make page automatically shows an in-context
+subtitle preview without rendering a full video. Timed lyrics use a matching MV frame;
+untimed lyrics remain a clearly labelled layout preview. Without an MV, the preview uses
+the current cover art, background theme, and record/spectrum layout, with animation
+indicated separately.
 
 The Make page includes the official [Vmoe karaoke search](https://karaoke.vmoe.info/).
 Vmoe requires its own reCAPTCHA for search and ASS downloads, so the user completes that
@@ -127,18 +135,27 @@ removes an unwanted character or space without changing the remaining token time
 Current-line looping, automatic next-line playback, and Space-bar pause/resume are
 available while timing lyrics by ear.
 
-The NetEase tab accepts single-song links. It uses anonymous public access by default,
-or can read an existing NetEase login from a local Chrome, Edge, Firefox, or Brave
-profile. In browser mode it detects the VIP/SVIP quality actually available for that
-track and downloads only the highest quality the account is already allowed to play.
-On Windows, an open Edge/Chrome window locks its Cookie database. The password-style
-`MUSIC_U` field lets the user copy only that NetEase value from DevTools; it takes
-priority over browser extraction, remains in memory, and is not written to projects,
-outputs, or logs.
+The NetEase tab accepts single-song links and uses anonymous public access by default.
+When authenticated audio is needed on Windows, click **One-click NetEase login**. The
+app opens the official NetEase site in a dedicated Edge window with a separate local
+profile; after the user completes the official login, Karaoke Forge
+automatically obtains the session required for the current job. This window never reads
+the everyday Edge profile or its locked Cookie database, so everyday Edge can remain
+open and users do not need DevTools, Firefox, or any manual Cookie lookup. The dedicated
+profile is retained locally, so the login can normally be reused after the first sign-in.
+Automatic extraction from an already-closed Chrome, Edge, Firefox, or Brave profile and
+manual `MUSIC_U` entry remain available under advanced settings as fallback methods.
+The captured session stays in server-side state for the current local web session and is
+not filled into a browser password field. A visible **Sign in again / switch account**
+action handles expired sessions; non-loopback server mode disables access to local
+accounts and browser data.
+Authenticated mode detects the VIP/SVIP quality actually available for the track and
+downloads only audio the account is already allowed to play.
 If NetEase returns only a short preview while the uploaded MV contains a complete audio
 track, the full workflow automatically uses the MV audio instead. Public translated LRC
 is placed at the top centre when available. Paired original lines use an upper-left and
-lower-right KTV layout, and the web style panel includes a live 16:9 subtitle preview.
+lower-right KTV layout. The same subtitle parameters drive both the in-context preview
+and the final KTV render.
 Japanese lines with kanji receive hiragana readings, while English words receive katakana
 readings by default. Use `--no-auto-english-pronunciation` to disable only automatic English
 katakana, or `--no-show-pronunciation` to hide all readings; generated readings can be
@@ -171,9 +188,13 @@ check those source timings.
 Each preset downloads its Whisper model on first use. `large-v3-turbo` and especially
 `large-v3` are substantially larger than `small`, so their first download and load can take
 some time; subsequent runs reuse the local cache.
-Cookies stay in local process memory and are never written to project outputs; the app
-does not accept passwords, elevate membership access, bypass regional/DRM restrictions,
-or decrypt NCM. A legally exported local MP3/FLAC/WAV/M4A remains supported.
+One-click login takes place only on NetEase's official site, and its login state is kept
+in a dedicated local Edge profile. Cookies obtained by Karaoke Forge are never written
+back into the web page or to projects, output directories, or logs; a manually supplied
+`MUSIC_U` remains in local
+process memory only. The app does not accept passwords, elevate membership access,
+bypass regional/DRM restrictions, or decrypt NCM. A legally exported local
+MP3/FLAC/WAV/M4A remains supported.
 
 When plain-lyric matching falls below the safety threshold, web calibration now keeps
 the formal lyrics and creates an editable recovery timeline instead of stopping. It
@@ -215,8 +236,12 @@ Run `karaoke-forge <command> --help` for all options. The Chinese [README](READM
 
 ```bash
 git pull --ff-only
-python -m pip install --upgrade -e ".[align]"
+python -m pip install --upgrade -e ".[web,align,netease,pronunciation]"
 karaoke-forge doctor
 ```
+
+On Windows, `启动网页版.bat` uses the existing `.venv` to install `.[web,netease]`
+automatically when an older installation is missing the one-click NetEase login
+components; the first-time setup does not need to be run again.
 
 Review [CHANGELOG.md](CHANGELOG.md) before upgrading. Code is available under the [MIT License](LICENSE); no rights to songs, lyrics, videos, fonts, or models are granted.
