@@ -522,7 +522,26 @@ def download_netease_track(
     except NeteaseAccessError:
         raise
     except DownloadError as exc:
-        if normalized_browser and "Could not copy Chrome cookie database" in str(exc):
+        error_text = str(exc)
+        normalized_error = error_text.casefold()
+        if (
+            normalized_browser
+            and "could not find" in normalized_error
+            and "cookies database" in normalized_error
+        ):
+            profile_hint = (
+                f"（配置：{cookie_browser_profile}）" if cookie_browser_profile else ""
+            )
+            raise NeteaseAccessError(
+                f"没有找到 {normalized_browser}{profile_hint} 的 Cookie 数据库。"
+                "请确认“账号权限”选择的是实际登录网易云的浏览器；"
+                "便携版或非标准 Chromium 浏览器需要在“浏览器配置”填写用户配置目录。"
+            ) from exc
+        if (
+            normalized_browser
+            and "could not copy" in normalized_error
+            and "cookie database" in normalized_error
+        ):
             raise NeteaseAccessError(
                 f"{normalized_browser} 正在占用登录数据库，暂时无法安全读取网易云会话。"
                 "请关闭该浏览器的全部窗口，并在任务管理器确认浏览器进程已退出后，"

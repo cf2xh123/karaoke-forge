@@ -22,6 +22,7 @@ from uuid import uuid4
 from .artwork import ArtworkError, download_public_cover
 from .ass import AssStyle
 from .editor import (
+    _table_rows,
     apply_editor_rows,
     apply_pronunciation_rows,
     apply_token_timing,
@@ -1951,6 +1952,17 @@ def _file_path(value: object | None) -> Path | None:
     return None
 
 
+def _is_empty_audio_placeholder(path: Path | None) -> bool:
+    """Detect the tiny placeholder occasionally emitted by Gradio's Audio input."""
+
+    if path is None or not path.is_file() or path.name.casefold() != "audio-song.wav":
+        return False
+    try:
+        return path.stat().st_size <= 16 and path.read_bytes().strip().lower() == b"audio"
+    except OSError:
+        return False
+
+
 def _file_paths(value: object | None) -> tuple[Path, ...]:
     if value is None:
         return ()
@@ -2468,6 +2480,8 @@ def prepare_make_editor_job(
     cover_waveform: bool = True,
     export_original: bool = True,
     export_instrumental: bool = False,
+    cookie_browser: str = "",
+    cookie_browser_profile: str = "",
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -2483,36 +2497,15 @@ def prepare_make_editor_job(
     job_dir: Path | None = None
     try:
         audio = _file_path(audio_file)
+        if _is_empty_audio_placeholder(audio):
+            report("已忽略网页产生的空音频占位文件，将重新选择可用音源")
+            audio = None
         video = _file_path(video_file)
         if video is not None and not video.is_file():
             video = None
         cover = _validated_cover(cover_file)
         fonts = _validated_fonts(font_files)
-        using_mv_audio = False
-        if audio is None or not audio.is_file():
-            has_video_audio = probe_media_has_audio(video) if video is not None else False
-            if has_video_audio is True:
-                audio = video
-                using_mv_audio = True
-            elif has_video_audio is False:
-                raise ValueError(
-                    "未上传独立歌曲音频，且 MV 不含可用音轨或没有上传 MV；请上传歌曲音频后再校准。"
-                )
-            else:
-                raise ValueError(
-                    "无法检测这个 MV 是否含音轨；请确认 FFmpeg/FFprobe 可用，或上传独立歌曲音频。"
-                )
-        if audio.suffix.lower() == ".ncm":
-            raise ValueError(
-                "不支持转换或解密 NCM 文件；请上传官方允许导出的 MP3、FLAC、WAV 或 M4A。"
-            )
-
         job_dir = _new_job_dir("rehearsal", output_root.strip() or None)
-        if using_mv_audio:
-            report("未上传独立音频，已直接使用 MV 内嵌完整音轨进行校准")
-        else:
-            report("已沿用制作页上传的音频和 MV，无需重复上传")
-
         netease_info = None
         qqmusic_info = None
         utaten_info = None
@@ -2523,11 +2516,52 @@ def prepare_make_editor_job(
             raise ValueError("选择“仅使用 UtaTen 官方注音”时，请同时填写 UtaTen 歌词页链接。")
         if sum(bool(value) for value in (link, qq_link, uta_link)) > 1:
             raise ValueError("网易云、QQ 音乐和 UtaTen 链接一次只能填写一个。")
+
+        if audio is not None and not audio.is_file():
+            audio = None
+        video_audio_state: bool | None = False if video is None else None
+        using_mv_audio = False
+        if audio is None and video is not None:
+            video_audio_state = probe_media_has_audio(video)
+            if video_audio_state is True:
+                audio = video
+                using_mv_audio = True
+
         if link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用网易云链接。")
-            netease_info = fetch_public_netease_info(link)
-            report("仅从网易云读取公开歌曲信息、歌词和翻译，不下载音频")
+            if audio is None:
+                track = download_netease_track(
+                    link,
+                    job_dir / ".source",
+                    cookie_browser=cookie_browser,
+                    cookie_browser_profile=cookie_browser_profile,
+                    progress=report,
+                )
+                netease_info = track
+                if track.is_preview:
+                    track.audio_path.unlink(missing_ok=True)
+                    raise ValueError(
+                        "网易云只返回了试听片段，不能用于完整校准；请在“账号权限”中选择"
+                        "已登录且有本曲播放权的浏览器，或上传完整歌曲音频。"
+                    )
+                audio = track.audio_path
+                if track.authenticated:
+                    report("未上传本地音频，已使用网易云登录账号可播放的完整音频进行校准")
+                else:
+                    report("未上传本地音频，已使用网易云公开可播放的完整音频进行校准")
+            else:
+                netease_info = fetch_public_netease_info(link)
+                if using_mv_audio:
+                    report(
+                        "已沿用制作页的 MV 内嵌完整音轨，无需重复上传；"
+                        "仅从网易云读取公开歌曲信息、歌词和翻译，不下载音频"
+                    )
+                else:
+                    report(
+                        "已沿用制作页上传的本地音频和 MV，无需重复上传；"
+                        "仅从网易云读取公开歌曲信息、歌词和翻译，不下载音频"
+                    )
         elif qq_link:
             if not rights_confirmed:
                 raise PermissionError("请勾选版权与使用权确认后再使用 QQ 音乐链接。")
@@ -2538,6 +2572,29 @@ def prepare_make_editor_job(
                 raise PermissionError("请勾选版权与使用权确认后再使用 UtaTen 歌词链接。")
             utaten_info = fetch_public_utaten_info(uta_link)
             report("已从 UtaTen 读取公开歌词和页面假名，不下载音频")
+
+        if audio is None:
+            if link:
+                raise ValueError(
+                    "网易云没有返回账号可完整播放的音频；请在“账号权限”选择已登录的浏览器，"
+                    "或上传完整歌曲音频。"
+                )
+            if video_audio_state is False:
+                raise ValueError(
+                    "未上传独立歌曲音频，且 MV 不含可用音轨或没有上传 MV；"
+                    "请上传歌曲音频后再校准。"
+                )
+            raise ValueError(
+                "无法检测这个 MV 是否含音轨；请确认 FFmpeg/FFprobe 可用，或上传独立歌曲音频。"
+            )
+        if audio.suffix.lower() == ".ncm":
+            raise ValueError(
+                "不支持转换或解密 NCM 文件；请上传官方允许导出的 MP3、FLAC、WAV 或 M4A。"
+            )
+        if using_mv_audio:
+            report("未上传独立音频，已直接使用 MV 内嵌完整音轨进行校准")
+        elif not link:
+            report("已沿用制作页上传的音频和 MV，无需重复上传")
 
         online_cover_url = (
             netease_info.cover_url
@@ -2876,6 +2933,9 @@ def run_make_job(
         if not export_original and not export_instrumental:
             raise ValueError("请至少选择导出原声版或无人声伴奏版中的一种。")
         audio = _file_path(audio_file)
+        if _is_empty_audio_placeholder(audio):
+            report("已忽略网页产生的空音频占位文件，将重新选择可用音源")
+            audio = None
         video = _file_path(video_file)
         if video is not None and not video.is_file():
             video = None
@@ -3717,19 +3777,53 @@ def _editor_document_with_pending_changes(
     return edited, snapshot
 
 
+def _editor_rows_for_delete(
+    payload: dict[str, Any],
+    line_table: object,
+    row_index: int,
+) -> list[list[object]]:
+    """Keep a cleared target row valid long enough for an explicit delete action."""
+
+    rows = _table_rows(line_table)
+    if row_index < 0 or row_index >= len(rows):
+        return rows
+
+    target = [*rows[row_index], None, None, None, None, None, None][:6]
+    if str(target[4] or "").strip():
+        return rows
+
+    try:
+        line_id = int(float(target[0])) if target[0] not in (None, "") else row_index + 1
+    except (TypeError, ValueError):
+        line_id = row_index + 1
+    source = document_from_payload(payload)
+    if line_id < 1 or line_id > len(source.lines):
+        return rows
+    source_text = source.lines[line_id - 1].text
+    if not source_text.strip():
+        return rows
+
+    while len(rows[row_index]) <= 4:
+        rows[row_index].append(None)
+    rows[row_index][4] = source_text
+    return rows
+
+
 def apply_editor_line_action(
     payload: dict[str, Any],
     line_table: object,
     line_number: int,
     action_request: str,
 ) -> tuple[object, ...]:
-    document = apply_editor_rows(document_from_payload(payload), line_table)
     try:
         request = json.loads(str(action_request or ""))
         row_index = int(request["row"])
         action = str(request["action"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("歌词行操作无效，请重新选择歌词行。") from exc
+    if action == "delete":
+        line_table = _editor_rows_for_delete(payload, line_table, row_index)
+    document = apply_editor_rows(document_from_payload(payload), line_table)
     if row_index < 0 or row_index >= len(document.lines):
         raise ValueError("选择的歌词行已经变化，请重新选择。")
 
@@ -4032,6 +4126,11 @@ def preview_editor_audio_line(
     audio = _file_path(audio_file)
     if audio is None or not audio.is_file():
         raise ValueError("请先上传用于校准的歌曲音频。")
+    if _is_empty_audio_placeholder(audio):
+        raise ValueError(
+            "当前校准音频是网页产生的空占位文件，并不是真实歌曲；"
+            "请重新上传音频，或在制作页选择已登录的网易云账号后重新生成校准工程。"
+        )
     document = apply_editor_rows(document_from_payload(payload), line_table)
     index = int(line_number) - 1
     if index < 0 or index >= len(document.lines):
@@ -4076,7 +4175,13 @@ def preview_editor_audio_line(
                     capture_output=True,
                 )
                 if completed.returncode != 0:
-                    raise RuntimeError(f"当前句试听片段生成失败：{completed.stderr.strip()}")
+                    details = completed.stderr.strip()
+                    if "Invalid data found" in details or "Error opening input" in details:
+                        raise ValueError(
+                            "当前校准音频不是可播放的音频文件；请重新上传，"
+                            "或用已登录的网易云账号重新生成校准工程。"
+                        )
+                    raise RuntimeError(f"当前句试听片段生成失败：{details}")
                 temporary.replace(target)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -4098,7 +4203,7 @@ def prefetch_editor_audio_line(
         if target_line < 1 or target_line > len(document.lines):
             return
         audio = _file_path(audio_file)
-        if audio is None or not audio.is_file():
+        if audio is None or not audio.is_file() or _is_empty_audio_placeholder(audio):
             return
         line = document.lines[target_line - 1]
         if line.start is None or line.end is None:
@@ -4565,7 +4670,7 @@ def create_web_app() -> object:
                             )
                             with gr.Row():
                                 make_cookie_browser = gr.Dropdown(
-                                    label="账号权限",
+                                    label="网易云音频权限（VIP 歌曲请选择已登录浏览器）",
                                     choices=[
                                         ("匿名（仅公开音频）", ""),
                                         ("Chrome 已登录账号", "chrome"),
@@ -4574,10 +4679,16 @@ def create_web_app() -> object:
                                         ("Brave 已登录账号", "brave"),
                                     ],
                                     value="",
+                                    info=(
+                                        "生成校准工程和成片都会使用此选择；"
+                                        "仅在浏览器登录但保持“匿名”不会使用会员权限。"
+                                    ),
                                 )
                                 make_cookie_profile = gr.Textbox(
                                     label="浏览器配置（可选）",
-                                    placeholder="留空使用默认配置，如 Profile 1",
+                                    placeholder=(
+                                        "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
+                                    ),
                                 )
                             make_use_netease_lyrics = gr.Checkbox(
                                 label="没有上传歌词时，使用网易云页面公开歌词",
@@ -4951,7 +5062,7 @@ def create_web_app() -> object:
                     )
                     with gr.Row():
                         netease_cookie_browser = gr.Dropdown(
-                            label="账号权限",
+                            label="网易云音频权限（VIP 歌曲请选择已登录浏览器）",
                             choices=[
                                 ("匿名（仅公开音频）", ""),
                                 ("Chrome 已登录账号", "chrome"),
@@ -4960,10 +5071,16 @@ def create_web_app() -> object:
                                 ("Brave 已登录账号", "brave"),
                             ],
                             value="",
+                            info=(
+                                "仅在浏览器登录但保持“匿名”不会使用会员权限；"
+                                "请选择实际登录网易云的浏览器。"
+                            ),
                         )
                         netease_cookie_profile = gr.Textbox(
                             label="浏览器配置（可选）",
-                            placeholder="留空使用默认配置，如 Profile 1",
+                            placeholder=(
+                                "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
+                            ),
                         )
                     netease_rights = gr.Checkbox(
                         label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
@@ -5479,6 +5596,8 @@ def create_web_app() -> object:
             netease_link: str,
             use_netease_lyrics: bool,
             rights_confirmed: bool,
+            cookie_browser: str,
+            cookie_browser_profile: str,
             timing_refinement: str,
             output_root: str,
             qqmusic_link: str,
@@ -5529,6 +5648,8 @@ def create_web_app() -> object:
                 cover_waveform,
                 export_original,
                 export_instrumental,
+                cookie_browser,
+                cookie_browser_profile,
                 progress_callback=update,
             )
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
@@ -5575,6 +5696,8 @@ def create_web_app() -> object:
                 make_netease_link,
                 make_use_netease_lyrics,
                 make_rights,
+                make_cookie_browser,
+                make_cookie_profile,
                 make_timing_refinement,
                 make_output_root,
                 make_qqmusic_link,
@@ -6480,6 +6603,17 @@ def create_web_app() -> object:
             pronunciation_table: object,
             action_request: str,
         ) -> tuple[object, ...]:
+            try:
+                request = json.loads(str(action_request or ""))
+                if str(request.get("action")) == "delete":
+                    table = _editor_rows_for_delete(
+                        payload,
+                        table,
+                        int(request["row"]),
+                    )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                # The line-action handler below owns the user-facing validation.
+                pass
             document, _snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
