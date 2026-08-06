@@ -47,6 +47,8 @@ _QUALITY_LEVELS = (
 )
 _VIP_LEVELS = {"lossless", "hires", "jyeffect"}
 _SVIP_LEVELS = {"jymaster", "sky"}
+_CALIBRATION_QUALITY_LEVELS = ("exhigh", "higher", "standard")
+_CALIBRATION_FORMAT_SELECTOR = "/".join(_CALIBRATION_QUALITY_LEVELS)
 _QUALITY_LABELS = {
     "standard": "标准",
     "higher": "较高",
@@ -180,7 +182,7 @@ def resolve_netease_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.0"},
+        headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.2"},
         method="GET",
     )
     try:
@@ -195,7 +197,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
     request = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.0",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.12.2",
             "Referer": "https://music.163.com/",
         },
     )
@@ -354,7 +356,7 @@ def _has_netease_login_cookie(cookie_jar: object) -> bool:
     return False
 
 
-def _quality_access(info: dict[str, object]) -> tuple[str | None, str]:
+def _available_quality_levels(info: dict[str, object]) -> set[str]:
     available: set[str] = set()
     formats = info.get("formats")
     if isinstance(formats, list):
@@ -368,12 +370,29 @@ def _quality_access(info: dict[str, object]) -> tuple[str | None, str]:
             if isinstance(item, dict) and isinstance(item.get("format_id"), str):
                 available.add(item["format_id"])
 
+    return available
+
+
+def _quality_access(info: dict[str, object]) -> tuple[str | None, str]:
+    available = _available_quality_levels(info)
+
     highest = next((level for level in reversed(_QUALITY_LEVELS) if level in available), None)
     if highest in _SVIP_LEVELS:
         return highest, "svip"
     if highest in _VIP_LEVELS:
         return highest, "vip"
     return highest, "free"
+
+
+def _calibration_quality(info: dict[str, object]) -> str | None:
+    available = _available_quality_levels(info)
+    return next((level for level in _CALIBRATION_QUALITY_LEVELS if level in available), None)
+
+
+def _safe_download_error(value: str) -> str:
+    value = re.sub(r"https?://\S+", "[已隐藏的音频地址]", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:500]
 
 
 def _report_access(
@@ -432,6 +451,7 @@ def download_netease_track(
     quality_level: str | None = None
     access_tier = "free"
     access_reported = False
+    download_errors: list[str] = []
 
     def hook(data: dict[str, object]) -> None:
         nonlocal last_bucket
@@ -464,6 +484,13 @@ def download_netease_track(
                 quality_level=quality_level,
                 access_tier=access_tier,
             )
+            calibration_quality = _calibration_quality(info)
+            if progress and calibration_quality and calibration_quality != quality_level:
+                progress(
+                    "为提高校准和 MV 制作的兼容性与下载稳定性，将使用"
+                    f"{_QUALITY_LABELS.get(calibration_quality, calibration_quality)}音质；"
+                    f"无需下载体积更大的{_QUALITY_LABELS.get(quality_level, quality_level)}文件"
+                )
             access_reported = True
 
     class QuietLogger:
@@ -474,17 +501,19 @@ def download_netease_track(
             if progress:
                 progress(f"下载器提示：{message}")
 
-        def error(self, _message: str) -> None:
-            return
+        def error(self, message: str) -> None:
+            download_errors.append(message)
 
     options = {
-        "format": "bestaudio/best",
+        "format": _CALIBRATION_FORMAT_SELECTOR,
         "outtmpl": str(source_dir / "audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "usenetrc": False,
         "cachedir": False,
+        "retries": 5,
+        "socket_timeout": 45,
         "progress_hooks": [hook],
         "match_filter": report_access_before_download,
         "logger": QuietLogger(),
@@ -548,9 +577,11 @@ def download_netease_track(
                 "改用命令行运行；或者在 Firefox 登录网易云后选择 Firefox。"
             ) from exc
         if normalized_browser:
+            detail = _safe_download_error(download_errors[-1] if download_errors else error_text)
             raise NeteaseAccessError(
-                "已读取浏览器登录会话，但网易云没有向当前账号返回这首歌的可用音频。"
-                "请确认会员仍有效、账号能在官方网页播放该曲，并检查地区或版权限制。"
+                "已读取浏览器登录会话并取得本曲音质权限，但实际音频下载失败。"
+                f"下载器返回：{detail or '未知错误'}。"
+                "这通常是临时网络、代理或网易云音频节点连接问题；请稍后重试。"
             ) from exc
         raise NeteaseAccessError(
             "无法从匿名公开页面获取这首歌的音频。它可能需要会员或登录、"

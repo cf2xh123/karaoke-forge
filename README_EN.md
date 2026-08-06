@@ -1,8 +1,8 @@
 # Karaoke Forge
 
-> Version 0.12.1 preserves timed blank interludes, fixes explicit deletion after a
-> lyric is cleared, rejects empty browser audio placeholders, and can use audio that
-> the selected logged-in NetEase browser session is authorised to play.
+> Version 0.12.2 fixes authenticated NetEase downloads that exposed SVIP formats but
+> failed while fetching oversized master audio. Calibration and MV creation now prefer
+> compatible standard streams, retry transient failures, and retain a safe error summary.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -29,6 +29,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - When no local or MV audio is available, explicitly select a logged-in Chrome, Edge,
   Firefox, or Brave profile to download a complete NetEase stream the account can play;
   the app does not bypass access restrictions or decrypt/convert NCM containers;
+- Prefer `exhigh`, `higher`, or `standard` NetEase audio for alignment and MV creation
+  even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
+  downloads while retaining authenticated song access;
 - Render translation at the top and paired original lyrics in a split KTV layout;
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
@@ -42,7 +45,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.12.1` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.2` alpha. Check the generated timeline before a final render.
 
 ## Install
 
