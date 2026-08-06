@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from karaoke_forge.editor import (
     apply_pronunciation_rows,
     document_to_editor_rows,
@@ -275,6 +277,9 @@ def test_web_editor_right_click_actions_can_hide_delete_and_undo(
     )
     assert len(insert_undone[1]) == 3
 
+    # Clearing the text is a common precursor to using the explicit delete
+    # button. The delete action must not be blocked by the empty-text guard.
+    insert_undone[1][1][4] = ""
     deleted = apply_editor_line_action(
         insert_undone[0],
         insert_undone[1],
@@ -498,6 +503,29 @@ def test_web_editor_previews_selected_line_audio(
     assert commands[0][commands[0].index("-t") + 1] == "1.980"
 
 
+def test_web_editor_rejects_an_empty_audio_placeholder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio = tmp_path / "audio-song.wav"
+    audio.write_bytes(b"audio")
+    document = parse_yrc("[1000,1000](1000,1000,0)Hello\n")
+    monkeypatch.setattr(
+        "karaoke_forge.web.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("FFmpeg must not receive an empty browser placeholder")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="空占位文件"):
+        preview_editor_audio_line(
+            str(audio),
+            document.to_dict(),
+            document_to_editor_rows(document),
+            1,
+        )
+
+
 def test_web_editor_handoff_populates_make_inputs(
     tmp_path: Path,
     monkeypatch,
@@ -617,6 +645,64 @@ def test_make_page_prepares_editor_without_reuploading_inputs(
     assert "无需重复上传" in result.log
     assert "不下载音频" in result.log
     assert "可校准 KTV 工程已生成" in result.status
+
+
+def test_make_page_downloads_logged_in_netease_audio_for_calibration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    placeholder = tmp_path / "audio-song.wav"
+    placeholder.write_bytes(b"audio")
+    video = tmp_path / "silent-mv.webm"
+    video.write_bytes(b"video without audio")
+    downloaded = tmp_path / "account-track.m4a"
+    downloaded.write_bytes(b"downloaded account audio")
+    track = NeteaseTrack(
+        song_id="3318995013",
+        title="h2o.wav",
+        artists=("CVLTE", "TSS"),
+        canonical_url="https://music.163.com/song?id=3318995013",
+        audio_path=downloaded,
+        page_lyrics="[00:01.00]First\n[00:03.00]\n[00:05.00]Third\n",
+        authenticated=True,
+        quality_level="lossless",
+        access_tier="vip",
+    )
+    monkeypatch.setattr("karaoke_forge.web.probe_media_has_audio", lambda _path: False)
+
+    def fake_download(_link, _output_dir, **kwargs):
+        assert kwargs["cookie_browser"] == "chrome"
+        assert kwargs["cookie_browser_profile"] == "Default"
+        return track
+
+    monkeypatch.setattr("karaoke_forge.web.download_netease_track", fake_download)
+
+    result = prepare_make_editor_job(
+        str(placeholder),
+        str(video),
+        None,
+        "",
+        "vip-calibration",
+        "ja",
+        "small",
+        "auto",
+        False,
+        netease_link=track.canonical_url,
+        use_netease_lyrics=True,
+        rights_confirmed=True,
+        timing_refinement="off",
+        output_root=str(tmp_path / "outputs"),
+        auto_english_pronunciation=False,
+        cookie_browser="chrome",
+        cookie_browser_profile="Default",
+    )
+
+    assert result.project is not None
+    assert result.audio == str(downloaded)
+    assert len(result.rows) == 3
+    assert result.rows[1][4] == ""
+    assert "已忽略网页产生的空音频占位文件" in result.log
+    assert "已使用网易云登录账号可播放的完整音频" in result.log
 
 
 def test_make_page_keeps_line_timing_when_auto_refinement_is_unavailable(

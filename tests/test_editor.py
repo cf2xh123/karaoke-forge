@@ -49,6 +49,26 @@ def test_editor_hides_and_deletes_complete_lyric_rows() -> None:
     assert '"hidden": true' in write_json(restored)
 
 
+def test_editor_preserves_a_source_timed_blank_interlude() -> None:
+    document = parse_lrc("[00:01.00]First\n[00:03.00]\n[00:05.00]Third\n")
+
+    edited = apply_editor_rows(document, document_to_editor_rows(document))
+
+    assert [line.text for line in edited.lines] == ["First", "", "Third"]
+    assert edited.lines[1].start == document.lines[1].start
+    assert edited.lines[1].end == document.lines[1].end
+    assert edited.lines[1].tokens == []
+
+
+def test_editor_rejects_a_cleared_nonempty_line_until_it_is_deleted() -> None:
+    document = parse_lrc("[00:01.00]First\n[00:03.00]Second\n")
+    rows = document_to_editor_rows(document)
+    rows[1][4] = ""
+
+    with pytest.raises(ValueError, match="🗑 删除"):
+        apply_editor_rows(document, rows)
+
+
 def test_token_delete_preserves_an_untouched_source_overlap() -> None:
     document = parse_yrc(
         "[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n"

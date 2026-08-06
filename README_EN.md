@@ -1,7 +1,8 @@
 # Karaoke Forge
 
-> Version 0.12.0 preserves real pauses in ASS karaoke sweeps and corrects gradual
-> line-timeline drift with confidence-filtered audio anchors.
+> Version 0.12.1 preserves timed blank interludes, fixes explicit deletion after a
+> lyric is cleared, rejects empty browser audio placeholders, and can use audio that
+> the selected logged-in NetEase browser session is authorised to play.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -25,6 +26,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
+- When no local or MV audio is available, explicitly select a logged-in Chrome, Edge,
+  Firefox, or Brave profile to download a complete NetEase stream the account can play;
+  the app does not bypass access restrictions or decrypt/convert NCM containers;
 - Render translation at the top and paired original lyrics in a split KTV layout;
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
@@ -33,11 +37,12 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   automatically on the next web launch;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
+- Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with undo support;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview subtitle fonts, colours, sizes, and layout in the web interface;
 - Optionally separate vocals with Demucs before recognition.
 
-This is a usable `0.12.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.12.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 

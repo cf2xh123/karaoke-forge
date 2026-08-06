@@ -127,8 +127,12 @@ def apply_editor_rows(
 
         source = source_by_id.get(line_id)
         text = str(padded[4] or "").strip()
-        if not text:
-            raise ValueError(f"第 {position} 行原文不能为空；如需移除请选择“删除”。")
+        source_is_blank = source is not None and not source.text.strip()
+        if not text and not source_is_blank:
+            raise ValueError(
+                f"第 {position} 行原文已清空；请选中该行并点击“🗑 删除”，"
+                "或撤销文字修改。"
+            )
         translation = str(padded[5] or "").strip() or None
         start = _optional_float(padded[2])
         end = _optional_float(padded[3])
@@ -139,7 +143,12 @@ def apply_editor_rows(
 
         text_changed = source is None or source.text != text
         if start is not None and end is not None:
-            if (
+            if source_is_blank and not text:
+                # Timed blank lines are intentional interludes in several public
+                # lyric formats.  Keep the line and its timing without inventing
+                # word timing for text that does not exist.
+                tokens = []
+            elif (
                 source is not None
                 and not text_changed
                 and source.tokens

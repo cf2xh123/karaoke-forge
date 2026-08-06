@@ -361,3 +361,48 @@ def test_browser_session_requires_netease_login_cookie(
             tmp_path / "source",
             cookie_browser="chrome",
         )
+
+
+def test_browser_session_reports_a_missing_cookie_database(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="VIP Song",
+        artists=(),
+        canonical_url="https://music.163.com/song?id=42",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.netease.fetch_public_netease_info",
+        lambda _link: info,
+    )
+
+    class FakeDownloadError(Exception):
+        pass
+
+    class FakeYoutubeDL:
+        def __init__(self, _options: dict[str, object]) -> None:
+            return None
+
+        def __enter__(self):
+            raise FakeDownloadError(
+                'ERROR: could not find chrome cookies database in "C:/missing/User Data"'
+            )
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    yt_dlp_module = ModuleType("yt_dlp")
+    yt_dlp_module.YoutubeDL = FakeYoutubeDL  # type: ignore[attr-defined]
+    utils_module = ModuleType("yt_dlp.utils")
+    utils_module.DownloadError = FakeDownloadError  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", yt_dlp_module)
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp.utils", utils_module)
+
+    with pytest.raises(NeteaseAccessError, match="没有找到 chrome.*Cookie 数据库"):
+        download_netease_track(
+            info.canonical_url,
+            tmp_path / "source",
+            cookie_browser="chrome",
+        )
