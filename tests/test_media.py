@@ -9,6 +9,7 @@ import pytest
 from karaoke_forge.media import (
     MediaError,
     create_spinning_cover_video,
+    extract_video_frame,
     match_audio_envelopes,
     probe_media_has_audio,
     render_karaoke_video,
@@ -190,6 +191,67 @@ def test_spinning_cover_supports_audio_frequency_stage(tmp_path, monkeypatch) ->
     assert "showfreqs=" in graph
     assert command[command.index("-i") + 1] == str(cover)
     assert str(audio) in command
+
+
+def test_spinning_cover_can_seek_audio_for_a_short_preview(tmp_path, monkeypatch) -> None:
+    cover = tmp_path / "cover.jpg"
+    audio = tmp_path / "song.wav"
+    output = tmp_path / "preview.mp4"
+    cover.write_bytes(b"image")
+    audio.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    create_spinning_cover_video(
+        cover,
+        audio,
+        output,
+        duration=1.25,
+        audio_start=37.5,
+    )
+
+    command = captured["command"]
+    audio_index = command.index(str(audio))
+    assert command[audio_index - 3 : audio_index] == ["-ss", "37.500", "-i"]
+    assert command[command.index("-t") + 1] == "1.250"
+
+
+def test_extract_video_frame_builds_fast_single_frame_command(tmp_path, monkeypatch) -> None:
+    video = tmp_path / "mv.mp4"
+    output = tmp_path / "frame.jpg"
+    video.write_bytes(b"video")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"jpeg")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    result = extract_video_frame(
+        video,
+        output,
+        timestamp=42.25,
+        resolution=(960, 540),
+    )
+
+    command = captured["command"]
+    assert result == output
+    assert command[command.index("-ss") + 1] == "42.250"
+    assert command[command.index("-map") + 1] == "0:V:0"
+    assert command[command.index("-frames:v") + 1] == "1"
+    graph = command[command.index("-vf") + 1]
+    assert "scale=960:540" in graph
+    assert "pad=960:540" in graph
 
 
 @pytest.mark.parametrize("style", ["turntable", "cdplayer"])

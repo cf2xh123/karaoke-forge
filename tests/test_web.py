@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,10 +22,13 @@ from karaoke_forge.web import (
     _editor_clip_target,
     _editor_document_with_pending_changes,
     _file_path,
+    _is_loopback_host,
     _prepare_lyrics,
     _record_web_error,
     _safe_stem,
+    _select_subtitle_preview_sample,
     apply_editor_line_action,
+    create_web_app,
     environment_markdown,
     export_editor_project,
     exported_project_for_make,
@@ -31,6 +36,7 @@ from karaoke_forge.web import (
     handoff_make_readiness,
     load_editor_project,
     prepare_make_editor_job,
+    prepare_subtitle_material_preview,
     preview_editor_audio_line,
     run_align_job,
     run_convert_job,
@@ -39,6 +45,130 @@ from karaoke_forge.web import (
     subtitle_preview_html,
     undo_editor_line_action,
 )
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "[::1]", "localhost"])
+def test_managed_browser_login_accepts_only_loopback_hosts(host: str) -> None:
+    assert _is_loopback_host(host)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.20", "karaoke.local", ""])
+def test_managed_browser_login_rejects_remote_hosts(host: str) -> None:
+    assert not _is_loopback_host(host)
+
+
+def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -> None:
+    secret = "server-only-session-secret"
+    monkeypatch.setattr(
+        "karaoke_forge.web.capture_netease_music_u",
+        lambda: secret,
+    )
+    app = create_web_app(managed_netease_login=True)
+    login_callbacks = [
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "capture_netease_login_wrapper"
+    ]
+
+    assert login_callbacks
+    callback = login_callbacks[0]
+    assert type(callback.outputs[0]).__name__ == "State"
+    assert [type(output).__name__ for output in callback.outputs[1:3]] == [
+        "Textbox",
+        "Textbox",
+    ]
+
+    result = callback.fn()
+
+    assert result[0] == secret
+    assert result[1:3] == ("", "")
+    assert secret not in repr(result[1:])
+    client_response = asyncio.run(app.postprocess_data(callback, list(result), None))
+    assert client_response[0] is None
+    assert secret not in repr(client_response)
+
+    remote_result = callback.fn(SimpleNamespace(client=SimpleNamespace(host="192.168.1.20")))
+    assert secret not in repr(remote_result)
+    assert "远程监听模式" in remote_result[3]
+
+    protected_jobs = {
+        "make_wrapper",
+        "prepare_make_editor_wrapper",
+        "netease_wrapper",
+        "make_after_editor_handoff",
+    }
+    for block_function in app.fns.values():
+        if getattr(block_function.fn, "__name__", "") not in protected_jobs:
+            continue
+        assert any(type(component).__name__ == "State" for component in block_function.inputs)
+        assert not any(
+            str(getattr(component, "label", "")).startswith("手动 MUSIC_U")
+            for component in block_function.inputs
+        )
+    lyrics = tmp_path / "restored-project.json"
+    lyrics.write_text(
+        json.dumps(
+            LyricsDocument(lines=[LyricLine(text="Restored lyric", start=0.0, end=2.0)]).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    restored_files = {
+        "\N{CIRCLED DIGIT ONE}": tmp_path / "restored.wav",
+        "\N{CIRCLED DIGIT TWO}": tmp_path / "restored.mp4",
+        "\N{CIRCLED DIGIT THREE}": lyrics,
+        "\u6ca1\u6709 MV": tmp_path / "restored.jpg",
+    }
+    for marker, path in restored_files.items():
+        if marker != "\N{CIRCLED DIGIT THREE}":
+            path.write_bytes(b"restored")
+    workspace = SimpleNamespace(
+        lyrics_project=lyrics,
+        audio=restored_files["\N{CIRCLED DIGIT ONE}"],
+        video=restored_files["\N{CIRCLED DIGIT TWO}"],
+        cover=restored_files["\u6ca1\u6709 MV"],
+        font_files=(),
+        settings={},
+        name="Restored project",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.load_recent_workspace",
+        lambda _root: workspace,
+    )
+    restore_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "restore_recent_workspace"
+    )
+    restored = restore_callback.fn()
+
+    assert len(restore_callback.outputs) == len(restored) == 31
+    for marker, expected in restored_files.items():
+        index = next(
+            index
+            for index, output in enumerate(restore_callback.outputs)
+            if marker in str(getattr(output, "label", ""))
+        )
+        assert restored[index] == str(expected)
+
+    restore_lyrics_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "restore_make_lyrics_input"
+    )
+    assert restore_lyrics_callback.fn(str(lyrics)) == str(lyrics)
+
+    monkeypatch.setattr("karaoke_forge.web.load_recent_workspace", lambda _root: None)
+    assert len(restore_callback.fn()) == 31
+
+
+def test_environment_help_prefers_one_click_dedicated_edge_login() -> None:
+    source = inspect.getsource(create_web_app)
+    help_text = source.split("### 第一次使用", 1)[1].split('"""', 1)[0]
+
+    assert "一键登录" in help_text
+    assert "专用 Edge" in help_text
+    assert "可自动读取已退出的登录浏览器" not in help_text
+    assert "保持开启时可粘贴 MUSIC_U" not in help_text
 
 
 def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
@@ -162,6 +292,7 @@ def test_web_align_job_skips_recognition_for_timed_lyrics(
 def test_environment_report_mentions_local_processing() -> None:
     report = environment_markdown()
     assert "FFmpeg" in report
+    assert "网易云一键登录组件" in report
     assert "素材不会自动上传到公网" in report
 
 
@@ -889,9 +1020,7 @@ def test_make_page_prepares_editor_with_audio_and_cover_but_no_mv(tmp_path: Path
     )
 
     assert result.project is not None
-    workspace = load_workspace_project(
-        Path(result.project).parent / "karaoke-forge-project.json"
-    )
+    workspace = load_workspace_project(Path(result.project).parent / "karaoke-forge-project.json")
     assert workspace.settings["cover_background"] == "ocean"
     assert workspace.settings["alignment_language"] == "自动识别"
     assert workspace.settings["alignment_model"] == "small"
@@ -1085,6 +1214,181 @@ def test_subtitle_preview_reflects_translation_pronunciation_and_style(
     assert 'data-kf-layout="ktv-split"' in preview
     assert "KTV 双行布局" in preview
     assert "サンプル" in preview
+
+
+def test_subtitle_preview_sample_matches_ass_rows_and_token_progress() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="Before", start=0.0, end=2.0),
+            LyricLine(
+                text="holdme",
+                start=2.0,
+                end=6.0,
+                translation="抱紧我",
+                tokens=[
+                    KaraokeToken(text="hold", start=2.0, end=3.0),
+                    KaraokeToken(text="me", start=5.0, end=6.0),
+                ],
+            ),
+            LyricLine(text="Next line", start=6.0, end=8.0),
+            LyricLine(text="Later", start=8.0, end=10.0),
+        ]
+    )
+
+    sample = _select_subtitle_preview_sample(document)
+
+    assert sample.text == "Next line\nholdme"
+    assert sample.translation == "抱紧我"
+    assert sample.timestamp == pytest.approx(3.6)
+    assert sample.highlight_progress == pytest.approx(4 / 6)
+    assert sample.active_row == 1
+    assert "逐字" in sample.description
+
+
+def test_subtitle_preview_embeds_material_frame_and_preserves_row_parity() -> None:
+    preview = subtitle_preview_html(
+        "Microsoft YaHei",
+        64,
+        "#FFFFFF",
+        "#FFD54A",
+        80,
+        True,
+        36,
+        "#EAF4FF",
+        False,
+        26,
+        "#FFFFFF",
+        "Upper line\nLower line",
+        "",
+        background_data_url="data:image/jpeg;base64,anBlZw==",
+        preview_badge="MV <01:20>",
+        material_mode=True,
+        highlight_progress=0.5,
+        active_row=0,
+    )
+
+    assert 'class="kf-preview-background"' in preview
+    assert "data:image/jpeg;base64,anBlZw==" in preview
+    assert 'data-kf-material="true"' in preview
+    assert "MV &lt;01:20&gt;" in preview
+    assert "让歌声与画面在这里相遇" not in preview
+    assert '<span style="color:#FFD54A;">Upper</span>' in preview
+    assert '<span style="color:#FFD54A;">Lower</span>' not in preview
+
+
+def test_material_preview_prefers_mv_frame_and_real_lyrics(tmp_path, monkeypatch) -> None:
+    video = tmp_path / "mv.mp4"
+    lyrics = tmp_path / "lyrics.json"
+    frame = tmp_path / "frame.jpg"
+    video.write_bytes(b"video")
+    frame.write_bytes(b"jpeg")
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="First", start=0.0, end=2.0),
+            LyricLine(text="Current", start=2.0, end=4.0, translation="现在"),
+            LyricLine(text="Next", start=4.0, end=6.0),
+        ]
+    )
+    lyrics.write_text(json.dumps(document.to_dict(), ensure_ascii=False), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_mv(source, timestamp, offset):
+        captured.update(source=source, timestamp=timestamp, offset=offset)
+        return frame, float(timestamp) + float(offset)
+
+    monkeypatch.setattr("karaoke_forge.web._cached_video_preview_frame", fake_mv)
+    monkeypatch.setattr(
+        "karaoke_forge.web._cached_cover_preview_frame",
+        lambda *_args, **_kwargs: pytest.fail("MV preview must win over cover preview"),
+    )
+
+    result = prepare_subtitle_material_preview(
+        None,
+        str(video),
+        None,
+        str(lyrics),
+        "",
+        1.25,
+        False,
+        "adaptive",
+        "turntable",
+        True,
+    )
+
+    assert captured["source"] == video
+    assert captured["offset"] == 1.25
+    assert "Current" in result[0]
+    assert result[1] == "现在"
+    assert result[2].startswith("data:image/jpeg;base64,")
+    assert "MV 实景" in result[3]
+    assert result[4] is True
+    assert "对应歌词时刻" in result[7]
+
+
+def test_material_preview_reuses_selected_no_mv_scene(tmp_path, monkeypatch) -> None:
+    audio = tmp_path / "song.wav"
+    cover = tmp_path / "cover.jpg"
+    frame = tmp_path / "frame.jpg"
+    audio.write_bytes(b"audio")
+    cover.write_bytes(b"image")
+    frame.write_bytes(b"jpeg")
+    captured: dict[str, object] = {}
+
+    def fake_cover(source_cover, source_audio, timestamp, theme, style, waveform):
+        captured.update(
+            cover=source_cover,
+            audio=source_audio,
+            timestamp=timestamp,
+            theme=theme,
+            style=style,
+            waveform=waveform,
+        )
+        return frame, 12.0
+
+    monkeypatch.setattr("karaoke_forge.web._cached_cover_preview_frame", fake_cover)
+
+    result = prepare_subtitle_material_preview(
+        str(audio),
+        None,
+        str(cover),
+        None,
+        "First line\nSecond line\nThird line",
+        0.0,
+        False,
+        "ocean",
+        "spectrum",
+        False,
+    )
+
+    assert captured["cover"] == cover
+    assert captured["audio"] == audio
+    assert captured["theme"] == "ocean"
+    assert captured["style"] == "spectrum"
+    assert captured["waveform"] is False
+    assert result[2].startswith("data:image/jpeg;base64,")
+    assert "无 MV 成片样式" in result[3]
+    assert "当前无 MV 主题" in result[7]
+
+
+def test_material_preview_accepts_none_for_optional_online_links() -> None:
+    result = prepare_subtitle_material_preview(
+        None,
+        None,
+        None,
+        None,
+        "",
+        0.0,
+        True,
+        "adaptive",
+        "turntable",
+        True,
+        None,
+        None,
+        None,
+    )
+
+    assert len(result) == 8
+    assert result[4] is False
 
 
 def test_make_job_can_use_netease_page_lyrics_with_local_audio(
@@ -1657,7 +1961,9 @@ def test_downloaded_netease_audio_is_saved_before_temporary_cleanup(
         cover_file=str(cover),
     )
 
-    manifest = next(Path(path) for path in result.files if path.endswith("karaoke-forge-project.json"))
+    manifest = next(
+        Path(path) for path in result.files if path.endswith("karaoke-forge-project.json")
+    )
     workspace = load_workspace_project(manifest)
     assert result.video is not None
     assert workspace.audio is not None and workspace.audio.read_bytes() == b"complete audio"

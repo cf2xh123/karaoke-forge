@@ -22,6 +22,16 @@ def test_first_setup_bootstraps_project_private_python() -> None:
     assert "where conda" not in setup.lower()
 
 
+def test_web_launcher_repairs_missing_one_click_login_components() -> None:
+    launcher = (PROJECT_ROOT / "启动网页版.bat").read_text(encoding="ascii")
+
+    assert '-c "import websocket"' in launcher
+    assert '-m pip install -e ".[web,netease]"' in launcher
+    assert launcher.count("if errorlevel 1") >= 2
+    assert "[ERROR] Could not install" in launcher
+    assert "exit /b 1" in launcher
+
+
 def test_private_runtime_download_is_pinned_and_hashed() -> None:
     bootstrap = (PROJECT_ROOT / "scripts" / "bootstrap_windows.ps1").read_text(
         encoding="ascii"

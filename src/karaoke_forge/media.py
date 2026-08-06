@@ -10,7 +10,7 @@ import tempfile
 from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from math import log1p, sqrt
+from math import isfinite, log1p, sqrt
 from pathlib import Path
 from statistics import median
 
@@ -449,6 +449,7 @@ def create_spinning_cover_video(
     *,
     resolution: tuple[int, int] = (1920, 1080),
     duration: float | None = None,
+    audio_start: float = 0.0,
     rotation_seconds: float = 12.0,
     style: str = "aurora",
     background_theme: str = "adaptive",
@@ -467,8 +468,10 @@ def create_spinning_cover_video(
         raise FileNotFoundError(f"Audio file not found: {audio}")
     if output.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
-    effective_duration = duration or probe_media_duration(audio)
-    if effective_duration is None or effective_duration <= 0:
+    if not isfinite(audio_start) or audio_start < 0:
+        raise ValueError("Audio preview start must be finite and non-negative.")
+    effective_duration = duration if duration is not None else probe_media_duration(audio)
+    if effective_duration is None or not isfinite(effective_duration) or effective_duration <= 0:
         raise MediaError("无法读取歌曲时长，不能生成旋转封面背景。请确认 FFprobe 可用。")
     width, height = resolution
     style = style.strip().lower()
@@ -486,10 +489,7 @@ def create_spinning_cover_video(
     }
     if background_theme not in theme_specs:
         raise ValueError(f"Unsupported cover background theme: {background_theme}")
-    radius_expression = (
-        "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
-        "(min(W,H)/2)*(min(W,H)/2)),255,0)"
-    )
+    radius_expression = "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),(min(W,H)/2)*(min(W,H)/2)),255,0)"
     duration_text = f"{effective_duration:.3f}"
     rotation = max(1.0, rotation_seconds)
     asset_name, wave_color, ring_color, theme_brightness, theme_saturation = theme_specs[
@@ -498,9 +498,7 @@ def create_spinning_cover_video(
     overscan_width = width * 108 // 100
     overscan_height = height * 108 // 100
     drift_crop = (
-        f"crop={width}:{height}:"
-        "x='(in_w-out_w)/2*(1+sin(t/11))':"
-        "y='(in_h-out_h)/2*(1+cos(t/13))'"
+        f"crop={width}:{height}:x='(in_w-out_w)/2*(1+sin(t/11))':y='(in_h-out_h)/2*(1+cos(t/13))'"
     )
     stage_args: list[str] = []
     if asset_name is not None:
@@ -540,9 +538,7 @@ def create_spinning_cover_video(
         platter_size = max(280, min(width, height) * 49 // 100)
         label_size = platter_size * 80 // 100
         ring_size = platter_size + max(40, height * 5 // 100)
-        ring_expression = (
-            "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.472,min(W,H)*0.488),120,0)"
-        )
+        ring_expression = "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.472,min(W,H)*0.488),120,0)"
         disc_graph = (
             f"color=c=0x090B17:s={platter_size}x{platter_size}:d={duration_text}:r=30,"
             "format=rgba,geq="
@@ -575,17 +571,14 @@ def create_spinning_cover_video(
                 f"[scene][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
             )
         else:
-            filter_graph += (
-                f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
-            )
+            filter_graph += f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
     elif style == "vinyl":
         vinyl_size = max(340, min(width, height) * 58 // 100)
         label_size = vinyl_size * 58 // 100
         disc_x = width * 8 // 100
         disc_y = height * 5 // 100
         filter_graph = (
-            background
-            + f"color=c=0x0A0B10:s={vinyl_size}x{vinyl_size}:d={duration_text}:r=30,"
+            background + f"color=c=0x0A0B10:s={vinyl_size}x{vinyl_size}:d={duration_text}:r=30,"
             "format=rgba,geq="
             "r='12+9*sin(hypot(X-W/2,Y-H/2)*0.27)':"
             "g='13+8*sin(hypot(X-W/2,Y-H/2)*0.27)':"
@@ -644,8 +637,7 @@ def create_spinning_cover_video(
             )
         else:
             filter_graph += (
-                f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:"
-                "shortest=1[visual]"
+                f";[glass][disc]overlay={width * 9 // 100}:{height * 8 // 100}:shortest=1[visual]"
             )
     elif style == "turntable":
         assert player_input is not None
@@ -661,13 +653,9 @@ def create_spinning_cover_video(
         disc_x = disc_center_x - disc_size // 2
         disc_y = disc_center_y - disc_size // 2
         waveform_y = max(0, (height - 130) // 2)
-        hub_expression = (
-            "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),"
-            "(min(W,H)/2)*(min(W,H)/2)),235,0)"
-        )
+        hub_expression = "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),(min(W,H)/2)*(min(W,H)/2)),235,0)"
         filter_graph = (
-            background
-            + f"{player_input}scale={player_size}:{player_size},format=rgba,"
+            background + f"{player_input}scale={player_size}:{player_size},format=rgba,"
             "split=2[turntable][turntableshadow];"
             "[turntableshadow]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.34,"
             "gblur=sigma=18[turntableshadowsoft];"
@@ -711,9 +699,7 @@ def create_spinning_cover_video(
     else:
         disc_size = max(300, min(width, height) * 51 // 100)
         ring_size = disc_size + max(34, height * 4 // 100)
-        ring_expression = (
-            "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.470,min(W,H)*0.490),120,0)"
-        )
+        ring_expression = "if(between(hypot(X-W/2,Y-H/2),min(W,H)*0.470,min(W,H)*0.490),120,0)"
         filter_graph = (
             background
             + f"[cover]scale={disc_size}:{disc_size}:force_original_aspect_ratio=increase,"
@@ -735,9 +721,7 @@ def create_spinning_cover_video(
                 f"[wavebg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
             )
         else:
-            filter_graph += (
-                f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
-            )
+            filter_graph += f";[bg][disc]overlay=(W-w)/2:{height * 13 // 100}:shortest=1[visual]"
     filter_graph += ";[visual]format=yuv420p[outv]"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -748,6 +732,7 @@ def create_spinning_cover_video(
         "1",
         "-i",
         str(image),
+        *(["-ss", f"{audio_start:.3f}"] if audio_start else []),
         "-i",
         str(audio),
         *stage_args,
@@ -786,6 +771,69 @@ def create_spinning_cover_video(
         tail = "\n".join(completed.stdout.splitlines()[-30:])
         output.unlink(missing_ok=True)
         raise MediaError(f"旋转封面视频生成失败。FFmpeg 输出：\n{tail}")
+    return output
+
+
+def extract_video_frame(
+    video_path: str | Path,
+    output_path: str | Path,
+    *,
+    timestamp: float = 0.0,
+    resolution: tuple[int, int] = (1280, 720),
+    overwrite: bool = False,
+) -> Path:
+    """Extract one display-ready 16:9 frame without decoding the whole video."""
+
+    video = Path(video_path).resolve()
+    output = Path(output_path).resolve()
+    if not video.is_file():
+        raise FileNotFoundError(f"Video file not found: {video}")
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}. Pass --overwrite to replace it.")
+    if not isfinite(timestamp) or timestamp < 0:
+        raise ValueError("Frame timestamp must be finite and non-negative.")
+    width, height = resolution
+    if width <= 0 or height <= 0:
+        raise ValueError("Frame resolution must be positive.")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scale_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
+    command = [
+        find_ffmpeg(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y" if overwrite else "-n",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(video),
+        "-map",
+        "0:V:0",
+        "-frames:v",
+        "1",
+        "-vf",
+        scale_filter,
+        "-q:v",
+        "3",
+        str(output),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0 or not output.is_file():
+        output.unlink(missing_ok=True)
+        tail = "\n".join(completed.stdout.splitlines()[-20:])
+        raise MediaError(f"无法读取视频预览画面。FFmpeg 输出：\n{tail}")
     return output
 
 
@@ -972,7 +1020,9 @@ def replace_video_audio(
                 output.unlink()
             except OSError:
                 pass
-        raise MediaError(f"FFmpeg failed to replace video audio (exit {completed.returncode}):\n{tail}")
+        raise MediaError(
+            f"FFmpeg failed to replace video audio (exit {completed.returncode}):\n{tail}"
+        )
     return output
 
 

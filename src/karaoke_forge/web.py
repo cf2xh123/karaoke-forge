@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import importlib.util
+import ipaddress
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 from collections.abc import Callable, Sequence
@@ -37,16 +40,29 @@ from .editor import (
 from .formats import (
     attach_reference_translation,
     export_formats,
+    parse_lrc,
+    parse_plain,
+    parse_yrc,
     read_lyrics,
     write_format,
 )
-from .media import probe_media_has_audio
+from .media import (
+    create_spinning_cover_video,
+    extract_video_frame,
+    probe_media_duration,
+    probe_media_has_audio,
+)
 from .models import LyricsDocument, PronunciationSpan
 from .netease import (
     NeteaseAlignOptions,
     align_netease_song,
     download_netease_track,
     fetch_public_netease_info,
+)
+from .netease_login import (
+    NeteaseLoginError,
+    capture_netease_music_u,
+    clear_netease_login_profile,
 )
 from .pipeline import (
     AlignOptions,
@@ -82,6 +98,7 @@ _EDITOR_PREFETCH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="karaoke-forge-prefetch",
 )
 _WEB_ERROR_LOG_LOCK = threading.Lock()
+_MATERIAL_PREVIEW_LOCK = threading.Lock()
 
 _ALIGNMENT_MODEL_CHOICES = [
     ("快速（small，速度优先）", "profile:fast"),
@@ -258,6 +275,14 @@ WEB_CSS = """
     radial-gradient(circle at 72% 32%, rgba(255,190,92,.55), transparent 18%),
     linear-gradient(135deg, #537f91 0%, #28495d 42%, #101d2b 100%);
   box-shadow: inset 0 0 70px rgba(0,0,0,.32);
+}
+
+.kf-preview-background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .kf-preview-vignette {
@@ -1936,6 +1961,16 @@ class UiEditorPreparationResult:
     output_dir: str | None
 
 
+@dataclass(frozen=True)
+class SubtitlePreviewSample:
+    text: str
+    translation: str
+    timestamp: float | None
+    highlight_progress: float
+    active_row: int
+    description: str
+
+
 def _file_path(value: object | None) -> Path | None:
     if value is None:
         return None
@@ -2032,6 +2067,437 @@ def _new_job_dir(kind: str, output_root: str | Path | None = None) -> Path:
     directory = root / f"{kind}-{stamp}-{uuid4().hex[:6]}"
     directory.mkdir(parents=True, exist_ok=False)
     return directory.resolve()
+
+
+_PREVIEW_DEFAULT_TEXT = "I hear the flowers whisper.\nLet me bloom inside your garden."
+_PREVIEW_DEFAULT_TRANSLATION = "让我在你的花园里盛放。"
+_MATERIAL_PREVIEW_CACHE_VERSION = "2"
+
+
+def _material_preview_cache_dir() -> Path:
+    configured = os.environ.get("KARAOKE_FORGE_CACHE_DIR") or os.environ.get("GRADIO_TEMP_DIR")
+    root = (
+        Path(configured).expanduser()
+        if configured
+        else _default_output_root().parent / "KaraokeForgeCache"
+    )
+    target = (root / "material-previews").resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _preview_file_signature(path: Path) -> str:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return f"{resolved}|{stat.st_size}|{stat.st_mtime_ns}"
+
+
+def _preview_cache_target(kind: str, *values: object) -> Path:
+    payload = json.dumps(
+        (_MATERIAL_PREVIEW_CACHE_VERSION, *values),
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return _material_preview_cache_dir() / f"{kind}-{digest}.jpg"
+
+
+def _preview_image_data_url(path: Path) -> str:
+    payload = path.read_bytes()
+    if not payload:
+        raise ValueError("生成的预览图片为空。")
+    return "data:image/jpeg;base64," + base64.b64encode(payload).decode("ascii")
+
+
+def _prune_material_preview_cache(cache_dir: Path, *, keep: int = 60) -> None:
+    try:
+        frames = sorted(
+            (
+                path
+                for path in cache_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in {".jpg", ".png", ".webp"}
+            ),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for stale in frames[keep:]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _cached_video_preview_frame(
+    video: Path, timestamp: float | None, offset: float
+) -> tuple[Path, float]:
+    duration = probe_media_duration(video)
+    frame_time = timestamp + offset if timestamp is not None else None
+    if frame_time is None:
+        frame_time = duration * 0.33 if duration else 5.0
+    frame_time = max(0.0, frame_time)
+    if duration is not None and duration > 0:
+        frame_time = min(frame_time, max(0.0, duration - 0.1))
+    target = _preview_cache_target(
+        "mv",
+        _preview_file_signature(video),
+        round(frame_time, 3),
+        960,
+        540,
+    )
+    with _MATERIAL_PREVIEW_LOCK:
+        if not target.is_file():
+            extract_video_frame(
+                video,
+                target,
+                timestamp=frame_time,
+                resolution=(960, 540),
+                overwrite=True,
+            )
+            _prune_material_preview_cache(target.parent)
+    return target, frame_time
+
+
+def _cached_cover_preview_frame(
+    cover: Path,
+    audio: Path,
+    timestamp: float | None,
+    background_theme: str,
+    cover_style: str,
+    show_waveform: bool,
+) -> tuple[Path, float]:
+    duration = probe_media_duration(audio)
+    preview_time = timestamp if timestamp is not None else None
+    if preview_time is None:
+        preview_time = duration * 0.33 if duration else 0.65
+    preview_time = max(0.0, preview_time)
+    audio_start = max(0.0, preview_time - 0.65)
+    if duration is not None and duration > 0:
+        audio_start = min(audio_start, max(0.0, duration - 1.25))
+    target = _preview_cache_target(
+        "cover",
+        _preview_file_signature(cover),
+        _preview_file_signature(audio),
+        round(audio_start, 2),
+        background_theme,
+        cover_style,
+        bool(show_waveform),
+    )
+    with _MATERIAL_PREVIEW_LOCK:
+        if not target.is_file():
+            cache_dir = target.parent
+            with tempfile.TemporaryDirectory(
+                prefix="cover-preview-",
+                dir=cache_dir,
+            ) as temp_name:
+                scene = Path(temp_name) / "scene.mp4"
+                create_spinning_cover_video(
+                    cover,
+                    audio,
+                    scene,
+                    resolution=(960, 540),
+                    duration=1.25,
+                    audio_start=audio_start,
+                    style=cover_style,
+                    background_theme=background_theme,
+                    show_waveform=show_waveform,
+                    overwrite=True,
+                )
+                extract_video_frame(
+                    scene,
+                    target,
+                    timestamp=0.65,
+                    resolution=(960, 540),
+                    overwrite=True,
+                )
+            _prune_material_preview_cache(cache_dir)
+    return target, audio_start + 0.65
+
+
+def _cached_static_cover_frame(cover: Path) -> Path:
+    target = _preview_cache_target(
+        "static-cover",
+        _preview_file_signature(cover),
+        960,
+        540,
+    )
+    with _MATERIAL_PREVIEW_LOCK:
+        if not target.is_file():
+            extract_video_frame(
+                cover,
+                target,
+                resolution=(960, 540),
+                overwrite=True,
+            )
+            _prune_material_preview_cache(target.parent)
+    return target
+
+
+def _cached_online_preview_cover(url: str) -> Path:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+    cache_dir = _material_preview_cache_dir()
+    stem = cache_dir / f"online-cover-{digest}"
+    with _MATERIAL_PREVIEW_LOCK:
+        for suffix in (".jpg", ".png", ".webp"):
+            existing = stem.with_suffix(suffix)
+            if existing.is_file():
+                return existing
+        return download_public_cover(url, stem, timeout=12.0)
+
+
+def _select_subtitle_preview_sample(
+    document: LyricsDocument,
+) -> SubtitlePreviewSample:
+    lines = [line for line in document.visible_lines if line.text.strip()]
+    if not lines:
+        return SubtitlePreviewSample(
+            _PREVIEW_DEFAULT_TEXT,
+            _PREVIEW_DEFAULT_TRANSLATION,
+            None,
+            0.4,
+            1,
+            "示例歌词",
+        )
+
+    target_index = (len(lines) - 1) * 0.35
+    timed_indices = [index for index, line in enumerate(lines) if line.start is not None]
+    candidates = timed_indices or list(range(len(lines)))
+
+    def sample_score(index: int) -> float:
+        line = lines[index]
+        position_score = 1.0 - abs(index - target_index) / max(1.0, len(lines) - 1)
+        length_score = 0.16 if 4 <= len(line.text.strip()) <= 42 else 0.0
+        return (
+            position_score
+            + (0.28 if line.tokens else 0.0)
+            + (0.12 if line.translation else 0.0)
+            + length_score
+        )
+
+    selected = max(candidates, key=sample_score)
+    if selected == 0 and len(lines) > 1:
+        selected = 1
+    current = lines[selected]
+    following = lines[selected + 1] if selected + 1 < len(lines) else None
+    active_row = selected % 2
+    if active_row == 0:
+        upper_text = current.text
+        lower_text = following.text if following else ""
+    else:
+        upper_text = following.text if following else ""
+        lower_text = current.text
+    sample_text = f"{upper_text}\n{lower_text}"
+    highlight_progress = 0.4
+    timestamp: float | None = None
+    if current.start is not None:
+        line_end = current.end
+        if line_end is None and current.tokens:
+            line_end = current.tokens[-1].end
+        if line_end is None or line_end <= current.start:
+            line_end = current.start + 2.0
+        timestamp = current.start + (line_end - current.start) * highlight_progress
+        if current.tokens and current.text:
+            highlighted = 0.0
+            token_characters = sum(max(1, len(token.text)) for token in current.tokens)
+            for token in current.tokens:
+                token_size = max(1, len(token.text))
+                if timestamp >= token.end:
+                    highlighted += token_size
+                    continue
+                if timestamp <= token.start:
+                    break
+                token_duration = max(0.01, token.end - token.start)
+                highlighted += token_size * (timestamp - token.start) / token_duration
+                break
+            highlight_progress = max(0.0, min(1.0, highlighted / token_characters))
+    if current.tokens:
+        description = "真实逐字歌词"
+    elif current.start is not None:
+        description = "真实行级歌词 · 扫色为示意"
+    else:
+        description = "真实歌词 · 尚未校准，仅预览排版"
+    return SubtitlePreviewSample(
+        sample_text,
+        current.translation or "",
+        timestamp,
+        highlight_progress,
+        active_row,
+        description,
+    )
+
+
+def prepare_subtitle_material_preview(
+    audio_file: object,
+    video_file: object,
+    cover_file: object,
+    lyrics_file: object,
+    pasted_lyrics: str,
+    offset: float,
+    auto_sync: bool,
+    background_theme: str,
+    cover_style: str,
+    show_waveform: bool,
+    netease_link: str | None = "",
+    qqmusic_link: str | None = "",
+    utaten_link: str | None = "",
+) -> tuple[str, str, str, str, bool, float, int, str]:
+    """Build a fast subtitle preview from the song's actual lyrics and artwork."""
+
+    notes: list[str] = []
+    audio = _file_path(audio_file)
+    if _is_empty_audio_placeholder(audio) or audio is None or not audio.is_file():
+        audio = None
+    video = _file_path(video_file)
+    if video is None or not video.is_file():
+        video = None
+    try:
+        cover = _validated_cover(cover_file)
+    except ValueError as exc:
+        cover = None
+        notes.append(str(exc))
+
+    document: LyricsDocument | None = None
+    lyrics_source = _file_path(lyrics_file)
+    if lyrics_source is not None and lyrics_source.is_file():
+        try:
+            document = read_lyrics(lyrics_source)
+        except Exception as exc:
+            notes.append(f"歌词暂时无法用于预览：{exc}")
+    elif pasted_lyrics and pasted_lyrics.strip():
+        try:
+            document = parse_plain(pasted_lyrics)
+        except Exception as exc:
+            notes.append(f"粘贴歌词暂时无法用于预览：{exc}")
+
+    online_cover_url: str | None = None
+    netease_link = (netease_link or "").strip()
+    qqmusic_link = (qqmusic_link or "").strip()
+    utaten_link = (utaten_link or "").strip()
+    if (document is None or (video is None and cover is None)) and netease_link:
+        try:
+            info = fetch_public_netease_info(netease_link)
+            if document is None:
+                if info.word_lyrics:
+                    try:
+                        document = parse_yrc(info.word_lyrics)
+                    except Exception:
+                        document = None
+                if document is None and info.page_lyrics:
+                    document = parse_lrc(info.page_lyrics)
+                if document is not None and info.translated_lyrics:
+                    attach_reference_translation(
+                        document,
+                        info.page_lyrics,
+                        info.translated_lyrics,
+                    )
+            online_cover_url = info.cover_url
+        except Exception as exc:
+            notes.append(f"网易云预览信息读取失败：{exc}")
+    if (document is None or (video is None and cover is None)) and qqmusic_link:
+        try:
+            info = fetch_public_qqmusic_info(qqmusic_link)
+            if document is None:
+                document = parse_lrc(info.page_lyrics)
+                if info.translated_lyrics:
+                    attach_reference_translation(
+                        document,
+                        info.page_lyrics,
+                        info.translated_lyrics,
+                    )
+            online_cover_url = online_cover_url or info.cover_url
+        except Exception as exc:
+            notes.append(f"QQ 音乐预览信息读取失败：{exc}")
+    if document is None and utaten_link:
+        try:
+            info = fetch_public_utaten_info(utaten_link)
+            document = parse_plain("\n".join(info.lyrics))
+        except Exception as exc:
+            notes.append(f"UtaTen 预览歌词读取失败：{exc}")
+    if cover is None and online_cover_url:
+        try:
+            cover = _cached_online_preview_cover(online_cover_url)
+        except Exception as exc:
+            notes.append(f"在线封面暂时无法用于预览：{exc}")
+
+    sample = (
+        _select_subtitle_preview_sample(document)
+        if document is not None
+        else SubtitlePreviewSample(
+            _PREVIEW_DEFAULT_TEXT,
+            _PREVIEW_DEFAULT_TRANSLATION,
+            None,
+            0.4,
+            1,
+            "示例歌词 · 加入歌词后自动替换",
+        )
+    )
+    background_data = ""
+    badge = sample.description
+    preview_time: float | None = None
+    if video is not None:
+        try:
+            frame, preview_time = _cached_video_preview_frame(
+                video,
+                sample.timestamp,
+                float(offset or 0.0),
+            )
+            background_data = _preview_image_data_url(frame)
+            badge = f"MV 实景 {preview_time // 60:02.0f}:{preview_time % 60:04.1f} · {sample.description}"
+            if auto_sync and audio is not None and audio.resolve() != video.resolve():
+                badge += " · 成片时自动校正"
+        except Exception as exc:
+            notes.append(f"MV 画面读取失败，已自动降级：{exc}")
+    if not background_data and cover is not None and audio is not None:
+        try:
+            frame, preview_time = _cached_cover_preview_frame(
+                cover,
+                audio,
+                sample.timestamp,
+                background_theme or "adaptive",
+                cover_style or "turntable",
+                bool(show_waveform),
+            )
+            background_data = _preview_image_data_url(frame)
+            badge = f"无 MV 成片样式 · {sample.description}"
+        except Exception as exc:
+            notes.append(f"动态封面预览失败，已改用静态封面：{exc}")
+    if not background_data and cover is not None:
+        try:
+            frame = _cached_static_cover_frame(cover)
+            background_data = _preview_image_data_url(frame)
+            badge = f"专辑封面静态预览 · {sample.description}"
+            if audio is None:
+                notes.append("加入歌曲音频后，会自动显示所选唱片机与真实波形样式。")
+        except Exception as exc:
+            notes.append(f"封面画面读取失败，已使用内置背景：{exc}")
+
+    if video is not None and background_data:
+        if auto_sync and audio is not None and audio.resolve() != video.resolve():
+            status = (
+                "✅ 已使用当前歌词时间与手动偏移取出 MV 画面；"
+                "生成成片时会自动定位 MV 片头并校正到准确时刻。"
+            )
+        else:
+            status = "✅ 已自动使用 MV 中对应歌词时刻的画面。"
+    elif cover is not None and audio is not None and background_data:
+        status = "✅ 已按当前无 MV 主题、唱片布局和波形设置生成预览。"
+    elif cover is not None and background_data:
+        status = "ℹ️ 已使用专辑封面；加入音频后会自动补全唱片与波形效果。"
+    else:
+        status = "ℹ️ 上传 MV，或上传音频和封面后，这里会自动换成这首歌的真实画面。"
+    if document is None:
+        status += " 当前先使用示例歌词，加入歌词后会自动替换。"
+    if notes:
+        status += "\n\n<small>" + html.escape("；".join(notes)) + "</small>"
+    return (
+        sample.text,
+        sample.translation,
+        background_data,
+        badge,
+        document is not None,
+        sample.highlight_progress,
+        sample.active_row,
+        status,
+    )
 
 
 def _record_web_error(action: str, exc: BaseException) -> Path | None:
@@ -2240,30 +2706,51 @@ def subtitle_preview_html(
     sample_text: str = "让每一句歌词，都踩准拍子。",
     sample_translation: str = "让歌声与画面在这里相遇。",
     auto_english_pronunciation: bool = True,
+    background_data_url: str = "",
+    preview_badge: str = "实时字幕预览 · KTV 双行布局",
+    material_mode: bool = False,
+    highlight_progress: float = 0.4,
+    active_row: int = 1,
 ) -> str:
     """Return a browser-native preview of the current ASS subtitle style."""
 
     safe_font = html.escape(font or "Microsoft YaHei", quote=True)
-    raw_lines = [
-        line.strip()
-        for line in (sample_text or "让每一句歌词，都踩准拍子。").splitlines()
-        if line.strip()
-    ]
-    if not raw_lines:
-        raw_lines = ["让每一句歌词，都踩准拍子。"]
-    if len(raw_lines) >= 2:
-        upper_text, lower_text = raw_lines[-2:]
+    active_row = 0 if int(active_row) == 0 else 1
+    if material_mode:
+        material_lines = (sample_text or "").split("\n")
+        if len(material_lines) >= 2:
+            upper_text = material_lines[0].strip()
+            lower_text = material_lines[1].strip()
+        elif active_row == 0:
+            upper_text, lower_text = (sample_text or "").strip(), ""
+        else:
+            upper_text, lower_text = "", (sample_text or "").strip()
     else:
-        upper_text = "The lyric before this line"
-        lower_text = raw_lines[0]
-    split_at = max(1, round(len(lower_text) * 0.4))
-    safe_translation = html.escape(sample_translation or "让歌声与画面在这里相遇。")
+        raw_lines = [
+            line.strip()
+            for line in (sample_text or "让每一句歌词，都踩准拍子。").splitlines()
+            if line.strip()
+        ]
+        if not raw_lines:
+            raw_lines = ["让每一句歌词，都踩准拍子。"]
+        if len(raw_lines) >= 2:
+            upper_text, lower_text = raw_lines[-2:]
+        else:
+            upper_text = "The lyric before this line"
+            lower_text = raw_lines[0]
+    active_text = upper_text if active_row == 0 else lower_text
+    progress = max(0.0, min(1.0, float(highlight_progress)))
+    split_at = max(0, min(len(active_text), round(len(active_text) * progress)))
+    translation_value = (
+        sample_translation if material_mode else sample_translation or "让歌声与画面在这里相遇。"
+    )
+    safe_translation = html.escape(translation_value)
     main_size = max(16, min(48, round(float(font_size) * 0.55)))
     translated_size = max(13, min(36, round(float(translation_font_size) * 0.55)))
     pronunciation_size = max(10, min(24, round(float(pronunciation_font_size) * 0.55)))
     bottom = max(12, min(92, round(float(margin_v) * 0.42)))
     translation_html = ""
-    if show_translation:
+    if show_translation and safe_translation:
         translation_html = (
             '<div style="position:absolute;left:15%;right:15%;top:8%;'
             f"text-align:center;font-family:'{safe_font}',sans-serif;"
@@ -2287,6 +2774,8 @@ def subtitle_preview_html(
         )
 
     def preview_line(value: str, *, active: bool) -> str:
+        if not value:
+            return ""
         pronunciation = (
             generate_pronunciation(
                 value,
@@ -2319,10 +2808,24 @@ def subtitle_preview_html(
         parts.append(coloured_source(value[cursor:], cursor, active=active))
         return "".join(parts)
 
-    upper_line_html = preview_line(upper_text, active=False)
-    lower_line_html = preview_line(lower_text, active=True)
+    upper_line_html = preview_line(upper_text, active=active_row == 0)
+    lower_line_html = preview_line(lower_text, active=active_row == 1)
+    background_html = ""
+    allowed_image_prefixes = (
+        "data:image/jpeg;base64,",
+        "data:image/png;base64,",
+        "data:image/webp;base64,",
+    )
+    if background_data_url.startswith(allowed_image_prefixes):
+        background_html = (
+            '<img class="kf-preview-background" alt="" '
+            f'src="{html.escape(background_data_url, quote=True)}">'
+        )
+    safe_badge = html.escape(preview_badge or "实时字幕预览 · KTV 双行布局")
     return f"""
-    <div class="kf-subtitle-preview" data-kf-layout="ktv-split">
+    <div class="kf-subtitle-preview" data-kf-layout="ktv-split"
+         data-kf-material="{str(bool(material_mode)).lower()}">
+      {background_html}
       <div class="kf-preview-vignette"></div>
       {translation_html}
       <div style="position:absolute;left:6%;right:16%;
@@ -2340,7 +2843,7 @@ def subtitle_preview_html(
                               -2px 2px 0 #111,2px 2px 0 #111,0 3px 8px #000;">
         {lower_line_html}
       </div>
-      <div class="kf-preview-badge">实时字幕预览 · KTV 双行布局</div>
+      <div class="kf-preview-badge">{safe_badge}</div>
     </div>
     """
 
@@ -2583,8 +3086,7 @@ def prepare_make_editor_job(
                 )
             if video_audio_state is False:
                 raise ValueError(
-                    "未上传独立歌曲音频，且 MV 不含可用音轨或没有上传 MV；"
-                    "请上传歌曲音频后再校准。"
+                    "未上传独立歌曲音频，且 MV 不含可用音轨或没有上传 MV；请上传歌曲音频后再校准。"
                 )
             raise ValueError(
                 "无法检测这个 MV 是否含音轨；请确认 FFmpeg/FFprobe 可用，或上传独立歌曲音频。"
@@ -4456,6 +4958,13 @@ def environment_markdown() -> str:
             "已安装" if importlib.util.find_spec("yt_dlp") else "未安装",
         ),
         (
+            "网易云一键登录组件",
+            importlib.util.find_spec("websocket") is not None,
+            "已安装"
+            if importlib.util.find_spec("websocket")
+            else "未安装；重新双击启动网页版.bat 会自动补装",
+        ),
+        (
             "日语/英语注音",
             importlib.util.find_spec("pykakasi") is not None
             and importlib.util.find_spec("alkana") is not None,
@@ -4506,7 +5015,17 @@ def _open_output_directory(path: str | None) -> str:
     return f"已打开：`{directory}`"
 
 
-def create_web_app() -> object:
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().strip("[]")
+    if normalized.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def create_web_app(*, managed_netease_login: bool = False) -> object:
     try:
         import gradio as gr
     except ImportError as exc:
@@ -4531,6 +5050,12 @@ def create_web_app() -> object:
         editor_line_undo_payload = gr.State({})
         editor_output_directory = gr.State()
         editor_handoff_ready = gr.State(False)
+        netease_session_music_u = gr.State("")
+        make_preview_background = gr.State("")
+        make_preview_badge = gr.State("实时字幕预览 · KTV 双行布局")
+        make_preview_material_mode = gr.State(False)
+        make_preview_progress = gr.State(0.4)
+        make_preview_active_row = gr.State(1)
         gr.HTML(
             """
             <div class="kf-shell">
@@ -4674,34 +5199,51 @@ def create_web_app() -> object:
                                 label="网易云单曲链接",
                                 placeholder="https://music.163.com/song?id=...",
                             )
-                            with gr.Row():
-                                make_cookie_browser = gr.Dropdown(
-                                    label="自动读取浏览器（可选，浏览器需完全退出）",
-                                    choices=[
-                                        ("匿名（仅公开音频）", ""),
-                                        ("Chrome 已登录账号", "chrome"),
-                                        ("Edge 已登录账号", "edge"),
-                                        ("Firefox 已登录账号", "firefox"),
-                                        ("Brave 已登录账号", "brave"),
-                                    ],
-                                    value="",
-                                    info=(
-                                        "生成校准工程和成片都会使用此选择；"
-                                        "仅在浏览器登录但保持“匿名”不会使用会员权限。"
-                                    ),
-                                )
-                                make_cookie_profile = gr.Textbox(
-                                    label="浏览器配置（可选）",
-                                    placeholder=(
-                                        "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
-                                    ),
-                                )
-                            with gr.Accordion(
-                                "Edge / Chrome 保持开启时使用（推荐）",
-                                open=False,
-                            ):
+                            make_netease_login_button = gr.Button(
+                                "一键登录 / 连接网易云账号",
+                                variant="primary",
+                                interactive=managed_netease_login,
+                            )
+                            make_reset_netease_login = gr.Button(
+                                "登录失效或要换账号？重新登录",
+                                size="sm",
+                                interactive=managed_netease_login,
+                            )
+                            make_netease_login_status = gr.Markdown(
+                                "公开歌曲可以直接使用；需要账号权限时再点击上方按钮。"
+                                if managed_netease_login
+                                else "远程监听模式已禁用本机账号登录；请在这台电脑上用"
+                                " `启动网页版.bat` 打开。"
+                            )
+                            gr.Markdown(
+                                "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
+                                "正常扫码或登录，成功后窗口会自动关闭；不用退出平时的 Edge，"
+                                "也不用安装 Firefox 或打开 F12。第一次登录后通常会记住账号。"
+                            )
+                            with gr.Accordion("高级 / 兼容登录方式（通常不用展开）", open=False):
+                                with gr.Row():
+                                    make_cookie_browser = gr.Dropdown(
+                                        label="旧版：读取已完全退出的浏览器",
+                                        choices=[
+                                            ("匿名（仅公开音频）", ""),
+                                            ("Chrome 已登录账号", "chrome"),
+                                            ("Edge 已登录账号", "edge"),
+                                            ("Firefox 已登录账号", "firefox"),
+                                            ("Brave 已登录账号", "brave"),
+                                        ],
+                                        value="",
+                                        interactive=managed_netease_login,
+                                        info=("只用于兼容旧流程；一键登录成功后会自动忽略此项。"),
+                                    )
+                                    make_cookie_profile = gr.Textbox(
+                                        label="浏览器配置（旧版可选）",
+                                        interactive=managed_netease_login,
+                                        placeholder=(
+                                            "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
+                                        ),
+                                    )
                                 make_music_u = gr.Textbox(
-                                    label="网易云 MUSIC_U",
+                                    label="手动 MUSIC_U（仅排障备用）",
                                     type="password",
                                     placeholder="粘贴 Value，或 MUSIC_U=...",
                                     info=(
@@ -4717,6 +5259,11 @@ def create_web_app() -> object:
                                     "`MUSIC_U` 等同登录凭据，请勿截图或分享；"
                                     "程序不会把它写入工程、输出文件或日志。"
                                 )
+                                make_clear_netease_login = gr.Button(
+                                    "退出账号并清除专用登录数据",
+                                    size="sm",
+                                    interactive=managed_netease_login,
+                                )
                             make_use_netease_lyrics = gr.Checkbox(
                                 label="没有上传歌词时，使用网易云页面公开歌词",
                                 value=True,
@@ -4729,9 +5276,9 @@ def create_web_app() -> object:
                                 value=False,
                             )
                             gr.Markdown(
-                                "> 可自动读取已退出的浏览器，或在浏览器保持开启时手动提供"
-                                " `MUSIC_U`。程序只使用账号实际有权播放的音质；登录凭据不会"
-                                "保存，本工具不接收密码，也不转换 NCM。"
+                                "> 一键登录只打开网易云官网，程序不接收密码。专用 Edge 会在本机"
+                                "保留登录状态，方便下次连接；程序只使用账号实际有权播放的音质，"
+                                "不会把凭据写入工程、成片或日志，也不转换 NCM。"
                             )
                         gr.HTML(
                             '<div class="kf-tip">歌曲和 MV 应是同一版本。'
@@ -4831,20 +5378,11 @@ def create_web_app() -> object:
                                 value="#FFFFFF",
                             )
 
-                        with gr.Accordion("字幕实时预览", open=True):
-                            with gr.Row():
-                                make_preview_text = gr.Textbox(
-                                    label="原文双行预览（上一行 + 当前行）",
-                                    value=(
-                                        "I hear the flowers whisper.\n"
-                                        "Let me bloom inside your garden."
-                                    ),
-                                    lines=2,
-                                )
-                                make_preview_translation = gr.Textbox(
-                                    label="中文翻译预览",
-                                    value="让我在你的花园里盛放。",
-                                )
+                        with gr.Accordion("歌曲实景字幕预览", open=True):
+                            make_preview_status = gr.Markdown(
+                                "上传 MV，或上传音频和封面后，会自动换成这首歌的真实画面；"
+                                "加入歌词后也会自动挑选对应时刻的一句。"
+                            )
                             make_style_preview = gr.HTML(
                                 subtitle_preview_html(
                                     "Microsoft YaHei",
@@ -4865,6 +5403,21 @@ def create_web_app() -> object:
                                     "让我在你的花园里盛放。",
                                 )
                             )
+                            gr.Markdown(
+                                "<small>画面、歌词和时间点来自当前素材；颜色、位置会即时更新。"
+                                "浏览器未安装的自定义字体在这里可能近似显示，最终成片会嵌入上传字体。</small>"
+                            )
+                            with gr.Accordion("手动更换预览歌词（可选）", open=False):
+                                with gr.Row():
+                                    make_preview_text = gr.Textbox(
+                                        label="原文双行预览（画面上排 + 下排）",
+                                        value=_PREVIEW_DEFAULT_TEXT,
+                                        lines=2,
+                                    )
+                                    make_preview_translation = gr.Textbox(
+                                        label="翻译预览",
+                                        value=_PREVIEW_DEFAULT_TRANSLATION,
+                                    )
 
                         with gr.Accordion("高级设置", open=False):
                             with gr.Row():
@@ -5087,34 +5640,51 @@ def create_web_app() -> object:
                         label="没有提供自己的歌词时，使用网易云页面公开 LRC",
                         value=True,
                     )
-                    with gr.Row():
-                        netease_cookie_browser = gr.Dropdown(
-                            label="自动读取浏览器（可选，浏览器需完全退出）",
-                            choices=[
-                                ("匿名（仅公开音频）", ""),
-                                ("Chrome 已登录账号", "chrome"),
-                                ("Edge 已登录账号", "edge"),
-                                ("Firefox 已登录账号", "firefox"),
-                                ("Brave 已登录账号", "brave"),
-                            ],
-                            value="",
-                            info=(
-                                "仅在浏览器登录但保持“匿名”不会使用会员权限；"
-                                "请选择实际登录网易云的浏览器。"
-                            ),
-                        )
-                        netease_cookie_profile = gr.Textbox(
-                            label="浏览器配置（可选）",
-                            placeholder=(
-                                "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
-                            ),
-                        )
-                    with gr.Accordion(
-                        "Edge / Chrome 保持开启时使用（推荐）",
-                        open=False,
-                    ):
+                    netease_login_button = gr.Button(
+                        "一键登录 / 连接网易云账号",
+                        variant="primary",
+                        interactive=managed_netease_login,
+                    )
+                    netease_reset_login = gr.Button(
+                        "登录失效或要换账号？重新登录",
+                        size="sm",
+                        interactive=managed_netease_login,
+                    )
+                    netease_login_status = gr.Markdown(
+                        "公开歌曲可以直接使用；需要账号权限时再点击上方按钮。"
+                        if managed_netease_login
+                        else "远程监听模式已禁用本机账号登录；请在这台电脑上用"
+                        " `启动网页版.bat` 打开。"
+                    )
+                    gr.Markdown(
+                        "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
+                        "正常扫码或登录，成功后窗口会自动关闭；不用退出平时的 Edge，"
+                        "也不用安装 Firefox 或打开 F12。第一次登录后通常会记住账号。"
+                    )
+                    with gr.Accordion("高级 / 兼容登录方式（通常不用展开）", open=False):
+                        with gr.Row():
+                            netease_cookie_browser = gr.Dropdown(
+                                label="旧版：读取已完全退出的浏览器",
+                                choices=[
+                                    ("匿名（仅公开音频）", ""),
+                                    ("Chrome 已登录账号", "chrome"),
+                                    ("Edge 已登录账号", "edge"),
+                                    ("Firefox 已登录账号", "firefox"),
+                                    ("Brave 已登录账号", "brave"),
+                                ],
+                                value="",
+                                interactive=managed_netease_login,
+                                info="只用于兼容旧流程；一键登录成功后会自动忽略此项。",
+                            )
+                            netease_cookie_profile = gr.Textbox(
+                                label="浏览器配置（旧版可选）",
+                                interactive=managed_netease_login,
+                                placeholder=(
+                                    "留空使用默认配置；也可填 Profile 1 或完整用户配置目录"
+                                ),
+                            )
                         netease_music_u = gr.Textbox(
-                            label="网易云 MUSIC_U",
+                            label="手动 MUSIC_U（仅排障备用）",
                             type="password",
                             placeholder="粘贴 Value，或 MUSIC_U=...",
                             info=(
@@ -5129,6 +5699,11 @@ def create_web_app() -> object:
                             "3. 找到 `MUSIC_U`，复制 **Value** 粘贴到上方。  \n"
                             "`MUSIC_U` 等同登录凭据，请勿截图或分享；"
                             "程序不会把它写入工程、输出文件或日志。"
+                        )
+                        netease_clear_login = gr.Button(
+                            "退出账号并清除专用登录数据",
+                            size="sm",
+                            interactive=managed_netease_login,
                         )
                     netease_rights = gr.Checkbox(
                         label="我确认账号和歌曲归我合法使用，且不会绕过地区、版权或 DRM 限制",
@@ -5162,9 +5737,9 @@ def create_web_app() -> object:
                             value="auto",
                         )
                     gr.Markdown(
-                        "> 可自动读取已退出的浏览器，或在浏览器保持开启时手动提供"
-                        " `MUSIC_U`。程序只使用账号有权播放的最高音质；登录凭据不会"
-                        "保存，不接收密码、不提升账号权限，也不会转换 NCM。"
+                        "> 一键登录只打开网易云官网，程序不接收密码。专用 Edge 会在本机"
+                        "保留登录状态，方便下次连接；程序只使用账号有权播放的最高音质，"
+                        "不会把凭据写入工程、输出或日志，也不会转换 NCM。"
                     )
                     netease_button = gr.Button(
                         "读取链接并生成时间轴",
@@ -5514,8 +6089,9 @@ def create_web_app() -> object:
                                 - **歌词已有时间轴**：YRC 等真实逐字时间在“自动”模式下会直接
                                   使用；普通 LRC/SRT 会运行 Whisper 精修，选择“关闭”则完全
                                   保留原时间轴且无需模型。
-                                - **网易云会员歌曲**：可自动读取已退出的登录浏览器；Edge/Chrome
-                                  保持开启时可粘贴 MUSIC_U；也可上传标准音频；不支持 NCM。
+                                - **网易云会员歌曲**：点击“一键登录 / 连接网易云账号”，在弹出的
+                                  Karaoke Forge 专用 Edge 窗口登录即可；平时的 Edge 不用关闭。
+                                  也可上传标准音频；不支持 NCM。
                                 - **匹配率低**：确认歌词与歌曲是同一版本，或尝试分离人声。
                                 - **字幕没有中文字体**：在样式里换成本机已安装字体。
                                 """
@@ -5526,6 +6102,216 @@ def create_web_app() -> object:
             "请确保你拥有歌曲、歌词和视频的使用权</div>"
         )
         app.load(fn=None, js=TOKEN_TIMELINE_JS, queue=False)
+
+        def netease_login_button_updates(*, interactive: bool) -> tuple[object, ...]:
+            return tuple(gr.update(interactive=interactive) for _index in range(4))
+
+        def remote_netease_login_result() -> tuple[object, ...]:
+            status = (
+                "### ⚠️ 远程监听模式不能使用本机网易云账号\n"
+                "请在这台电脑上用 `启动网页版.bat` 打开本地页面；"
+                "远程页面仍可使用公开歌曲或自己上传的音频。"
+            )
+            return (
+                gr.skip(),
+                gr.skip(),
+                gr.skip(),
+                status,
+                status,
+                *netease_login_button_updates(interactive=False),
+            )
+
+        def local_netease_login_request(request: object | None) -> bool:
+            if not managed_netease_login:
+                return False
+            if request is None:
+                return True
+            client = getattr(request, "client", None)
+            return _is_loopback_host(str(getattr(client, "host", "")))
+
+        def begin_netease_login(request: object | None = None) -> tuple[object, ...]:
+            if not local_netease_login_request(request):
+                result = remote_netease_login_result()
+                return result[3:]
+            status = (
+                "### ⏳ 正在打开网易云登录窗口\n"
+                "请在弹出的 Karaoke Forge 专用 Edge 窗口中正常扫码或登录。"
+                "检测成功后窗口会自动关闭。"
+            )
+            return (
+                status,
+                status,
+                *netease_login_button_updates(interactive=False),
+            )
+
+        def begin_netease_relogin(request: object | None = None) -> tuple[object, ...]:
+            status_and_buttons = begin_netease_login(request)
+            return "", "", "", *status_and_buttons
+
+        def capture_netease_login_wrapper(request: object | None = None) -> tuple[object, ...]:
+            if not local_netease_login_request(request):
+                return remote_netease_login_result()
+            try:
+                token = capture_netease_music_u()
+            except NeteaseLoginError as exc:
+                detail = html.escape(str(exc))
+                status = (
+                    "### ⚠️ 网易云账号尚未连接\n"
+                    f"{detail}\n\n可以再点一次重试；受管电脑若禁止 Edge 调试，"
+                    "仍可展开“高级 / 兼容登录方式”使用旧方法。"
+                )
+                return (
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    status,
+                    status,
+                    *netease_login_button_updates(interactive=True),
+                )
+            except Exception as exc:
+                _record_web_error("netease-edge-login", exc)
+                status = (
+                    "### ⚠️ 网易云登录窗口没有完成连接\n"
+                    "程序已记录错误详情。请重试，或使用高级兼容登录方式。"
+                )
+                return (
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    status,
+                    status,
+                    *netease_login_button_updates(interactive=True),
+                )
+
+            status = (
+                "### ✅ 网易云账号已连接\n"
+                "登录会话只保存在本机服务端，已接入制作页和网易云歌词页。"
+                "如果之后提示登录失效，请点击“重新登录”。"
+            )
+            return (
+                token,
+                "",
+                "",
+                status,
+                status,
+                *netease_login_button_updates(interactive=True),
+            )
+
+        def clear_netease_login_wrapper(request: object | None = None) -> tuple[object, ...]:
+            if not local_netease_login_request(request):
+                return remote_netease_login_result()
+            try:
+                detail = clear_netease_login_profile()
+            except NeteaseLoginError as exc:
+                status = f"### ⚠️ 暂时无法清除专用登录\n{html.escape(str(exc))}"
+                return (
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    status,
+                    status,
+                    *netease_login_button_updates(interactive=True),
+                )
+
+            status = f"### ✅ 已退出网易云账号\n{html.escape(detail)}"
+            return (
+                "",
+                "",
+                "",
+                status,
+                status,
+                *netease_login_button_updates(interactive=True),
+            )
+
+        def relogin_netease_wrapper(request: object | None = None) -> tuple[object, ...]:
+            if not local_netease_login_request(request):
+                return remote_netease_login_result()
+            try:
+                clear_netease_login_profile()
+            except NeteaseLoginError as exc:
+                status = f"### ⚠️ 暂时无法重新登录\n{html.escape(str(exc))}"
+                return (
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                    status,
+                    status,
+                    *netease_login_button_updates(interactive=True),
+                )
+            return capture_netease_login_wrapper(request)
+
+        def store_manual_music_u(value: str) -> str:
+            return value or ""
+
+        for request_callback in (
+            begin_netease_login,
+            begin_netease_relogin,
+            capture_netease_login_wrapper,
+            clear_netease_login_wrapper,
+            relogin_netease_wrapper,
+        ):
+            request_callback.__annotations__["request"] = gr.Request
+
+        netease_login_outputs = [
+            netease_session_music_u,
+            make_music_u,
+            netease_music_u,
+            make_netease_login_status,
+            netease_login_status,
+            make_netease_login_button,
+            netease_login_button,
+            make_reset_netease_login,
+            netease_reset_login,
+        ]
+        for manual_music_u in (make_music_u, netease_music_u):
+            manual_music_u.input(
+                store_manual_music_u,
+                inputs=manual_music_u,
+                outputs=netease_session_music_u,
+                queue=False,
+                show_progress="hidden",
+            )
+
+        for login_button in (make_netease_login_button, netease_login_button):
+            login_button.click(
+                begin_netease_login,
+                outputs=[
+                    make_netease_login_status,
+                    netease_login_status,
+                    make_netease_login_button,
+                    netease_login_button,
+                    make_reset_netease_login,
+                    netease_reset_login,
+                ],
+                queue=False,
+            ).then(
+                capture_netease_login_wrapper,
+                outputs=netease_login_outputs,
+                show_progress="hidden",
+            )
+
+        for reset_login_button in (make_reset_netease_login, netease_reset_login):
+            reset_login_button.click(
+                begin_netease_relogin,
+                outputs=netease_login_outputs,
+                queue=False,
+            ).then(
+                relogin_netease_wrapper,
+                outputs=netease_login_outputs,
+                show_progress="hidden",
+            )
+
+        for clear_login_button in (make_clear_netease_login, netease_clear_login):
+            clear_login_button.click(
+                clear_netease_login_wrapper,
+                outputs=netease_login_outputs,
+                show_progress="hidden",
+            )
+
+        def local_browser_cookie_inputs(browser: str, profile: str) -> tuple[str, str]:
+            if managed_netease_login:
+                return browser, profile
+            return "", ""
 
         def make_wrapper(
             audio: object,
@@ -5577,6 +6363,10 @@ def create_web_app() -> object:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
+            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+                cookie_browser,
+                cookie_browser_profile,
+            )
             result = run_make_job(
                 audio,
                 video,
@@ -5670,6 +6460,10 @@ def create_web_app() -> object:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
+            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+                cookie_browser,
+                cookie_browser_profile,
+            )
             result = prepare_make_editor_job(
                 audio,
                 video,
@@ -5750,7 +6544,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
-                make_music_u,
+                netease_session_music_u,
                 make_timing_refinement,
                 make_output_root,
                 make_qqmusic_link,
@@ -5814,7 +6608,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
-                make_music_u,
+                netease_session_music_u,
                 make_auto_sync,
                 make_timing_refinement,
                 make_show_translation,
@@ -5848,7 +6642,58 @@ def create_web_app() -> object:
             show_progress="full",
         )
 
-        preview_inputs = [
+        material_preview_inputs = [
+            make_audio,
+            make_video,
+            make_cover,
+            make_lyrics,
+            make_pasted,
+            make_offset,
+            make_auto_sync,
+            make_cover_background,
+            make_cover_style,
+            make_cover_waveform,
+            make_netease_link,
+            make_qqmusic_link,
+            make_utaten_link,
+        ]
+        material_preview_outputs = [
+            make_preview_text,
+            make_preview_translation,
+            make_preview_background,
+            make_preview_badge,
+            make_preview_material_mode,
+            make_preview_progress,
+            make_preview_active_row,
+            make_preview_status,
+        ]
+        material_preview_event = gr.on(
+            triggers=[
+                make_audio.change,
+                make_video.change,
+                make_cover.change,
+                make_lyrics.change,
+                make_pasted.change,
+                make_offset.change,
+                make_auto_sync.change,
+                make_cover_background.change,
+                make_cover_style.change,
+                make_cover_waveform.change,
+                make_netease_link.change,
+                make_qqmusic_link.change,
+                make_utaten_link.change,
+            ],
+            fn=prepare_subtitle_material_preview,
+            inputs=material_preview_inputs,
+            outputs=material_preview_outputs,
+            queue=True,
+            trigger_mode="always_last",
+            concurrency_limit=1,
+            concurrency_id="make-material-preview",
+            show_progress="hidden",
+        )
+
+        instant_preview_controls = [
             make_font,
             make_font_size,
             make_text_color,
@@ -5864,8 +6709,32 @@ def create_web_app() -> object:
             make_preview_translation,
             make_auto_english_pronunciation,
         ]
-        for preview_input in preview_inputs:
+        preview_inputs = [
+            *instant_preview_controls,
+            make_preview_background,
+            make_preview_badge,
+            make_preview_material_mode,
+            make_preview_progress,
+            make_preview_active_row,
+        ]
+        material_preview_event.then(
+            subtitle_preview_html,
+            inputs=preview_inputs,
+            outputs=make_style_preview,
+            queue=False,
+        )
+        for preview_input in [
+            *instant_preview_controls[:11],
+            make_auto_english_pronunciation,
+        ]:
             preview_input.change(
+                subtitle_preview_html,
+                inputs=preview_inputs,
+                outputs=make_style_preview,
+                queue=False,
+            )
+        for preview_input in [make_preview_text, make_preview_translation]:
+            preview_input.input(
                 subtitle_preview_html,
                 inputs=preview_inputs,
                 outputs=make_style_preview,
@@ -5941,6 +6810,10 @@ def create_web_app() -> object:
             def update(message: str) -> None:
                 progress((0, None), desc=message)
 
+            cookie_browser, cookie_browser_profile = local_browser_cookie_inputs(
+                cookie_browser,
+                cookie_browser_profile,
+            )
             result = run_netease_align_job(
                 link,
                 local_audio,
@@ -5980,7 +6853,7 @@ def create_web_app() -> object:
                 netease_rights,
                 netease_cookie_browser,
                 netease_cookie_profile,
-                netease_music_u,
+                netease_session_music_u,
                 netease_timing_refinement,
             ],
             outputs=[
@@ -6030,7 +6903,7 @@ def create_web_app() -> object:
         def restore_recent_workspace() -> tuple[object, ...]:
             workspace = load_recent_workspace(_default_output_root())
             if workspace is None:
-                return tuple(gr.skip() for _ in range(30))
+                return tuple(gr.skip() for _ in range(31))
             loaded = list(load_editor_project_workspace(workspace.lyrics_project))
             loaded[2] = (
                 f"### ✅ 已自动恢复上次工程：{workspace.name}\n"
@@ -6052,12 +6925,8 @@ def create_web_app() -> object:
             alignment_language = str(settings.get("alignment_language") or "自动识别")
             alignment_model = str(settings.get("alignment_model") or "profile:fast")
             alignment_device = str(settings.get("alignment_device") or "auto")
-            alignment_separate_vocals = bool(
-                settings.get("alignment_separate_vocals", False)
-            )
-            timing_refinement = _web_timing_refinement(
-                settings.get("timing_refinement", "auto")
-            )
+            alignment_separate_vocals = bool(settings.get("alignment_separate_vocals", False))
+            timing_refinement = _web_timing_refinement(settings.get("timing_refinement", "auto"))
             make_status = f"### ✅ 已恢复工程 `{workspace.name}`\n可以继续编辑或直接制作。"
             return (
                 *loaded,
@@ -6065,6 +6934,7 @@ def create_web_app() -> object:
                 audio,
                 audio,
                 video,
+                str(workspace.lyrics_project),
                 cover,
                 font_files,
                 workspace.name,
@@ -6083,7 +6953,7 @@ def create_web_app() -> object:
                 make_status,
             )
 
-        app.load(
+        restore_workspace_event = app.load(
             restore_recent_workspace,
             outputs=[
                 editor_payload,
@@ -6100,6 +6970,7 @@ def create_web_app() -> object:
                 editor_audio,
                 make_audio,
                 make_video,
+                make_lyrics,
                 make_cover,
                 make_font_files,
                 make_name,
@@ -6117,6 +6988,31 @@ def create_web_app() -> object:
                 main_tabs,
                 make_status,
             ],
+            queue=False,
+        )
+
+        def restore_make_lyrics_input(source: object) -> object:
+            path = _file_path(source)
+            return str(path) if path is not None and path.is_file() else gr.skip()
+
+        restore_workspace_event = restore_workspace_event.then(
+            restore_make_lyrics_input,
+            inputs=editor_source,
+            outputs=make_lyrics,
+            queue=False,
+        )
+        restore_workspace_event = restore_workspace_event.then(
+            prepare_subtitle_material_preview,
+            inputs=material_preview_inputs,
+            outputs=material_preview_outputs,
+            show_progress="hidden",
+            concurrency_limit=1,
+            concurrency_id="make-material-preview",
+        )
+        restore_workspace_event.then(
+            subtitle_preview_html,
+            inputs=preview_inputs,
+            outputs=make_style_preview,
             queue=False,
         )
 
@@ -7065,10 +7961,24 @@ def create_web_app() -> object:
             ],
             api_name="export_editor_project",
         )
-        editor_export_event.then(
+        export_to_make_event = editor_export_event.then(
             exported_project_for_make,
             inputs=editor_downloads,
             outputs=[make_lyrics, make_lyrics_status],
+            queue=False,
+        )
+        export_preview_event = export_to_make_event.then(
+            prepare_subtitle_material_preview,
+            inputs=material_preview_inputs,
+            outputs=material_preview_outputs,
+            show_progress="hidden",
+            concurrency_limit=1,
+            concurrency_id="make-material-preview",
+        )
+        export_preview_event.then(
+            subtitle_preview_html,
+            inputs=preview_inputs,
+            outputs=make_style_preview,
             queue=False,
         )
 
@@ -7276,7 +8186,7 @@ def create_web_app() -> object:
                 make_rights,
                 make_cookie_browser,
                 make_cookie_profile,
-                make_music_u,
+                netease_session_music_u,
                 make_auto_sync,
                 make_timing_refinement,
                 make_show_translation,
@@ -7326,10 +8236,16 @@ def create_web_app() -> object:
             outputs=make_lyrics_status,
             queue=False,
         )
-        make_font_files.change(
+        font_name_event = make_font_files.change(
             lambda files: _file_paths(files)[0].stem if _file_paths(files) else gr.skip(),
             inputs=make_font_files,
             outputs=make_font,
+            queue=False,
+        )
+        font_name_event.then(
+            subtitle_preview_html,
+            inputs=preview_inputs,
+            outputs=make_style_preview,
             queue=False,
         )
         refresh_environment.click(
@@ -7389,7 +8305,7 @@ def launch_web_app(
     cache_root.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("GRADIO_TEMP_DIR", str(cache_root))
 
-    app = create_web_app()
+    app = create_web_app(managed_netease_login=_is_loopback_host(host))
     theme = gr.themes.Base(
         primary_hue="orange",
         secondary_hue="teal",
