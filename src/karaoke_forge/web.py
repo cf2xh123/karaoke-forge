@@ -1256,25 +1256,38 @@ TOKEN_TIMELINE_JS = r"""
     if (karaoke) {
       const lineStart = Number(karaoke.dataset.lineStart);
       const lineEnd = Math.max(lineStart + 0.01, Number(karaoke.dataset.lineEnd));
-      const weights = tokenBlocks.map((block) =>
-        Math.max(1, Array.from(block.dataset.token || "").length)
-      );
-      const totalWeight = Math.max(1, weights.reduce((sum, value) => sum + value, 0));
-      let completedWeight = 0;
+      const measure = karaoke.querySelector(".kf-live-karaoke-measure");
+      const measureBounds = measure?.getBoundingClientRect();
+      const totalWidth = Math.max(0.01, Number(measureBounds?.width || 0));
+      let completedWidth = 0;
       let lyricProgress = absoluteTime >= lineEnd ? 100 : 0;
       for (let index = 0; index < tokenBlocks.length; index += 1) {
         const block = tokenBlocks[index];
         const start = Number(block.dataset.start);
         const end = Math.max(start + 0.01, Number(block.dataset.end));
+        const core = measure?.querySelector(
+          `.kf-karaoke-token-core[data-token-index="${index}"]`
+        );
+        const coreBounds = core?.getBoundingClientRect();
+        const coreStart = Math.max(
+          0,
+          Number(coreBounds?.left || measureBounds?.left || 0) -
+            Number(measureBounds?.left || 0)
+        );
+        const coreEnd = Math.max(
+          coreStart,
+          Number(coreBounds?.right || measureBounds?.left || 0) -
+            Number(measureBounds?.left || 0)
+        );
         if (absoluteTime >= end) {
-          completedWeight += weights[index];
-          lyricProgress = (completedWeight / totalWeight) * 100;
+          completedWidth = coreEnd;
+          lyricProgress = (completedWidth / totalWidth) * 100;
           continue;
         }
         if (absoluteTime >= start) {
           const inside = (absoluteTime - start) / (end - start);
           lyricProgress = (
-            (completedWeight + weights[index] * inside) / totalWeight
+            (coreStart + (coreEnd - coreStart) * inside) / totalWidth
           ) * 100;
         }
         break;
@@ -4852,6 +4865,24 @@ def preview_editor_audio_line(
     return str(target), status
 
 
+def _next_playable_editor_line(
+    document: LyricsDocument,
+    line_number: int,
+) -> int | None:
+    """Find the next visible, non-blank line that has a complete timeline."""
+
+    for candidate_number in range(max(1, int(line_number) + 1), len(document.lines) + 1):
+        candidate = document.lines[candidate_number - 1]
+        if (
+            not candidate.hidden
+            and candidate.text.strip()
+            and candidate.start is not None
+            and candidate.end is not None
+        ):
+            return candidate_number
+    return None
+
+
 def prefetch_editor_audio_line(
     audio_file: object | None,
     payload: dict[str, Any],
@@ -7775,12 +7806,13 @@ def create_web_app(
                 return None, f"已选择第 {line_number} 行；暂时无法自动播放：{exc}"
             try:
                 document = apply_editor_rows(document_from_payload(payload), table)
-                if int(line_number) < len(document.lines):
+                next_line = _next_playable_editor_line(document, int(line_number))
+                if next_line is not None:
                     prefetch_editor_audio_line(
                         audio,
                         document.to_dict(),
                         document_to_editor_rows(document),
-                        int(line_number) + 1,
+                        next_line,
                     )
             except (TypeError, ValueError):
                 pass
@@ -8158,7 +8190,8 @@ def create_web_app(
             loop_enabled: bool,
         ) -> tuple[object, ...]:
             document = apply_editor_rows(document_from_payload(payload), table)
-            if bool(loop_enabled) or int(line_number) >= len(document.lines):
+            target = _next_playable_editor_line(document, int(line_number))
+            if bool(loop_enabled) or target is None:
                 return tuple(
                     gr.skip()
                     for _ in [*editor_line_workspace_outputs, editor_audio_refresh_trigger]
@@ -8172,7 +8205,7 @@ def create_web_app(
                 whole_pronunciation,
                 pronunciation_table,
                 undo_state,
-                1,
+                target - int(line_number),
                 load_audio=False,
             )
             return (*stepped, uuid4().hex)

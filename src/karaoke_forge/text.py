@@ -42,6 +42,18 @@ def split_display_units(text: str) -> list[DisplayUnit]:
     return units
 
 
+def split_edge_whitespace(text: str) -> tuple[str, str, str]:
+    """Return leading whitespace, timed text, and trailing whitespace."""
+
+    leading_length = len(text) - len(text.lstrip())
+    trailing_start = max(len(text.rstrip()), leading_length)
+    return (
+        text[:leading_length],
+        text[leading_length:trailing_start],
+        text[trailing_start:],
+    )
+
+
 def strip_section_label(line: str) -> bool:
     """Return True for common non-sung labels such as [Verse] or 【副歌】."""
 

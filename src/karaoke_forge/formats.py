@@ -245,23 +245,35 @@ def _parse_ass_karaoke(
 
     prefix = _ass_visible_text(value[: matches[0].start()])
     tokens: list[KaraokeToken] = []
+    pending_text = ""
     cursor = line_start
     for index, match in enumerate(matches):
         next_start = matches[index + 1].start() if index + 1 < len(matches) else len(value)
         token_text = _ass_visible_text(value[match.end() : next_start])
         if index == 0 and prefix:
             token_text = prefix + token_text
-        duration = max(0.01, int(match.group(1)) / 100)
+        duration_cs = int(match.group(1))
+        if duration_cs == 0:
+            if token_text:
+                if tokens:
+                    tokens[-1].text += token_text
+                else:
+                    pending_text += token_text
+            continue
+        duration = max(0.01, duration_cs / 100)
         token_end = min(line_end, cursor + duration)
         if token_text:
             tokens.append(
                 KaraokeToken(
-                    text=token_text,
+                    text=pending_text + token_text,
                     start=cursor,
                     end=max(cursor + 0.01, token_end),
                 )
             )
+            pending_text = ""
         cursor = token_end
+    if pending_text and tokens:
+        tokens[-1].text += pending_text
     return "".join(token.text for token in tokens).strip(), tokens
 
 

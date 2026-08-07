@@ -105,7 +105,11 @@ def test_ass_round_trip_preserves_detected_pauses_between_words() -> None:
     output = write_ass(document, AssStyle(show_pronunciation=False))
     restored = parse_ass(output)
 
-    assert r"{\kf10}one {\k10}{\kf20}two {\k110}{\kf40}three" in output
+    assert (
+        r"{\kf10}one{\k0} {\k10}{\kf20}two{\k0} {\k110}{\kf40}three"
+        in output
+    )
+    assert [token.text for token in restored.lines[0].tokens] == ["one ", "two ", "three"]
     assert [round(token.start, 2) for token in restored.lines[0].tokens] == [1.0, 1.2, 2.5]
     assert [round(token.end, 2) for token in restored.lines[0].tokens] == [1.1, 1.4, 2.9]
 
@@ -129,7 +133,7 @@ def test_ass_preserves_a_delayed_first_word_and_uses_token_timing_for_reading() 
     output = write_ass(document)
     restored = parse_ass(output)
 
-    assert r"{\k40}{\kf30}one {\k50}{\kf40}two" in output
+    assert r"{\k40}{\kf30}one{\k0} {\k50}{\kf40}two" in output
     assert r"{\k120}{\kf40}トゥー" in output
     assert [token.start for token in restored.lines[0].tokens] == [1.4, 2.2]
 
