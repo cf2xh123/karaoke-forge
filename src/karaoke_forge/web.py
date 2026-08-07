@@ -89,6 +89,7 @@ from .pipeline import (
 )
 from .projects import (
     PROJECT_FILENAME,
+    WorkspaceProject,
     load_recent_workspace,
     load_workspace_project,
     save_workspace_project,
@@ -2143,6 +2144,60 @@ def _validated_fonts(value: object | None) -> tuple[Path, ...]:
     return fonts
 
 
+def _workspace_for_lyrics_project(lyrics_file: object | None) -> WorkspaceProject | None:
+    """Recover the saved workspace associated with an exported lyrics project."""
+
+    lyrics = _file_path(lyrics_file)
+    if lyrics is None or not lyrics.is_file() or lyrics.suffix.casefold() != ".json":
+        return None
+    try:
+        document = read_lyrics(lyrics)
+        manifest_value = document.metadata.get("workspace_manifest")
+        if not isinstance(manifest_value, str) or not manifest_value.strip():
+            return None
+        manifest = Path(manifest_value)
+        if not manifest.is_absolute():
+            manifest = lyrics.parent / manifest
+        return load_workspace_project(manifest)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _workspace_asset_fallbacks(
+    audio_file: object | None,
+    video_file: object | None,
+    lyrics_file: object | None,
+    cover_file: object | None,
+    font_files: object | None = None,
+) -> tuple[Path | None, Path | None, Path | None, tuple[Path, ...]]:
+    """Fill missing browser file values from their persisted workspace assets."""
+
+    audio = _file_path(audio_file)
+    video = _file_path(video_file)
+    cover = _file_path(cover_file)
+    fonts = _file_paths(font_files)
+    workspace = _workspace_for_lyrics_project(lyrics_file)
+    if workspace is None:
+        return audio, video, cover, fonts
+
+    if audio is None or not audio.is_file() or _is_empty_audio_placeholder(audio):
+        audio = (
+            workspace.audio if workspace.audio is not None and workspace.audio.is_file() else None
+        )
+    if video is None or not video.is_file():
+        video = (
+            workspace.video if workspace.video is not None and workspace.video.is_file() else None
+        )
+    if cover is None or not cover.is_file():
+        cover = (
+            workspace.cover if workspace.cover is not None and workspace.cover.is_file() else None
+        )
+    if not fonts or not any(font.is_file() for font in fonts):
+        saved_fonts = tuple(font for font in workspace.font_files if font.is_file())
+        fonts = saved_fonts
+    return audio, video, cover, fonts
+
+
 def _online_cover_for_job(
     local_cover: Path | None,
     cover_url: str | None,
@@ -2503,14 +2558,18 @@ def prepare_subtitle_material_preview(
     """Build a fast subtitle preview from the song's actual lyrics and artwork."""
 
     notes: list[str] = []
-    audio = _file_path(audio_file)
+    audio, video, cover_value, _fonts = _workspace_asset_fallbacks(
+        audio_file,
+        video_file,
+        lyrics_file,
+        cover_file,
+    )
     if _is_empty_audio_placeholder(audio) or audio is None or not audio.is_file():
         audio = None
-    video = _file_path(video_file)
     if video is None or not video.is_file():
         video = None
     try:
-        cover = _validated_cover(cover_file)
+        cover = _validated_cover(cover_value)
     except ValueError as exc:
         cover = None
         notes.append(str(exc))
@@ -3168,15 +3227,20 @@ def prepare_make_editor_job(
 
     job_dir: Path | None = None
     try:
-        audio = _file_path(audio_file)
+        audio, video, cover_value, font_values = _workspace_asset_fallbacks(
+            audio_file,
+            video_file,
+            lyrics_file,
+            cover_file,
+            font_files,
+        )
         if _is_empty_audio_placeholder(audio):
             report("已忽略网页产生的空音频占位文件，将重新选择可用音源")
             audio = None
-        video = _file_path(video_file)
         if video is not None and not video.is_file():
             video = None
-        cover = _validated_cover(cover_file)
-        fonts = _validated_fonts(font_files)
+        cover = _validated_cover(cover_value)
+        fonts = _validated_fonts(font_values)
         job_dir = _new_job_dir("rehearsal", output_root.strip() or None)
         netease_info = None
         qqmusic_info = None
@@ -3605,15 +3669,20 @@ def run_make_job(
     try:
         if not export_original and not export_instrumental:
             raise ValueError("请至少选择导出原声版或无人声伴奏版中的一种。")
-        audio = _file_path(audio_file)
+        audio, video, cover_value, font_values = _workspace_asset_fallbacks(
+            audio_file,
+            video_file,
+            lyrics_file,
+            cover_file,
+            font_files,
+        )
         if _is_empty_audio_placeholder(audio):
             report("已忽略网页产生的空音频占位文件，将重新选择可用音源")
             audio = None
-        video = _file_path(video_file)
         if video is not None and not video.is_file():
             video = None
-        cover = _validated_cover(cover_file)
-        fonts = _validated_fonts(font_files)
+        cover = _validated_cover(cover_value)
+        fonts = _validated_fonts(font_values)
         if audio is not None and not audio.is_file():
             audio = None
 
@@ -4503,7 +4572,10 @@ def apply_editor_line_action(
     if row_index < 0 or row_index >= len(document.lines):
         raise ValueError("选择的歌词行已经变化，请重新选择。")
 
-    undo_payload = _editor_undo_snapshot(document, int(line_number))
+    # The action can target a row other than the currently playing line (for
+    # example through the overview context menu). Restore focus to the row that
+    # was actually changed so a deleted line is visibly restored after undo.
+    undo_payload = _editor_undo_snapshot(document, row_index + 1)
     rows = document_to_editor_rows(document)
     selected = int(line_number)
     if action == "toggle-hidden":
@@ -5061,7 +5133,12 @@ def handoff_editor_to_make(
     project = next((path for path in files if path.lower().endswith(".json")), None)
     if project is None:
         raise RuntimeError("没有生成可交给 MV 制作的 JSON 项目文件。")
-    audio = _file_path(audio_file)
+    audio, _video, _cover, _fonts = _workspace_asset_fallbacks(
+        audio_file,
+        None,
+        project,
+        None,
+    )
     audio_value = str(audio) if audio is not None and audio.is_file() else None
     status += (
         "\n\n### ✅ 已交给“制作卡拉 OK MV”\n"
@@ -5099,8 +5176,12 @@ def handoff_make_readiness(
             output_dir=None,
         )
 
-    video = _file_path(video_file)
-    cover = _file_path(cover_file)
+    _audio, video, cover, _fonts = _workspace_asset_fallbacks(
+        None,
+        video_file,
+        lyrics,
+        cover_file,
+    )
     if (video is None or not video.is_file()) and (cover is None or not cover.is_file()):
         return UiJobResult(
             status=(
@@ -6351,7 +6432,7 @@ def create_web_app(
                             with gr.Row():
                                 editor_toggle_line_hidden = gr.Button("👁 隐藏 / 显示")
                                 editor_delete_line = gr.Button("🗑 删除")
-                                editor_undo_line_action = gr.Button("↶ 撤销 / 重做")
+                                editor_undo_line_action = gr.Button("↶ 撤销 / 重做（全工程）")
                             with gr.Row():
                                 editor_previous_line = gr.Button(
                                     "← 上一句",

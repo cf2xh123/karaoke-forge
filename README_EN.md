@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.13.1` (Alpha). Windows setup and later launches can now
+> The current release is `0.13.2` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -42,9 +42,11 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
 - Persist lyrics, media, cover art, fonts, and settings, then ask whether to continue the
   latest project or start blank on the next web launch without deleting the saved project;
+  if browser file inputs lose their temporary values, recover assets from the project manifest;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
-- Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with undo support;
+- Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with project-wide
+  undo that restores and focuses the actual edited row even after playback has moved elsewhere;
 - Keep interior word timings fixed when nudging a line edge, and skip blank, hidden, or
   untimed rows during automatic next-line playback;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
@@ -56,7 +58,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.13.1` alpha. Check the generated timeline before a final render.
+This is a usable `0.13.2` alpha. Check the generated timeline before a final render.
 
 ## Install
 

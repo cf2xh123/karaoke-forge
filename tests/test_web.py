@@ -14,7 +14,7 @@ from karaoke_forge.editor import (
 from karaoke_forge.formats import parse_yrc, read_lyrics
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
 from karaoke_forge.netease import NeteaseSongInfo, NeteaseTrack
-from karaoke_forge.projects import load_workspace_project
+from karaoke_forge.projects import PROJECT_FILENAME, load_workspace_project, save_workspace_project
 from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
     EDITOR_STOP_GATE_JS,
@@ -863,6 +863,37 @@ def test_web_editor_right_click_actions_can_hide_delete_and_undo(
     assert "已撤销" in restored[8]
 
 
+def test_web_editor_undo_restores_a_deleted_overview_row_and_focuses_it(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "lyrics.lrc"
+    source.write_text(
+        "[00:01.00]First\n[00:03.00]Second\n[00:05.00]Third\n",
+        encoding="utf-8",
+    )
+    payload, rows, _status, _line_number, *_rest = load_editor_project(str(source))
+
+    # Playback has moved to line 3, while the overview menu deletes line 1.
+    deleted = apply_editor_line_action(
+        payload,
+        rows,
+        3,
+        '{"row":0,"action":"delete"}',
+    )
+    assert [row[4] for row in deleted[1]] == ["Second", "Third"]
+
+    restored = undo_editor_line_action(
+        deleted[0],
+        deleted[1],
+        deleted[2],
+        deleted[9],
+    )
+
+    assert [row[4] for row in restored[1]] == ["First", "Second", "Third"]
+    assert restored[2] == 1
+    assert "已回到发生修改的歌词行" in restored[8]
+
+
 def test_web_editor_empty_undo_is_a_safe_noop(tmp_path: Path) -> None:
     source = tmp_path / "lyrics.lrc"
     source.write_text("[00:01.00]First\n[00:03.00]Second\n", encoding="utf-8")
@@ -1143,6 +1174,91 @@ def test_editor_handoff_is_ready_to_render_with_project_and_mv(tmp_path: Path) -
     video.write_bytes(b"video")
 
     assert handoff_make_readiness(str(video), str(project)) is None
+
+
+def test_saved_workspace_assets_survive_missing_browser_file_values(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    project_dir = tmp_path / "saved-project"
+    project_dir.mkdir()
+    audio = tmp_path / "song.wav"
+    cover = tmp_path / "cover.jpg"
+    font = tmp_path / "pretty.otf"
+    for asset in (audio, cover, font):
+        asset.write_bytes(b"saved asset")
+    lyrics = project_dir / "edited.json"
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                "Saved line",
+                1.0,
+                3.0,
+                [KaraokeToken("Saved line", 1.0, 3.0)],
+            )
+        ],
+        metadata={"workspace_manifest": str(project_dir / PROJECT_FILENAME)},
+        source_format="json",
+    )
+    lyrics.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+    workspace = save_workspace_project(
+        project_dir,
+        name="saved-project",
+        lyrics_project=lyrics,
+        audio=audio,
+        cover=cover,
+        font_files=(font,),
+        recent_root=tmp_path / "outputs",
+    )
+
+    def fake_make(restored_audio, video, source, output, assets, *, options, **_kwargs):
+        assert Path(restored_audio) == workspace.audio
+        assert video is None
+        assert Path(source) == lyrics
+        assert options.cover_image == workspace.cover
+        assert options.font_files == workspace.font_files
+        output = Path(output)
+        output.write_bytes(b"rendered")
+        assets = Path(assets)
+        assets.mkdir(parents=True)
+        exported = assets / "lyrics.json"
+        exported.write_text(lyrics.read_text(encoding="utf-8"), encoding="utf-8")
+        return SimpleNamespace(
+            video=output,
+            exports={"json": exported},
+            document=document,
+            alignment_report=None,
+            sync_result=None,
+        )
+
+    monkeypatch.setattr("karaoke_forge.web.make_karaoke_video", fake_make)
+
+    # Gradio can lose File component values after restoring a previous project.
+    # The persisted workspace linked by the lyrics JSON remains authoritative.
+    result = run_make_job(
+        None,
+        None,
+        str(lyrics),
+        "",
+        "restored-karaoke",
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        "快速预览",
+        0.0,
+        "Pretty",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        timing_refinement="off",
+        output_root=str(tmp_path / "renders"),
+    )
+
+    assert result.video is not None
+    assert handoff_make_readiness(None, str(lyrics), None) is None
 
 
 def test_make_page_prepares_editor_without_reuploading_inputs(
