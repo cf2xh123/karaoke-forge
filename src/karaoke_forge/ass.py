@@ -14,6 +14,7 @@ from .pronunciation import (
     contains_english_word,
     generate_pronunciation,
 )
+from .text import split_edge_whitespace
 from .timecode import ass_clock
 
 
@@ -171,8 +172,17 @@ def _karaoke_text(line: LyricLine) -> str:
             # the visible text unchanged. Without it, every detected pause is
             # removed and all later words sweep progressively too early.
             parts.append(r"{\k" + str(gap_cs) + "}")
+        leading, core, trailing = split_edge_whitespace(token.text)
+        if leading:
+            parts.append(r"{\k0}")
+            parts.append(_escape_ass_text(leading))
         parts.append(r"{\kf" + str(token_end_cs - token_start_cs) + "}")
-        parts.append(_escape_ass_text(token.text))
+        parts.append(_escape_ass_text(core))
+        if trailing:
+            # Keep display spacing, but do not spend the sung word's duration
+            # sweeping through invisible whitespace.
+            parts.append(r"{\k0}")
+            parts.append(_escape_ass_text(trailing))
         cursor_cs = token_end_cs
     return "".join(parts)
 
@@ -203,16 +213,19 @@ def _pronunciation_source_timing(
             character_start = search_from
         character_end = min(len(line.text), character_start + len(token.text))
         search_from = max(search_from, character_end)
-        overlap_start = max(source_start, character_start)
-        overlap_end = min(source_end, character_end)
-        if overlap_end <= overlap_start or character_end <= character_start:
+        leading, core, _trailing = split_edge_whitespace(token.text)
+        timed_start = min(character_end, character_start + len(leading))
+        timed_end = min(character_end, timed_start + len(core))
+        overlap_start = max(source_start, timed_start)
+        overlap_end = min(source_end, timed_end)
+        if overlap_end <= overlap_start or timed_end <= timed_start:
             continue
         duration = max(0.01, token.end - token.start)
-        span = character_end - character_start
+        span = timed_end - timed_start
         mapped.append(
             (
-                token.start + duration * (overlap_start - character_start) / span,
-                token.start + duration * (overlap_end - character_start) / span,
+                token.start + duration * (overlap_start - timed_start) / span,
+                token.start + duration * (overlap_end - timed_start) / span,
             )
         )
     if not mapped:

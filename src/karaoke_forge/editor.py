@@ -11,7 +11,7 @@ from typing import Any
 from .formats import parse_json
 from .models import KaraokeToken, LyricLine, LyricsDocument, PronunciationSpan
 from .pronunciation import generate_pronunciation
-from .text import split_display_units
+from .text import split_display_units, split_edge_whitespace
 
 LINE_STATUS_VISIBLE = "显示"
 LINE_STATUS_HIDDEN = "隐藏"
@@ -440,7 +440,7 @@ def nudge_editor_line_timing(
     start_delta: float = 0.0,
     end_delta: float = 0.0,
 ) -> LyricsDocument:
-    """Apply table edits, then nudge one line while rescaling its word timing."""
+    """Nudge one line edge without shifting already-correct interior tokens."""
 
     current = apply_editor_rows(document, table)
     index = int(line_number) - 1
@@ -449,12 +449,21 @@ def nudge_editor_line_timing(
     line = current.lines[index]
     if line.start is None or line.end is None:
         raise ValueError("当前歌词行没有完整时间，无法微调。")
-    rows = document_to_editor_rows(current)
-    rows[index][2] = max(0.0, line.start + float(start_delta))
-    rows[index][3] = line.end + float(end_delta)
-    if float(rows[index][3]) <= float(rows[index][2]):
+    new_start = max(0.0, line.start + float(start_delta))
+    new_end = line.end + float(end_delta)
+    if new_end <= new_start:
         raise ValueError("微调后结束时间必须晚于开始时间。")
-    return apply_editor_rows(current, rows)
+    if line.tokens:
+        if new_start >= line.tokens[0].end:
+            raise ValueError("微调后句首会越过第一个词的结束时间。")
+        if new_end <= line.tokens[-1].start:
+            raise ValueError("微调后句尾会越过最后一个词的开始时间。")
+        line.tokens[0].start = new_start
+        line.tokens[-1].end = new_end
+    line.start = new_start
+    line.end = new_end
+    current.metadata["word_timing"] = "manual"
+    return current
 
 
 def _line_ruby_html(
@@ -593,6 +602,30 @@ def editor_preview_html(document: LyricsDocument, line_number: int) -> str:
             auto_english_pronunciation=auto_english_pronunciation,
         )
 
+    def timing_measure_html(value: LyricLine) -> str:
+        if value.start is None or value.end is None:
+            return ""
+        tokens = value.tokens or _synthetic_tokens(value.text, value.start, value.end)
+        parts: list[str] = []
+        for token_index, token in enumerate(tokens):
+            leading, core, trailing = split_edge_whitespace(token.text)
+            parts.extend(
+                [
+                    f'<span class="kf-karaoke-token-space">{html.escape(leading)}</span>',
+                    (
+                        '<span class="kf-karaoke-token-core" '
+                        f'data-token-index="{token_index}">{html.escape(core)}</span>'
+                    ),
+                    f'<span class="kf-karaoke-token-space">{html.escape(trailing)}</span>',
+                ]
+            )
+        return (
+            '<span class="kf-live-karaoke-measure" aria-hidden="true" '
+            'style="position:absolute;left:0;top:0;visibility:hidden;'
+            'pointer-events:none;white-space:inherit;">'
+            f"{''.join(parts)}</span>"
+        )
+
     state = "暂时隐藏" if line.hidden else "显示"
     translation = (
         f'<div class="kf-editor-preview-translation">{html.escape(line.translation)}</div>'
@@ -621,7 +654,7 @@ def editor_preview_html(document: LyricsDocument, line_number: int) -> str:
             '<div class="kf-live-karaoke-fill" '
             'style="position:absolute;inset:0;color:#ffd54a;'
             'clip-path:inset(0 100% 0 0);">'
-            f"{ruby_html(line)}</div></div>"
+            f"{ruby_html(line)}</div>{timing_measure_html(line)}</div>"
         )
     upcoming = f'<div style="color:white">{ruby_html(following)}</div>' if following else ""
     if visible_index is not None and visible_index % 2:

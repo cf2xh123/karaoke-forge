@@ -118,9 +118,13 @@ def test_editor_scales_existing_tokens_when_line_time_changes() -> None:
     assert edited.lines[0].tokens[-1].end == 6.0
 
 
-def test_editor_nudges_line_bounds_and_keeps_word_timing_in_sync() -> None:
-    document = parse_lrc("[00:01.00]Hello world\n[00:03.00]Next\n")
+def test_editor_nudges_only_edge_tokens_and_keeps_the_interior_fixed() -> None:
+    document = parse_lrc("[00:01.00]Hello brave world\n[00:04.00]Next\n")
     rows = document_to_editor_rows(document)
+    original = [
+        (token.start, token.end)
+        for token in document.lines[0].tokens
+    ]
 
     edited = nudge_editor_line_timing(
         document,
@@ -131,9 +135,12 @@ def test_editor_nudges_line_bounds_and_keeps_word_timing_in_sync() -> None:
     )
 
     assert edited.lines[0].start == 1.1
-    assert edited.lines[0].end == 2.88
+    assert edited.lines[0].end == 3.88
     assert edited.lines[0].tokens[0].start == 1.1
-    assert edited.lines[0].tokens[-1].end == 2.88
+    assert edited.lines[0].tokens[0].end == original[0][1]
+    assert (edited.lines[0].tokens[1].start, edited.lines[0].tokens[1].end) == original[1]
+    assert edited.lines[0].tokens[-1].start == original[-1][0]
+    assert edited.lines[0].tokens[-1].end == 3.88
 
 
 def test_editor_saves_word_pronunciation_and_ass_uses_it() -> None:
@@ -221,6 +228,8 @@ def test_editor_applies_visual_per_token_timing() -> None:
     preview = editor_preview_html(edited, 1)
     assert "kf-live-karaoke-current" in preview
     assert "kf-live-karaoke-fill" in preview
+    assert "kf-live-karaoke-measure" in preview
+    assert preview.count("kf-karaoke-token-core") == 2
     assert "kf-editor-preview-stage" in preview
     assert "kf-editor-preview-upper" in preview
     assert "kf-editor-preview-lower" in preview

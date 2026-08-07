@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.13.0` (Alpha). Windows setup and later launches can now
+> The current release is `0.13.1` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -17,6 +17,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Choose Fast, Balanced, or KTV Precise recognition; the precise preset line-bounds
   CTranslate2 alignment to the supplied lyrics and accepts only timings that pass quality checks;
 - Preserve first-word delays and real pauses between tokens in ASS karaoke sweeps;
+- Keep whitespace out of preview and ASS sweep duration, so long lyric gaps do not delay
+  the highlighted letter or race across the line before the next word;
 - Correct fixed offsets and gradual or local tempo drift in line-timed lyrics with reliable anchors;
 - Keep low-confidence, abnormally long, or context-free ASR matches from controlling final timing;
 - Read TXT, LRC, enhanced LRC, SRT, VTT, ASS, and project JSON;
@@ -43,6 +45,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with undo support;
+- Keep interior word timings fixed when nudging a line edge, and skip blank, hidden, or
+  untimed rows during automatic next-line playback;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview the song's actual lyrics against a matching MV frame, or against the selected
   cover-art scene when no MV is available; a link-only source uses online cover art and a
@@ -52,7 +56,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.13.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.13.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 

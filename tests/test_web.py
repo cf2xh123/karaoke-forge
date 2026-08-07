@@ -25,6 +25,7 @@ from karaoke_forge.web import (
     _file_path,
     _is_loopback_host,
     _NeteaseSessionBroker,
+    _next_playable_editor_line,
     _prepare_lyrics,
     _recent_workspace_offer,
     _record_web_error,
@@ -570,6 +571,8 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert "__karaokeForgeTokenAuditionActive" in TOKEN_TIMELINE_JS
     assert "capturedTimeline.isConnected" in TOKEN_TIMELINE_JS
     assert "clearAuditionAfterLineChange" in TOKEN_TIMELINE_JS
+    assert ".kf-live-karaoke-measure" in TOKEN_TIMELINE_JS
+    assert ".kf-karaoke-token-core" in TOKEN_TIMELINE_JS
     assert "__karaokeForgeTokenAuditionGuardUntil" in EDITOR_STOP_GATE_JS
     assert "__karaokeForgeSuppressAutoAdvanceUntil" not in EDITOR_STOP_GATE_JS
     assert "const stoppedLine = Number(args[3])" in EDITOR_STOP_GATE_JS
@@ -577,6 +580,21 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert "__karaokeForgeEditorMutationGuardLine" in EDITOR_STOP_GATE_JS
     assert '"#editor-current-line input"' in EDITOR_STOP_GATE_JS
     assert "window.setTimeout(resolve, 55)" in EDITOR_STOP_GATE_JS
+
+
+def test_auto_advance_skips_hidden_blank_and_untimed_lines() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine("first", 1.0, 2.0),
+            LyricLine("", 2.0, 3.0),
+            LyricLine("   ", None, None),
+            LyricLine("hidden", 3.0, 4.0, hidden=True),
+            LyricLine("next", 4.0, 5.0),
+        ]
+    )
+
+    assert _next_playable_editor_line(document, 1) == 5
+    assert _next_playable_editor_line(document, 5) is None
 
 
 def test_safe_stem_removes_windows_path_characters() -> None:
