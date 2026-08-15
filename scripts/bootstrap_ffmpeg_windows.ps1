@@ -386,9 +386,6 @@ try {
         throw "The FFmpeg tools were not stored in the expected bin directory."
     }
     $CandidateDir = $FfmpegMatches[0].Directory.Parent.FullName
-    if (-not (Test-FfmpegRuntime $CandidateDir)) {
-        throw "The extracted FFmpeg runtime could not be started."
-    }
 
     $PreviousMoved = $false
     try {

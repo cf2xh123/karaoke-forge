@@ -5,6 +5,7 @@ import urllib.error
 
 import pytest
 
+from karaoke_forge import network
 from karaoke_forge.network import (
     APPROVED_MIRROR_ENDPOINT,
     DOMESTIC_MODELSCOPE_ENDPOINT,
@@ -35,6 +36,24 @@ def _mirror_settings() -> ModelDownloadSettings:
         mirror_endpoint=APPROVED_MIRROR_ENDPOINT,
         mirror_confirmed=True,
     )
+
+
+def test_model_tls_context_uses_certifi_instead_of_the_windows_store(monkeypatch) -> None:
+    import certifi
+
+    sentinel = object()
+    observed: dict[str, str] = {}
+
+    monkeypatch.setattr(certifi, "where", lambda: "C:/trusted/cacert.pem")
+
+    def fake_create_default_context(*, cafile):
+        observed["cafile"] = cafile
+        return sentinel
+
+    monkeypatch.setattr(network.ssl, "create_default_context", fake_create_default_context)
+
+    assert network._model_ssl_context() is sentinel
+    assert observed == {"cafile": "C:/trusted/cacert.pem"}
 
 
 def test_missing_settings_default_to_verified_domestic_source(tmp_path) -> None:

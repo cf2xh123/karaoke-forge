@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.13.2` (Alpha). Windows setup and later launches can now
+> The current release is `0.14.0` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -36,7 +36,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Prefer `exhigh`, `higher`, or `standard` NetEase audio for alignment and MV creation
   even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
   downloads while retaining authenticated song access;
-- Render translation at the top and paired original lyrics in a split KTV layout;
+- Render translation at an adjustable distance from the top and paired original lyrics in a split KTV layout;
+- Clear lyrics across long instrumental gaps, then cue the next line with a configurable
+  three-dot countdown during the final three seconds before singing resumes;
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
 - Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
@@ -54,11 +56,12 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   cover-art scene when no MV is available; a link-only source uses online cover art and a
   waveform-layout sample until real audio is downloaded;
 - Optionally separate vocals with Demucs before recognition;
-- On Windows, install and verify a project-private FFmpeg build; model downloads prefer
+- On Windows, install and verify a project-private FFmpeg build, and cap libx264 subtitle-render
+  threads to prevent native crashes near the end of long videos; model downloads prefer
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.13.2` alpha. Check the generated timeline before a final render.
+This is a usable `0.14.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 

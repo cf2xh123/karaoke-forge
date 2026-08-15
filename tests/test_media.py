@@ -335,6 +335,47 @@ def test_render_passes_uploaded_fonts_to_libass(tmp_path, monkeypatch) -> None:
     assert command[command.index("-vf") + 1] == "ass=filename=karaoke.ass:fontsdir=fonts"
 
 
+def test_render_limits_libx264_threads_on_windows(tmp_path, monkeypatch) -> None:
+    video = tmp_path / "video.mp4"
+    subtitles = tmp_path / "lyrics.ass"
+    output = tmp_path / "karaoke.mp4"
+    video.write_bytes(b"video")
+    subtitles.write_text("[Script Info]\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr("karaoke_forge.media.sys.platform", "win32")
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output.write_bytes(b"video")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("karaoke_forge.media.subprocess.run", fake_run)
+
+    render_karaoke_video(video, subtitles, output)
+
+    command = captured["command"]
+    assert command[command.index("-threads:v") + 1] == "4"
+
+
+def test_render_explains_windows_native_ffmpeg_crashes(tmp_path, monkeypatch) -> None:
+    video = tmp_path / "video.mp4"
+    subtitles = tmp_path / "lyrics.ass"
+    video.write_bytes(b"video")
+    subtitles.write_text("[Script Info]\n", encoding="utf-8")
+    monkeypatch.setattr("karaoke_forge.media.find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        "karaoke_forge.media.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=-1073741819,
+            stdout="native encoder crash",
+        ),
+    )
+
+    with pytest.raises(MediaError, match="Windows 字幕烧录期间发生原生崩溃"):
+        render_karaoke_video(video, subtitles, tmp_path / "karaoke.mp4")
+
+
 def test_separate_vocals_rejects_cuda_when_torch_is_cpu_only(tmp_path, monkeypatch) -> None:
     audio = tmp_path / "song.m4a"
     audio.write_bytes(b"audio")
@@ -360,6 +401,8 @@ def test_separate_vocals_streams_progress_and_uses_requested_device(tmp_path, mo
     vocals = output_dir / "htdemucs" / "song" / "vocals.wav"
     instrumental = output_dir / "htdemucs" / "song" / "no_vocals.wav"
     captured: dict[str, object] = {}
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
 
     class FakeProcess:
         stdout = iter(["Downloading model\n", "100% separated\n"])

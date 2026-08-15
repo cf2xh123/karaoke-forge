@@ -17,6 +17,8 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from .network import _model_ssl_context
+
 MODELSCOPE_ENDPOINT = "https://modelscope.cn"
 MARKER_FILENAME = ".karaoke-forge-model.json"
 MARKER_SCHEMA_VERSION = 1
@@ -573,6 +575,7 @@ def _build_trusted_modelscope_opener() -> _Opener:
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _TrustedModelScopeRedirectHandler(),
+        urllib.request.HTTPSHandler(context=_model_ssl_context()),
     )
 
 
@@ -731,7 +734,7 @@ def _download_file(
             raise DomesticModelDownloadError(f"模型文件多次中断，已保留断点：{item.path}")
         headers = {
             "Accept-Encoding": "identity",
-            "User-Agent": "Karaoke-Forge/0.13.2",
+            "User-Agent": "Karaoke-Forge/0.14.0",
         }
         if current:
             headers["Range"] = f"bytes={current}-"

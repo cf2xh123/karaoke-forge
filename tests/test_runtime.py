@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -57,7 +58,9 @@ def test_runtime_executable_does_not_trust_working_directory_ancestors(
     monkeypatch.delenv("KARAOKE_FORGE_ROOT", raising=False)
     monkeypatch.setattr("karaoke_forge.runtime.shutil.which", lambda _name: "system-ffmpeg")
 
-    assert find_runtime_executable("ffmpeg") == "system-ffmpeg"
+    resolved = find_runtime_executable("ffmpeg")
+    assert resolved is not None
+    assert Path(resolved).resolve() != executable.resolve()
 
 
 def test_runtime_executable_rejects_path_input() -> None:

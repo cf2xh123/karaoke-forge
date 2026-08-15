@@ -113,3 +113,14 @@ def test_private_ffmpeg_bootstrap_hardens_extraction_and_rolls_back() -> None:
     assert "FileShare]::None" in bootstrap
     assert "ffmpeg-backup-" in bootstrap
     assert "Move-Item -LiteralPath $BackupDir -Destination $RuntimeDir" in bootstrap
+
+
+def test_private_ffmpeg_is_started_only_after_staging_is_published() -> None:
+    bootstrap = (
+        PROJECT_ROOT / "scripts" / "bootstrap_ffmpeg_windows.ps1"
+    ).read_text(encoding="ascii")
+
+    publish = "Move-Item -LiteralPath $CandidateDir -Destination $RuntimeDir"
+    validate = "if (-not (Test-FfmpegRuntime $RuntimeDir))"
+    assert "Test-FfmpegRuntime $CandidateDir" not in bootstrap
+    assert bootstrap.index(publish) < bootstrap.index(validate)

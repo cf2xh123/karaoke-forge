@@ -19,6 +19,7 @@ from karaoke_forge.pronunciation import PronunciationLine, PronunciationUnit
 from karaoke_forge.web import (
     EDITOR_STOP_GATE_JS,
     TOKEN_TIMELINE_JS,
+    _build_style,
     _cached_public_netease_preview_info,
     _editor_clip_target,
     _editor_document_with_pending_changes,
@@ -138,6 +139,27 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
             str(getattr(component, "label", "")).startswith("手动 MUSIC_U")
             for component in block_function.inputs
         )
+    material_preview_callbacks = [
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "prepare_subtitle_material_preview"
+    ]
+    assert material_preview_callbacks
+    assert all(len(callback.outputs) == 8 for callback in material_preview_callbacks)
+    translation_position = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "label", None) == "翻译距顶部"
+    )
+    subtitle_preview_callbacks = [
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "subtitle_preview_html"
+    ]
+    assert subtitle_preview_callbacks
+    assert all(
+        translation_position in callback.inputs for callback in subtitle_preview_callbacks
+    )
     lyrics = tmp_path / "restored-project.json"
     lyrics.write_text(
         json.dumps(
@@ -175,7 +197,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
     )
     restored = restore_callback.fn(str(workspace.manifest))
 
-    assert len(restore_callback.outputs) == len(restored) == 22
+    assert len(restore_callback.outputs) == len(restored) == 25
     assert restored[-2]["visible"] is False
     assert "已恢复工程" in restored[-1]
     for marker, expected in restored_files.items():
@@ -1753,6 +1775,7 @@ def test_subtitle_preview_reflects_translation_pronunciation_and_style(
         "#FFFFFF",
         "It's silence\nbeyond this ocean?",
         "花园。",
+        translation_margin_v=270,
     )
 
     assert "Microsoft YaHei" in preview
@@ -1764,6 +1787,24 @@ def test_subtitle_preview_reflects_translation_pronunciation_and_style(
     assert 'data-kf-layout="ktv-split"' in preview
     assert "KTV 双行布局" in preview
     assert "サンプル" in preview
+    assert "top:25.00%" in preview
+
+
+def test_web_style_builds_translation_position_and_instrumental_cue() -> None:
+    style = _build_style(
+        "Microsoft YaHei",
+        58,
+        "#FFFFFF",
+        "#FFD54A",
+        72,
+        translation_margin_v=188,
+        show_countdown=False,
+        countdown_gap_threshold=12,
+    )
+
+    assert style.translation_margin_v == 188
+    assert not style.show_countdown
+    assert style.countdown_gap_threshold == 12
 
 
 def test_subtitle_preview_sample_matches_ass_rows_and_token_progress() -> None:

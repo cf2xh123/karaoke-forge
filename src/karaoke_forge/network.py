@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import tempfile
 import time
 import urllib.error
@@ -44,6 +45,18 @@ _MANAGED_ENVIRONMENT_KEYS = (
     "http_proxy",
     "https_proxy",
 )
+
+
+def _model_ssl_context() -> ssl.SSLContext:
+    """Use a deterministic CA bundle instead of a potentially corrupt OS store."""
+
+    try:
+        import certifi
+    except ImportError as exc:
+        raise NetworkSettingsError(
+            "模型下载缺少 TLS 证书包；请重新运行首次安装或更新依赖。"
+        ) from exc
+    return ssl.create_default_context(cafile=certifi.where())
 
 ModelDownloadMode = Literal["modelscope", "official", "proxy", "mirror", "offline"]
 _VALID_MODES = frozenset({"modelscope", "official", "proxy", "mirror", "offline"})
@@ -542,7 +555,10 @@ def test_model_download_network(
     if selected.mode == "proxy":
         assert selected.proxy_url is not None
         proxy_map = {"http": selected.proxy_url, "https": selected.proxy_url}
-    selected_opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler(proxy_map))
+    selected_opener = opener or urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxy_map),
+        urllib.request.HTTPSHandler(context=_model_ssl_context()),
+    )
     if selected.mode == "modelscope":
         probe_url = f"{selected.endpoint}/api/v1/models/Systran/faster-whisper-small"
     else:

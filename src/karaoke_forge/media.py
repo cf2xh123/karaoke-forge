@@ -903,6 +903,7 @@ def render_karaoke_video(
             [
                 "-c:v",
                 "libx264",
+                *(["-threads:v", "4"] if sys.platform == "win32" else []),
                 "-preset",
                 preset,
                 "-crf",
@@ -952,6 +953,19 @@ def render_karaoke_video(
                     "输出磁盘空间不足，FFmpeg 无法继续写入视频。\n"
                     f"输出目录：{output.parent}\n"
                     f"{cleanup} 请更换到空间更充足的输出目录，建议至少预留 2 GB。"
+                )
+            windows_native_crashes = {
+                0xC0000005,
+                -1073741819,
+                0xC000001D,
+                -1073741795,
+            }
+            if completed.returncode in windows_native_crashes:
+                raise MediaError(
+                    "FFmpeg 在 Windows 字幕烧录期间发生原生崩溃"
+                    f"（退出码 {completed.returncode}）。请重新运行“启动网页版.bat”修复私有 "
+                    "FFmpeg；若仍然失败，请检查 CPU、内存和剩余磁盘空间。\n"
+                    f"FFmpeg 最后输出：\n{tail}"
                 )
             raise MediaError(f"FFmpeg failed with exit code {completed.returncode}:\n{tail}")
     return output
