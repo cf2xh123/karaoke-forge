@@ -33,6 +33,9 @@ class AssStyle:
     translation_font_size: int = 38
     translation_color: str = "#EAF4FF"
     translation_margin_v: int = 54
+    show_countdown: bool = True
+    countdown_gap_threshold: float = 8.0
+    countdown_lead_in: float = 3.0
     karaoke_row_gap: int = 72
     karaoke_margin_h: int = 100
     show_pronunciation: bool = True
@@ -156,16 +159,28 @@ def _text_width(text: str, style: AssStyle) -> float:
     return _fallback_text_width(text, style.font_size)
 
 
-def _karaoke_text(line: LyricLine) -> str:
+def _karaoke_text(line: LyricLine, render_end: float | None = None) -> str:
     """Build ASS karaoke tags without collapsing pauses between tokens."""
 
     assert line.start is not None
+    assert line.end is not None
+    scale = 1.0
+    if render_end is not None and render_end < line.end - 0.01:
+        source_duration = max(0.01, line.end - line.start)
+        scale = max(0.01, render_end - line.start) / source_duration
+
+    def rendered_time(value: float) -> float:
+        return line.start + (value - line.start) * scale
+
     line_start_cs = round(line.start * 100)
     cursor_cs = 0
     parts: list[str] = []
     for token in line.tokens:
-        token_start_cs = max(cursor_cs, round(token.start * 100) - line_start_cs)
-        token_end_cs = max(token_start_cs + 1, round(token.end * 100) - line_start_cs)
+        token_start_cs = max(cursor_cs, round(rendered_time(token.start) * 100) - line_start_cs)
+        token_end_cs = max(
+            token_start_cs + 1,
+            round(rendered_time(token.end) * 100) - line_start_cs,
+        )
         gap_cs = token_start_cs - cursor_cs
         if gap_cs:
             # An empty \k syllable advances libass' karaoke clock while leaving
@@ -185,6 +200,74 @@ def _karaoke_text(line: LyricLine) -> str:
             parts.append(_escape_ass_text(trailing))
         cursor_cs = token_end_cs
     return "".join(parts)
+
+
+def _estimated_display_end(
+    line: LyricLine,
+    following: LyricLine | None,
+    gap_threshold: float,
+) -> float:
+    """Return the point after which the line should leave an instrumental gap.
+
+    Source word timing normally gives us the real sung end. Plain line-timed LRC
+    instead stretches a line to just before the next timestamp, including a long
+    instrumental break. In that one recognisable case, cap the display using a
+    conservative text-length estimate so the break can still be presented cleanly.
+    """
+
+    assert line.start is not None and line.end is not None
+    end = line.end
+    if following is None or following.start is None:
+        return max(line.start + 0.01, end)
+
+    next_start = following.start
+    if line.tokens:
+        token_end = min(end, max(token.end for token in line.tokens))
+        if next_start - token_end >= gap_threshold:
+            end = token_end
+    fills_whole_interval = end >= next_start - 0.25
+    if fills_whole_interval:
+        visible_characters = sum(not char.isspace() for char in line.text)
+        estimated_duration = max(3.0, min(8.0, 1.5 + visible_characters * 0.42))
+        inferred_end = min(end, line.start + estimated_duration)
+        if next_start - inferred_end >= gap_threshold:
+            end = inferred_end
+    return max(line.start + 0.01, end)
+
+
+def _inactive_display_windows(
+    lines: list[LyricLine],
+    render_ends: list[float],
+    break_before: dict[int, tuple[float, float]],
+    index: int,
+    lead_in: float,
+) -> list[tuple[float, float]]:
+    """Split an upcoming-line preview around a long instrumental break."""
+
+    line = lines[index]
+    assert line.start is not None
+    previous = lines[index - 1] if index else None
+    following = lines[index + 1] if index + 1 < len(lines) else None
+    display_start = previous.start if previous is not None else line.start
+    display_end = following.start if following is not None else render_ends[index]
+    assert display_start is not None and display_end is not None
+
+    after_break = break_before.get(index)
+    before_break = break_before.get(index + 1)
+    windows: list[tuple[float, float]] = []
+    if after_break is not None:
+        # Keep the normal next-line preview while the preceding line is being
+        # sung, clear it during the instrumental, then bring it back for the cue.
+        if previous is not None:
+            windows.append((display_start, min(render_ends[index - 1], line.start)))
+        cue_start = max(after_break[0], line.start - lead_in)
+        windows.append((cue_start, display_end))
+    else:
+        windows.append((display_start, display_end))
+
+    if before_break is not None:
+        windows = [(start, min(end, render_ends[index])) for start, end in windows]
+    return [(start, end) for start, end in windows if end >= start + 0.01]
 
 
 def _pronunciation_source_timing(
@@ -294,8 +377,34 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
     outline = _ass_color(style.outline_color)
     translation = _ass_color(style.translation_color)
     pronunciation_color = _ass_color(style.pronunciation_color)
+    countdown_muted = _ass_color(style.text_color, alpha=0x88)
     upper_margin = style.margin_v + style.font_size + style.karaoke_row_gap
     pronunciation_outline = max(1.0, min(style.outline, 2.0))
+    countdown_size = max(28, round(style.font_size * 0.55))
+    countdown_y = max(
+        40,
+        height
+        - upper_margin
+        - style.font_size
+        - (style.pronunciation_font_size if style.show_pronunciation else 0)
+        - 24,
+    )
+    gap_threshold = max(1.0, float(style.countdown_gap_threshold))
+    lead_in = max(0.5, float(style.countdown_lead_in))
+    render_ends = [
+        _estimated_display_end(
+            line,
+            lines[index + 1] if index + 1 < len(lines) else None,
+            gap_threshold,
+        )
+        for index, line in enumerate(lines)
+    ]
+    break_before: dict[int, tuple[float, float]] = {}
+    for index, line in enumerate(lines):
+        assert line.start is not None
+        gap_start = render_ends[index - 1] if index else 0.0
+        if line.start - gap_start >= gap_threshold:
+            break_before[index] = (gap_start, line.start)
 
     header = f"""[Script Info]
 ; Generated by Karaoke Forge
@@ -314,6 +423,7 @@ Style: KaraokeLowerInactive,{style.font},{style.font_size},{secondary},{secondar
 Style: Pronunciation,{style.font},{style.pronunciation_font_size},{primary},{pronunciation_color},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 Style: PronunciationInactive,{style.font},{style.pronunciation_font_size},{pronunciation_color},{pronunciation_color},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 Style: Translation,{style.font},{style.translation_font_size},{translation},{translation},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},8,60,60,{style.translation_margin_v},1
+Style: Countdown,{style.font},{countdown_size},{primary},{primary},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -333,57 +443,81 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     ]
 
     # Keep the current line and the next line visible, then roll one row at a
-    # time. While B is active on the lower row, A has already been replaced by
-    # the C preview on the upper row; the layout never waits for an A/B page to
-    # finish before revealing C/D.
+    # time. Long instrumental breaks are split into two preview windows so the
+    # middle remains visually clean and the upcoming line returns for its cue.
     for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
-        previous = lines[index - 1] if index else None
-        following = lines[index + 1] if index + 1 < len(lines) else None
-        display_start = previous.start if previous is not None else line.start
-        display_end = following.start if following is not None else line.end
-        assert display_start is not None and display_end is not None
-        if display_end <= display_start:
-            display_end = max(line.end, display_start + 0.01)
         row = index % 2
         inactive_style = "KaraokeInactive" if row == 0 else "KaraokeLowerInactive"
-        events.append(
-            "Dialogue: 0,"
-            f"{ass_clock(display_start)},{ass_clock(display_end)},"
-            f"{inactive_style},,0,0,0,,"
-            f"{{\\fad(120,180)}}{_escape_ass_text(line.text)}"
-        )
         pronunciation = pronunciations[index]
-        if pronunciation is not None:
-            for unit in pronunciation.units:
-                if not unit.reading.strip():
-                    continue
-                x, y = _pronunciation_position(line, unit, row, style)
+        for display_start, display_end in _inactive_display_windows(
+            lines,
+            render_ends,
+            break_before,
+            index,
+            lead_in,
+        ):
+            events.append(
+                "Dialogue: 0,"
+                f"{ass_clock(display_start)},{ass_clock(display_end)},"
+                f"{inactive_style},,0,0,0,,"
+                f"{{\\fad(120,180)}}{_escape_ass_text(line.text)}"
+            )
+            if pronunciation is not None:
+                for unit in pronunciation.units:
+                    if not unit.reading.strip():
+                        continue
+                    x, y = _pronunciation_position(line, unit, row, style)
+                    events.append(
+                        "Dialogue: 0,"
+                        f"{ass_clock(display_start)},{ass_clock(display_end)},"
+                        "PronunciationInactive,,0,0,0,,"
+                        f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
+                        f"{_escape_ass_text(unit.reading)}"
+                    )
+
+    if style.show_countdown:
+        for index, (gap_start, line_start) in break_before.items():
+            cue_start = max(gap_start, line_start - lead_in)
+            cue_duration = line_start - cue_start
+            if cue_duration < 0.03:
+                continue
+            stage_duration = cue_duration / 3
+            for stage in range(3):
+                start = cue_start + stage * stage_duration
+                end = line_start if stage == 2 else cue_start + (stage + 1) * stage_duration
+                dots = []
+                for dot in range(3):
+                    color = primary if dot <= stage else countdown_muted
+                    dots.append(f"{{\\1c{color}}}●")
                 events.append(
-                    "Dialogue: 0,"
-                    f"{ass_clock(display_start)},{ass_clock(display_end)},"
-                    "PronunciationInactive,,0,0,0,,"
-                    f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
-                    f"{_escape_ass_text(unit.reading)}"
+                    "Dialogue: 4,"
+                    f"{ass_clock(start)},{ass_clock(end)},Countdown,,0,0,0,,"
+                    f"{{\\an2\\pos({width / 2:.1f},{countdown_y:.1f})"
+                    "\\fad(100,120)\\fscx92\\fscy92"
+                    "\\t(0,260,\\fscx116\\fscy116)"
+                    "\\t(260,700,\\fscx100\\fscy100)}}"
+                    + r"\h\h".join(dots)
                 )
 
     for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
+        render_end = render_ends[index]
         if style.show_translation and line.translation:
             events.append(
                 "Dialogue: 3,"
-                f"{ass_clock(line.start)},{ass_clock(line.end)},"
+                f"{ass_clock(line.start)},{ass_clock(render_end)},"
                 f"Translation,,0,0,0,,{{\\fad(120,180)}}"
                 f"{_escape_ass_text(line.translation)}"
             )
         if line.tokens:
-            lyric_text = _karaoke_text(line)
+            lyric_text = _karaoke_text(line, render_end)
         else:
             lyric_text = _escape_ass_text(line.text)
         karaoke_style = "Karaoke" if index % 2 == 0 else "KaraokeLower"
         events.append(
             "Dialogue: 1,"
-            f"{ass_clock(line.start)},{ass_clock(line.end)},"
+            f"{ass_clock(line.start)},{ass_clock(render_end)},"
             f"{karaoke_style},,0,0,0,,{{\\fad(120,180)}}{lyric_text}"
         )
         pronunciation = pronunciations[index]
@@ -395,7 +529,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 x, y = _pronunciation_position(line, unit, row, style)
                 events.append(
                     "Dialogue: 2,"
-                    f"{ass_clock(line.start)},{ass_clock(line.end)},"
+                    f"{ass_clock(line.start)},{ass_clock(render_end)},"
                     "Pronunciation,,0,0,0,,"
                     f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
                     f"{_pronunciation_karaoke(unit, line, style)}"

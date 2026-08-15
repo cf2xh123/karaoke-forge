@@ -11,6 +11,7 @@ from karaoke_forge.formats import (
     write_srt,
 )
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument, PronunciationSpan
+from karaoke_forge.timecode import parse_clock
 
 
 def test_yrc_preserves_non_uniform_word_timing() -> None:
@@ -185,6 +186,64 @@ def test_translation_uses_top_center_split_ktv_layout() -> None:
     assert '"translation": "你好，世界"' in write_json(document)
     assert '"pronunciation": "ハロー　ワールド"' in write_json(document)
     assert "你好，世界\nHello world" in write_srt(document)
+
+
+def test_long_instrumental_break_clears_lyrics_and_cues_the_next_line() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="First verse", start=2.0, end=5.0),
+            LyricLine(text="Second verse", start=20.0, end=23.0),
+        ]
+    )
+
+    output = write_ass(
+        document,
+        AssStyle(
+            show_pronunciation=False,
+            countdown_gap_threshold=8.0,
+            countdown_lead_in=3.0,
+        ),
+    )
+    dialogue_events = []
+    for row in output.splitlines():
+        if not row.startswith("Dialogue:"):
+            continue
+        fields = row.split(":", 1)[1].lstrip().split(",", 9)
+        dialogue_events.append((parse_clock(fields[1]), parse_clock(fields[2]), fields[3]))
+
+    assert not any(start <= 10.0 < end for start, end, _style in dialogue_events)
+    assert "Dialogue: 0,0:00:17.00,0:00:23.00,KaraokeLowerInactive" in output
+    assert "Dialogue: 4,0:00:17.00,0:00:18.00,Countdown" in output
+    assert "Dialogue: 4,0:00:18.00,0:00:19.00,Countdown" in output
+    assert "Dialogue: 4,0:00:19.00,0:00:20.00,Countdown" in output
+    assert "●" in output
+
+
+def test_translation_top_margin_and_countdown_can_be_configured() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="Opening",
+                start=12.0,
+                end=15.0,
+                translation="开场",
+            )
+        ]
+    )
+
+    output = write_ass(
+        document,
+        AssStyle(
+            translation_margin_v=240,
+            show_countdown=False,
+            countdown_gap_threshold=8.0,
+            show_pronunciation=False,
+        ),
+    )
+
+    assert ",8,60,60,240,1" in output
+    assert "Dialogue: 4," not in output
+    assert "Dialogue: 0,0:00:09.00,0:00:15.00,KaraokeInactive" in output
 
 
 def test_ass_filters_saved_english_readings_when_english_pronunciation_is_off() -> None:

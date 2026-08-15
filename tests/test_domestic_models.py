@@ -172,10 +172,11 @@ def test_default_modelscope_downloader_explicitly_bypasses_environment_proxy(
     )
 
     assert (result / "model.bin").read_bytes() == data
-    assert len(handlers) == 2
+    assert len(handlers) == 3
     assert isinstance(handlers[0], dm.urllib.request.ProxyHandler)
     assert handlers[0].proxies == {}
     assert isinstance(handlers[1], dm._TrustedModelScopeRedirectHandler)
+    assert isinstance(handlers[2], dm.urllib.request.HTTPSHandler)
 
 
 def test_hash_failure_keeps_partial_and_never_replaces_existing_model(tmp_path) -> None:

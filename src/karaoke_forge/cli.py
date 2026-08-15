@@ -71,6 +71,9 @@ def _style_from_args(args: argparse.Namespace) -> AssStyle:
         show_translation=args.show_translation,
         translation_font_size=args.translation_font_size,
         translation_color=args.translation_color,
+        translation_margin_v=args.translation_margin_v,
+        show_countdown=args.show_countdown,
+        countdown_gap_threshold=args.countdown_gap_threshold,
         show_pronunciation=args.show_pronunciation,
         auto_english_pronunciation=args.auto_english_pronunciation,
         pronunciation_font_size=args.pronunciation_font_size,
@@ -94,6 +97,24 @@ def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument("--translation-font-size", type=int, default=38)
     group.add_argument("--translation-color", default="#EAF4FF")
+    group.add_argument(
+        "--translation-margin-v",
+        type=int,
+        default=54,
+        help="translation distance from the top edge in ASS design pixels",
+    )
+    group.add_argument(
+        "--show-countdown",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show a three-dot cue before lyrics resume after a long instrumental break",
+    )
+    group.add_argument(
+        "--countdown-gap-threshold",
+        type=float,
+        default=8.0,
+        help="minimum lyric-free gap in seconds that triggers a clean break and countdown cue",
+    )
     group.add_argument(
         "--show-pronunciation",
         action=argparse.BooleanOptionalAction,

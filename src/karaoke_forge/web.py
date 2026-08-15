@@ -2823,6 +2823,9 @@ def _build_style(
     pronunciation_color: str = "#FFFFFF",
     auto_pronunciation: bool = True,
     auto_english_pronunciation: bool = True,
+    translation_margin_v: float = 54,
+    show_countdown: bool = True,
+    countdown_gap_threshold: float = 8.0,
 ) -> AssStyle:
     return AssStyle(
         font=font or "Microsoft YaHei",
@@ -2833,6 +2836,9 @@ def _build_style(
         show_translation=show_translation,
         translation_font_size=int(translation_font_size),
         translation_color=translation_color,
+        translation_margin_v=int(translation_margin_v),
+        show_countdown=bool(show_countdown),
+        countdown_gap_threshold=float(countdown_gap_threshold),
         show_pronunciation=show_pronunciation,
         auto_pronunciation=auto_pronunciation,
         auto_english_pronunciation=auto_english_pronunciation,
@@ -2938,6 +2944,7 @@ def subtitle_preview_html(
     material_mode: bool = False,
     highlight_progress: float = 0.4,
     active_row: int = 1,
+    translation_margin_v: float = 54,
 ) -> str:
     """Return a browser-native preview of the current ASS subtitle style."""
 
@@ -2976,10 +2983,12 @@ def subtitle_preview_html(
     translated_size = max(13, min(36, round(float(translation_font_size) * 0.55)))
     pronunciation_size = max(10, min(24, round(float(pronunciation_font_size) * 0.55)))
     bottom = max(12, min(92, round(float(margin_v) * 0.42)))
+    translation_top = max(1.5, min(72.0, float(translation_margin_v) / 10.8))
     translation_html = ""
     if show_translation and safe_translation:
         translation_html = (
-            '<div style="position:absolute;left:15%;right:15%;top:8%;'
+            '<div style="position:absolute;left:15%;right:15%;'
+            f'top:{translation_top:.2f}%;'
             f"text-align:center;font-family:'{safe_font}',sans-serif;"
             f"font-size:{translated_size}px;color:{translation_color};font-weight:700;"
             "text-shadow:-1px -1px 0 #111,1px -1px 0 #111,"
@@ -3654,6 +3663,9 @@ def run_make_job(
     cover_waveform: bool = True,
     export_original: bool = True,
     export_instrumental: bool = False,
+    translation_margin_v: float = 54,
+    show_countdown: bool = True,
+    countdown_gap_threshold: float = 8.0,
     *,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -3931,6 +3943,9 @@ def run_make_job(
                     pronunciation_color,
                     not (utaten_pronunciation_only and utaten_info is not None),
                     auto_english_pronunciation,
+                    translation_margin_v,
+                    show_countdown,
+                    countdown_gap_threshold,
                 ),
                 audio_offset=float(audio_offset),
                 crf=crf,
@@ -3969,6 +3984,9 @@ def run_make_job(
                 "timing_refinement": _web_timing_refinement(timing_refinement),
                 "font": font,
                 "font_size": int(font_size),
+                "translation_margin_v": int(translation_margin_v),
+                "show_countdown": bool(show_countdown),
+                "countdown_gap_threshold": float(countdown_gap_threshold),
                 "quality": quality,
                 "auto_english_pronunciation": bool(auto_english_pronunciation),
                 "cover_background": cover_background,
@@ -5799,7 +5817,7 @@ def create_web_app(
                             )
                         with gr.Row():
                             make_show_translation = gr.Checkbox(
-                                label="有中文翻译时固定显示在画面顶部",
+                                label="有中文翻译时显示翻译",
                                 value=True,
                             )
                             make_translation_size = gr.Slider(
@@ -5812,6 +5830,14 @@ def create_web_app(
                             make_translation_color = gr.ColorPicker(
                                 label="翻译颜色",
                                 value="#EAF4FF",
+                            )
+                            make_translation_margin = gr.Slider(
+                                16,
+                                760,
+                                value=54,
+                                step=2,
+                                label="翻译距顶部",
+                                info="按最终 1080p 字幕坐标计算；数值越大，翻译越靠下。",
                             )
                         with gr.Row():
                             make_show_pronunciation = gr.Checkbox(
@@ -5832,6 +5858,19 @@ def create_web_app(
                             make_pronunciation_color = gr.ColorPicker(
                                 label="注音颜色",
                                 value="#FFFFFF",
+                            )
+                        with gr.Row():
+                            make_show_countdown = gr.Checkbox(
+                                label="长间奏结束前显示三点开唱提示",
+                                value=True,
+                            )
+                            make_countdown_gap = gr.Slider(
+                                5,
+                                20,
+                                value=8,
+                                step=1,
+                                label="视为长间奏的空档（秒）",
+                                info="超过此长度会清空字幕，并在下一句前 3 秒给出提示。",
                             )
 
                         with gr.Accordion("歌曲实景字幕预览", open=True):
@@ -7043,6 +7082,9 @@ def create_web_app(
             cover_waveform: bool,
             export_original: bool,
             export_instrumental: bool,
+            translation_margin_v: float,
+            show_countdown: bool,
+            countdown_gap_threshold: float,
             request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[str, str | None, list[str], str, str | None]:
@@ -7100,6 +7142,9 @@ def create_web_app(
                 cover_waveform,
                 export_original,
                 export_instrumental,
+                translation_margin_v,
+                show_countdown,
+                countdown_gap_threshold,
                 progress_callback=update,
             )
             progress(1.0, desc="完成" if result.video else "未完成")
@@ -7355,6 +7400,9 @@ def create_web_app(
                 make_cover_waveform,
                 make_export_original,
                 make_export_instrumental,
+                make_translation_margin,
+                make_show_countdown,
+                make_countdown_gap,
             ],
             outputs=[
                 make_status,
@@ -7440,6 +7488,7 @@ def create_web_app(
             make_preview_material_mode,
             make_preview_progress,
             make_preview_active_row,
+            make_translation_margin,
         ]
         material_preview_event.then(
             subtitle_preview_html,
@@ -7450,6 +7499,7 @@ def create_web_app(
         for preview_input in [
             *instant_preview_controls[:11],
             make_auto_english_pronunciation,
+            make_translation_margin,
         ]:
             preview_input.change(
                 subtitle_preview_html,
@@ -7664,6 +7714,9 @@ def create_web_app(
             make_cover_waveform,
             make_export_original,
             make_export_instrumental,
+            make_translation_margin,
+            make_show_countdown,
+            make_countdown_gap,
             recent_workspace_prompt,
             make_status,
         ]
@@ -7725,6 +7778,19 @@ def create_web_app(
             cover_waveform = bool(settings.get("cover_waveform", True))
             export_original = bool(settings.get("export_original", True))
             export_instrumental = bool(settings.get("export_instrumental", False))
+            try:
+                translation_margin_v = int(settings.get("translation_margin_v") or 54)
+            except (TypeError, ValueError):
+                translation_margin_v = 54
+            translation_margin_v = max(16, min(760, translation_margin_v))
+            show_countdown = bool(settings.get("show_countdown", True))
+            try:
+                countdown_gap_threshold = float(
+                    settings.get("countdown_gap_threshold") or 8.0
+                )
+            except (TypeError, ValueError):
+                countdown_gap_threshold = 8.0
+            countdown_gap_threshold = max(5.0, min(20.0, countdown_gap_threshold))
             alignment_language = str(settings.get("alignment_language") or "自动识别")
             alignment_model = str(settings.get("alignment_model") or "profile:fast")
             alignment_device = str(settings.get("alignment_device") or "auto")
@@ -7755,6 +7821,9 @@ def create_web_app(
                 cover_waveform,
                 export_original,
                 export_instrumental,
+                translation_margin_v,
+                show_countdown,
+                countdown_gap_threshold,
                 gr.update(visible=False),
                 make_status,
             )
@@ -8926,6 +8995,9 @@ def create_web_app(
             cover_waveform: bool,
             export_original: bool,
             export_instrumental: bool,
+            translation_margin_v: float,
+            show_countdown: bool,
+            countdown_gap_threshold: float,
             request: object | None = None,
             progress: object = gr.Progress(),
         ) -> tuple[object, ...]:
@@ -8988,6 +9060,9 @@ def create_web_app(
                 cover_waveform,
                 export_original,
                 export_instrumental,
+                translation_margin_v,
+                show_countdown,
+                countdown_gap_threshold,
                 request=request,
                 progress=progress,
             )
@@ -9042,6 +9117,9 @@ def create_web_app(
                 make_cover_waveform,
                 make_export_original,
                 make_export_instrumental,
+                make_translation_margin,
+                make_show_countdown,
+                make_countdown_gap,
             ],
             outputs=[
                 make_status,
