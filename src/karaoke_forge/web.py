@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import __version__
 from .artwork import ArtworkError, download_public_cover
 from .ass import AssStyle
 from .editor import (
+    LINE_STATUS_DELETED,
     _table_rows,
     apply_editor_rows,
     apply_pronunciation_rows,
@@ -35,9 +37,12 @@ from .editor import (
     document_from_payload,
     document_pronunciation_to_editor_rows,
     document_to_editor_rows,
+    editor_global_timeline_html,
     editor_preview_html,
     editor_token_timeline_html,
     nudge_editor_line_timing,
+    ripple_following_line_timing,
+    shift_editor_timeline,
     token_timing_to_json,
 )
 from .formats import (
@@ -90,6 +95,7 @@ from .pipeline import (
 from .projects import (
     PROJECT_FILENAME,
     WorkspaceProject,
+    list_workspace_projects,
     load_recent_workspace,
     load_workspace_project,
     save_workspace_project,
@@ -262,12 +268,30 @@ WEB_CSS = """
 }
 
 .kf-kicker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   color: #ffd27a;
   font-size: 12px;
   font-weight: 800;
   letter-spacing: .18em;
   text-transform: uppercase;
   margin-bottom: 10px;
+}
+
+.kf-version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid rgba(255, 210, 122, .42);
+  border-radius: 999px;
+  background: rgba(255, 210, 122, .12);
+  color: #ffe6ad;
+  font-size: 11px;
+  letter-spacing: .04em;
+  line-height: 1;
 }
 
 .kf-title {
@@ -656,7 +680,9 @@ WEB_CSS = """
 }
 
 #kf-line-context-action,
-#kf-line-context-apply {
+#kf-line-context-apply,
+#kf-global-line-request,
+#kf-global-select-line {
   display: none !important;
 }
 
@@ -1010,6 +1036,127 @@ WEB_CSS = """
   font-size: 12px;
 }
 
+#editor-mode-bar {
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(15, 23, 42, .08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .78);
+}
+#editor-global-mode-panel { min-width: 0; }
+#editor-global-audio { position: sticky; top: 8px; z-index: 19; }
+.kf-global-timeline {
+  --kf-global-zoom: 1;
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, .12);
+  border-radius: 16px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.kf-global-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(30, 41, 59, .96);
+  font-size: 13px;
+}
+.kf-global-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.kf-global-actions button {
+  border: 1px solid rgba(226, 232, 240, .2);
+  border-radius: 8px;
+  background: #334155;
+  color: #f8fafc;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.kf-global-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.kf-global-canvas {
+  position: relative;
+  width: calc(var(--kf-global-zoom) * 100%);
+  transition: width .12s ease;
+}
+.kf-global-ruler {
+  position: relative;
+  height: 30px;
+  border-bottom: 1px solid rgba(148, 163, 184, .25);
+  background: #111827;
+}
+.kf-global-tick {
+  position: absolute;
+  bottom: 4px;
+  transform: translateX(-50%);
+  color: #94a3b8;
+  font-size: 11px;
+}
+.kf-global-track {
+  position: relative;
+  height: 164px;
+  cursor: crosshair;
+  background:
+    linear-gradient(to bottom, transparent 33%, rgba(148,163,184,.09) 33%, rgba(148,163,184,.09) 34%, transparent 34%, transparent 66%, rgba(148,163,184,.09) 66%, rgba(148,163,184,.09) 67%, transparent 67%),
+    repeating-linear-gradient(to right, rgba(148,163,184,.06) 0 1px, transparent 1px 5%);
+}
+.kf-global-line-block {
+  position: absolute;
+  height: 42px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+  text-align: left;
+  padding: 5px 7px;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kf-global-line-block.lane-0 { top: 8px; }
+.kf-global-line-block.lane-1 { top: 59px; background: #7c3aed; }
+.kf-global-line-block.lane-2 { top: 110px; background: #0f766e; }
+.kf-global-line-block:hover,
+.kf-global-line-block.is-selected {
+  outline: 3px solid #facc15;
+  outline-offset: 1px;
+  z-index: 4;
+}
+.kf-global-line-block.is-playing { filter: brightness(1.3); }
+.kf-editor-preview-stage.is-global-gap .kf-editor-preview-translation,
+.kf-editor-preview-stage.is-global-gap .kf-editor-preview-row {
+  opacity: 0;
+}
+.kf-global-token {
+  position: absolute;
+  left: 0;
+  bottom: 1px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.78);
+  pointer-events: none;
+}
+.kf-global-playhead {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  z-index: 8;
+  background: #ef4444;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.55), 0 0 12px rgba(239,68,68,.85);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+.kf-global-playhead::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #ef4444;
+}
+
 @media (max-width: 720px) {
   .kf-hero { padding: 26px 22px; border-radius: 22px; }
   .kf-hero::after { opacity: .32; right: -105px; }
@@ -1300,8 +1447,8 @@ TOKEN_TIMELINE_JS = r"""
     }
   };
 
-  const waveSurferParts = () => {
-    const host = document.querySelector("#editor-line-audio");
+  const waveSurferPartsFor = (selector) => {
+    const host = document.querySelector(selector);
     if (!host || host.offsetParent === null) return null;
     const queue = [host];
     const visited = new Set();
@@ -1309,6 +1456,7 @@ TOKEN_TIMELINE_JS = r"""
     let wrapper = null;
     let playButton = null;
     let rateButton = null;
+    let media = null;
     while (queue.length) {
       const root = queue.shift();
       if (!root || visited.has(root)) continue;
@@ -1318,21 +1466,42 @@ TOKEN_TIMELINE_JS = r"""
       const controls = root.querySelector?.('[data-testid="waveform-controls"]');
       playButton ||= controls?.querySelector(".play-pause-button");
       rateButton ||= controls?.querySelector(".control-wrapper > button:last-child");
+      media ||= root.querySelector?.("audio");
       root.querySelectorAll?.("*").forEach((element) => {
         if (element.shadowRoot) queue.push(element.shadowRoot);
       });
     }
-    return progress && wrapper
-      ? { host, progress, wrapper, playButton, rateButton }
+    return (progress && wrapper) || media
+      ? { host, progress, wrapper, playButton, rateButton, media }
       : null;
   };
 
+  const globalEditorModeActive = () => {
+    const panel = document.querySelector("#editor-global-mode-panel");
+    return Boolean(panel && panel.offsetParent !== null);
+  };
+
+  const waveSurferParts = () => waveSurferPartsFor(
+    globalEditorModeActive() ? "#editor-global-audio" : "#editor-line-audio"
+  );
+
   const waveProgressRatio = (parts) => {
+    if (
+      Number.isFinite(parts?.media?.duration) &&
+      parts.media.duration > 0 &&
+      Number.isFinite(parts.media.currentTime)
+    ) {
+      return Math.min(1, Math.max(0, parts.media.currentTime / parts.media.duration));
+    }
     const width = Number.parseFloat(parts?.progress?.style?.width || "");
     return Number.isFinite(width) ? Math.min(1, Math.max(0, width / 100)) : null;
   };
 
   const seekWaveSurfer = (parts, ratio) => {
+    if (parts?.media && Number.isFinite(parts.media.duration) && parts.media.duration > 0) {
+      parts.media.currentTime = Math.min(1, Math.max(0, ratio)) * parts.media.duration;
+      return true;
+    }
     if (!parts?.wrapper) return false;
     const bounds = parts.wrapper.getBoundingClientRect();
     const clientX = bounds.left + Math.min(1, Math.max(0, ratio)) * bounds.width;
@@ -1395,7 +1564,9 @@ TOKEN_TIMELINE_JS = r"""
     button.click();
   };
 
-  const playbackIsActive = (parts) => buttonIsPause(parts?.playButton);
+  const playbackIsActive = (parts) => (
+    parts?.media ? !parts.media.paused && !parts.media.ended : buttonIsPause(parts?.playButton)
+  );
 
   const clearTokenAuditionGuard = () => {
     window.__karaokeForgeTokenAuditionGuardUntil = 0;
@@ -1424,13 +1595,18 @@ TOKEN_TIMELINE_JS = r"""
     if (!preserveAuditionGuard) clearTokenAuditionGuard();
     clearEditorMutationGuard();
     applyPlaybackRate(parts);
-    if (!buttonIsPause(parts.playButton)) parts.playButton?.click();
+    if (parts.media) {
+      parts.media.play().catch(() => parts.playButton?.click());
+    } else if (!buttonIsPause(parts.playButton)) {
+      parts.playButton?.click();
+    }
     return true;
   };
 
   const pausePlayback = (parts) => {
     if (!parts) return;
-    if (buttonIsPause(parts.playButton)) parts.playButton.click();
+    if (parts.media && !parts.media.paused) parts.media.pause();
+    else if (buttonIsPause(parts.playButton)) parts.playButton.click();
   };
 
   const clearTokenStopTimer = () => {
@@ -1448,6 +1624,66 @@ TOKEN_TIMELINE_JS = r"""
     guardEditorMutationStop();
     clearTokenStopTimer();
     pausePlayback(waveSurferParts());
+  };
+
+  const selectGlobalLine = (lineNumber) => {
+    if (!setHiddenInput("#kf-global-line-request", String(lineNumber))) return;
+    window.setTimeout(() => {
+      const root = document.querySelector("#kf-global-select-line");
+      const button = root?.matches?.("button") ? root : root?.querySelector("button");
+      button?.click();
+    }, 15);
+  };
+
+  const updateGlobalKaraokeAt = (activeBlock, absoluteTime) => {
+    const preview = visibleElement(".kf-editor-preview-stage");
+    const activeLine = Number(activeBlock?.dataset.lineNumber);
+    const previewLine = Number(preview?.dataset.lineNumber);
+    const matches = Boolean(
+      activeBlock && preview && Number.isFinite(activeLine) && activeLine === previewLine
+    );
+    preview?.classList.toggle("is-global-gap", !matches);
+    if (!matches) return;
+    const karaoke = preview.querySelector(".kf-live-karaoke-current");
+    const measure = karaoke?.querySelector(".kf-live-karaoke-measure");
+    const measureBounds = measure?.getBoundingClientRect();
+    const totalWidth = Math.max(0.01, Number(measureBounds?.width || 0));
+    const tokenBlocks = Array.from(activeBlock.querySelectorAll(".kf-global-token"))
+      .sort((left, right) =>
+        Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex)
+      );
+    let lyricProgress = absoluteTime >= Number(activeBlock.dataset.end) ? 100 : 0;
+    for (let index = 0; index < tokenBlocks.length; index += 1) {
+      const block = tokenBlocks[index];
+      const start = Number(block.dataset.start);
+      const end = Math.max(start + 0.01, Number(block.dataset.end));
+      const core = measure?.querySelector(
+        `.kf-karaoke-token-core[data-token-index="${index}"]`
+      );
+      const coreBounds = core?.getBoundingClientRect();
+      const coreStart = Math.max(
+        0,
+        Number(coreBounds?.left || measureBounds?.left || 0) -
+          Number(measureBounds?.left || 0)
+      );
+      const coreEnd = Math.max(
+        coreStart,
+        Number(coreBounds?.right || measureBounds?.left || 0) -
+          Number(measureBounds?.left || 0)
+      );
+      if (absoluteTime >= end) {
+        lyricProgress = coreEnd / totalWidth * 100;
+        continue;
+      }
+      if (absoluteTime >= start) {
+        const inside = (absoluteTime - start) / (end - start);
+        lyricProgress = (coreStart + (coreEnd - coreStart) * inside) /
+          totalWidth * 100;
+      }
+      break;
+    }
+    const fill = karaoke?.querySelector(".kf-live-karaoke-fill");
+    if (fill) fill.style.clipPath = `inset(0 ${100 - lyricProgress}% 0 0)`;
   };
 
   const pollWaveSurfer = () => {
@@ -1479,6 +1715,61 @@ TOKEN_TIMELINE_JS = r"""
           clearTokenStopTimer();
         }
       }
+    }
+    if (globalEditorModeActive()) {
+      const globalTimeline = visibleElement(".kf-global-timeline");
+      const globalParts = waveSurferPartsFor("#editor-global-audio");
+      const mediaDuration = Number(globalParts?.media?.duration);
+      const timelineDuration = Number(globalTimeline?.dataset.duration);
+      const duration = Math.max(
+        Number.isFinite(mediaDuration) ? mediaDuration : 0,
+        Number.isFinite(timelineDuration) ? timelineDuration : 0,
+        0.01
+      );
+      const mediaTime = Number(globalParts?.media?.currentTime);
+      const globalRatio = waveProgressRatio(globalParts);
+      const currentTime = Number.isFinite(mediaTime)
+        ? mediaTime
+        : (globalRatio === null ? 0 : globalRatio * duration);
+      const playhead = globalTimeline?.querySelector(".kf-global-playhead");
+      if (playhead && !window.__karaokeForgeDraggingGlobalPlayhead) {
+        playhead.style.left = `${Math.min(100, Math.max(0, currentTime / duration * 100))}%`;
+      }
+      let activeBlock = null;
+      globalTimeline?.querySelectorAll(".kf-global-line-block").forEach((block) => {
+        const start = Number(block.dataset.start);
+        const end = Number(block.dataset.end);
+        const active = currentTime >= start && currentTime < end;
+        block.classList.toggle("is-playing", active);
+        if (active) {
+          activeBlock ||= block;
+          block.setAttribute("aria-current", "true");
+        } else {
+          block.removeAttribute("aria-current");
+        }
+      });
+      const loopInput = document.querySelector("#editor-loop-line input[type='checkbox']");
+      const selectedBlock = globalTimeline?.querySelector(".kf-global-line-block.is-selected");
+      let looped = false;
+      if (
+        loopInput?.checked && selectedBlock && globalParts?.media &&
+        playbackIsActive(globalParts) &&
+        currentTime >= Number(selectedBlock.dataset.end) - 0.04
+      ) {
+        globalParts.media.currentTime = Number(selectedBlock.dataset.start);
+        looped = true;
+      }
+      if (!looped && activeBlock) {
+        const activeLine = Number(activeBlock.dataset.lineNumber);
+        if (window.__karaokeForgeGlobalFollowLine !== activeLine) {
+          window.__karaokeForgeGlobalFollowLine = activeLine;
+          globalTimeline?.querySelectorAll(".kf-global-line-block.is-selected")
+            .forEach((block) => block.classList.remove("is-selected"));
+          activeBlock.classList.add("is-selected");
+          selectGlobalLine(activeLine);
+        }
+      }
+      updateGlobalKaraokeAt(looped ? selectedBlock : activeBlock, currentTime);
     }
     window.__karaokeForgeWavePollFrame = requestAnimationFrame(pollWaveSurfer);
   };
@@ -1966,6 +2257,113 @@ TOKEN_TIMELINE_JS = r"""
     }
   });
 
+  const globalTimelineParts = () => ({
+    timeline: visibleElement(".kf-global-timeline"),
+    parts: waveSurferPartsFor("#editor-global-audio"),
+  });
+
+  const seekGlobalTimeline = (timeline, parts, seconds) => {
+    if (!timeline || !parts) return false;
+    const mediaDuration = Number(parts.media?.duration);
+    const timelineDuration = Number(timeline.dataset.duration);
+    const duration = Math.max(
+      Number.isFinite(mediaDuration) ? mediaDuration : 0,
+      Number.isFinite(timelineDuration) ? timelineDuration : 0,
+      0.01
+    );
+    const target = Math.min(duration, Math.max(0, Number(seconds) || 0));
+    if (parts.media && Number.isFinite(mediaDuration) && mediaDuration > 0) {
+      parts.media.currentTime = Math.min(mediaDuration, target);
+    } else {
+      seekWaveSurfer(parts, target / duration);
+    }
+    const playhead = timeline.querySelector(".kf-global-playhead");
+    if (playhead) playhead.style.left = `${target / duration * 100}%`;
+    return true;
+  };
+
+  const seekGlobalFromPointer = (timeline, parts, clientX) => {
+    const track = timeline?.querySelector(".kf-global-track");
+    if (!track) return false;
+    const bounds = track.getBoundingClientRect();
+    if (bounds.width <= 0) return false;
+    const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
+    const duration = Math.max(
+      Number(parts?.media?.duration) || 0,
+      Number(timeline.dataset.duration) || 0,
+      0.01
+    );
+    return seekGlobalTimeline(timeline, parts, ratio * duration);
+  };
+
+  document.addEventListener("click", (event) => {
+    const zoomButton = event.target.closest?.(
+      ".kf-global-zoom-in, .kf-global-zoom-out, .kf-global-zoom-fit"
+    );
+    if (zoomButton) {
+      const timeline = zoomButton.closest(".kf-global-timeline");
+      const canvas = timeline?.querySelector(".kf-global-canvas");
+      if (!canvas) return;
+      const current = Number(canvas.dataset.zoom || "1");
+      if (zoomButton.classList.contains("kf-global-zoom-fit")) {
+        canvas.dataset.zoom = "0";
+        canvas.style.minWidth = "100%";
+      } else {
+        const base = Number(canvas.dataset.baseWidth || "1400");
+        const next = Math.min(8, Math.max(0.5,
+          (current > 0 ? current : 1) *
+          (zoomButton.classList.contains("kf-global-zoom-in") ? 1.35 : 0.75)
+        ));
+        canvas.dataset.zoom = String(next);
+        canvas.style.minWidth = `${Math.max(700, base * next)}px`;
+      }
+      return;
+    }
+    const block = event.target.closest?.(".kf-global-line-block");
+    if (!block) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const { timeline, parts } = globalTimelineParts();
+    timeline?.querySelectorAll(".kf-global-line-block.is-selected")
+      .forEach((selected) => selected.classList.remove("is-selected"));
+    block.classList.add("is-selected");
+    seekGlobalTimeline(timeline, parts, Number(block.dataset.start));
+    selectGlobalLine(Number(block.dataset.lineNumber));
+    playPlayback(parts);
+  }, true);
+
+  document.addEventListener("pointerdown", (event) => {
+    const track = event.target.closest?.(".kf-global-track");
+    if (!track || event.target.closest?.(".kf-global-line-block")) return;
+    const timeline = track.closest(".kf-global-timeline");
+    const parts = waveSurferPartsFor("#editor-global-audio");
+    if (!timeline || !parts) return;
+    event.preventDefault();
+    const resumeAfterDrag = playbackIsActive(parts);
+    pausePlayback(parts);
+    window.__karaokeForgeDraggingGlobalPlayhead = true;
+    const pointerId = event.pointerId;
+    track.setPointerCapture?.(pointerId);
+    seekGlobalFromPointer(timeline, parts, event.clientX);
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      seekGlobalFromPointer(timeline, parts, moveEvent.clientX);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      track.removeEventListener("pointermove", move);
+      track.removeEventListener("pointerup", finish);
+      track.removeEventListener("pointercancel", finish);
+      track.releasePointerCapture?.(pointerId);
+      window.__karaokeForgeDraggingGlobalPlayhead = false;
+      if (resumeAfterDrag) playPlayback(parts);
+    };
+    track.addEventListener("pointermove", move);
+    track.addEventListener("pointerup", finish);
+    track.addEventListener("pointercancel", finish);
+  }, true);
+
   const isTextEntry = (target) => {
     if (target.closest?.("textarea, select, [contenteditable='true']")) return true;
     const input = target.closest?.("input");
@@ -1993,6 +2391,15 @@ TOKEN_TIMELINE_JS = r"""
   };
   document.addEventListener("keydown", handlePlaybackSpace, true);
   document.addEventListener("keyup", handlePlaybackSpace, true);
+
+  document.addEventListener("change", (event) => {
+    if (!event.target.closest?.("#editor-timing-mode")) return;
+    ["#editor-line-audio", "#editor-global-audio"].forEach((selector) => {
+      const parts = waveSurferPartsFor(selector);
+      pausePlayback(parts);
+      if (parts?.media) parts.media.pause();
+    });
+  }, true);
 
   document.addEventListener("keydown", (event) => {
     if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
@@ -2072,6 +2479,7 @@ class UiEditorPreparationResult:
     preview: str
     project: str | None
     audio: str | None
+    project_name: str | None
     files: list[str]
     log: str
     output_dir: str | None
@@ -2181,9 +2589,16 @@ def _workspace_asset_fallbacks(
         return audio, video, cover, fonts
 
     if audio is None or not audio.is_file() or _is_empty_audio_placeholder(audio):
-        audio = (
-            workspace.audio if workspace.audio is not None and workspace.audio.is_file() else None
-        )
+        if workspace.audio is not None and workspace.audio.is_file():
+            audio = workspace.audio
+        elif (
+            workspace.video is not None
+            and workspace.video.is_file()
+            and probe_media_has_audio(workspace.video) is True
+        ):
+            audio = workspace.video
+        else:
+            audio = None
     if video is None or not video.is_file():
         video = (
             workspace.video if workspace.video is not None and workspace.video.is_file() else None
@@ -2219,16 +2634,128 @@ def _online_cover_for_job(
 
 
 def _safe_stem(value: str | None, fallback: str = "karaoke") -> str:
-    stem = Path((value or "").strip()).stem
-    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", stem)
-    stem = re.sub(r"\s+", "-", stem).strip(" .-_")
-    return stem[:80] or fallback
+    def normalize(raw: str | None) -> str:
+        stem = (raw or "").strip()
+        stem = re.sub(r"[\\/]+", "-", stem)
+        suffix = Path(stem).suffix.casefold()
+        if suffix in {
+            ".mp4",
+            ".mkv",
+            ".webm",
+            ".json",
+            ".lrc",
+            ".ass",
+            ".srt",
+            ".vtt",
+            ".mp3",
+            ".m4a",
+            ".flac",
+            ".wav",
+        }:
+            stem = stem[: -len(suffix)]
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", stem)
+        stem = re.sub(r"\s+", "-", stem).strip(" .-_")
+        stem = re.sub(r"-{2,}", "-", stem)[:80].rstrip(" .")
+        if re.fullmatch(r"(?i)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])", stem):
+            stem = f"_{stem}"
+        return stem
+
+    return normalize(value) or normalize(fallback) or "karaoke"
+
+
+def _workspace_source_settings(
+    netease_info: object | None,
+    qqmusic_info: object | None,
+    utaten_info: object | None,
+) -> dict[str, object]:
+    refs: dict[str, dict[str, str]] = {}
+    for provider, info, id_attribute in (
+        ("netease", netease_info, "song_id"),
+        ("qqmusic", qqmusic_info, "song_mid"),
+        ("utaten", utaten_info, "lyric_id"),
+    ):
+        if info is None:
+            continue
+        source_id = str(getattr(info, id_attribute, "") or "").strip()
+        source_url = str(getattr(info, "canonical_url", "") or "").strip()
+        title = str(getattr(info, "title", "") or "").strip()
+        if source_id or source_url:
+            refs[provider] = {"id": source_id, "url": source_url, "title": title}
+    return {"source_refs": refs} if refs else {}
 
 
 def _default_output_root() -> Path:
     configured = os.environ.get("KARAOKE_FORGE_OUTPUT_DIR")
     root = Path(configured).expanduser() if configured else Path.cwd() / "outputs"
     return root.resolve()
+
+
+def _allow_gradio_file_paths(app: object, *values: object) -> None:
+    """Allow only concrete result files, including files created after launch."""
+
+    allowed = getattr(app, "allowed_paths", None)
+    if not isinstance(allowed, list):
+        return
+    known = {os.path.normcase(str(Path(value).resolve())) for value in allowed}
+    pending = list(values)
+    while pending:
+        value = pending.pop()
+        if value is None:
+            continue
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, os.PathLike)):
+            pending.extend(value)
+            continue
+        if not isinstance(value, (str, os.PathLike)):
+            continue
+        try:
+            path = Path(value).resolve()
+        except (OSError, TypeError, ValueError):
+            continue
+        if not path.is_file():
+            continue
+        key = os.path.normcase(str(path))
+        if key not in known:
+            allowed.append(str(path))
+            known.add(key)
+
+
+def _allow_gradio_workspace_paths(
+    app: object,
+    workspace_or_manifest: WorkspaceProject | str | os.PathLike[str],
+) -> None:
+    """Allow the exact persisted files belonging to one validated workspace."""
+
+    try:
+        workspace = (
+            workspace_or_manifest
+            if isinstance(workspace_or_manifest, WorkspaceProject)
+            else load_workspace_project(workspace_or_manifest)
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return
+    _allow_gradio_file_paths(
+        app,
+        workspace.manifest,
+        workspace.lyrics_project,
+        workspace.audio,
+        workspace.video,
+        workspace.cover,
+        workspace.font_files,
+    )
+
+
+def _allow_gradio_result_workspaces(app: object, values: object) -> None:
+    """Discover workspace manifests in a callback result without opening directories."""
+
+    pending = list(values) if isinstance(values, Sequence) and not isinstance(
+        values, (str, bytes, os.PathLike)
+    ) else [values]
+    for value in pending:
+        if not isinstance(value, (str, os.PathLike)):
+            continue
+        path = Path(value)
+        if path.name == PROJECT_FILENAME and path.is_file():
+            _allow_gradio_workspace_paths(app, path)
 
 
 def _new_job_dir(kind: str, output_root: str | Path | None = None) -> Path:
@@ -3529,8 +4056,10 @@ def prepare_make_editor_job(
             if video is not None
             else audio.stem
         )
+        explicit_name = (output_name or "").strip()
+        display_name = explicit_name or source_title
         fallback_stem = f"{source_title}-校准工程"
-        stem = _safe_stem(output_name, fallback=fallback_stem)
+        stem = _safe_stem(explicit_name or fallback_stem, fallback=fallback_stem)
         manifest_path = job_dir / PROJECT_FILENAME
         document.metadata["workspace_manifest"] = str(manifest_path)
         exports = export_formats(
@@ -3542,7 +4071,7 @@ def prepare_make_editor_job(
         project = exports["json"]
         workspace = save_workspace_project(
             job_dir,
-            name=stem,
+            name=display_name,
             lyrics_project=project,
             audio=audio,
             video=video,
@@ -3560,6 +4089,7 @@ def prepare_make_editor_job(
                 "cover_waveform": bool(cover_waveform),
                 "export_original": bool(export_original),
                 "export_instrumental": bool(export_instrumental),
+                **_workspace_source_settings(netease_info, qqmusic_info, utaten_info),
             },
             recent_root=_default_output_root(),
         )
@@ -3596,6 +4126,7 @@ def prepare_make_editor_job(
             preview=editor_preview_html(document, line_number),
             project=str(project),
             audio=str(audio),
+            project_name=display_name,
             files=files,
             log="\n".join(logs),
             output_dir=str(job_dir),
@@ -3612,6 +4143,7 @@ def prepare_make_editor_job(
             preview=f'<div class="kf-tip">生成失败：{html.escape(str(exc))}</div>',
             project=None,
             audio=None,
+            project_name=None,
             files=[],
             log="\n".join(logs),
             output_dir=str(job_dir) if job_dir else None,
@@ -3914,8 +4446,9 @@ def run_make_job(
             if video is not None
             else audio.stem
         )
+        display_name = (output_name or "").strip() or source_title
         fallback_stem = f"{source_title}-karaoke"
-        stem = _safe_stem(output_name, fallback=fallback_stem)
+        stem = _safe_stem(display_name, fallback=fallback_stem)
         output = job_dir / f"{stem}.mp4"
         assets = job_dir / f"{stem}.assets"
         crf, preset = _quality_settings(quality)
@@ -3970,7 +4503,7 @@ def run_make_job(
         project_json.write_text(write_format(project_document, "json"), encoding="utf-8")
         workspace = save_workspace_project(
             job_dir,
-            name=stem,
+            name=display_name,
             lyrics_project=project_json,
             audio=audio,
             video=video,
@@ -3994,6 +4527,7 @@ def run_make_job(
                 "cover_waveform": bool(cover_waveform),
                 "export_original": bool(export_original),
                 "export_instrumental": bool(export_instrumental),
+                **_workspace_source_settings(netease_info, qqmusic_info, utaten_info),
             },
             recent_root=_default_output_root(),
         )
@@ -4357,14 +4891,34 @@ def load_editor_project(
     source = _file_path(lyrics_file)
     if source is None or not source.is_file():
         raise ValueError("请先上传带时间轴的歌词或 Karaoke Forge JSON。")
+    workspace: WorkspaceProject | None = None
+    if source.suffix.lower() == ".json":
+        try:
+            candidate = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            candidate = None
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("schema_version") == 1
+            and candidate.get("lyrics_project")
+        ):
+            workspace = load_workspace_project(source)
+            source = workspace.lyrics_project
     document = read_lyrics(source)
+    if workspace is not None:
+        document.metadata["workspace_manifest"] = str(workspace.manifest)
     document.require_timed()
     line_number = 1
     line = document.lines[0]
     return (
         document.to_dict(),
         document_to_editor_rows(document),
-        f"### ✅ 已载入 {source.name}\n共 {len(document.lines)} 行，可编辑后导出。",
+        (
+            f"### ✅ 已载入工程 {workspace.name}\n"
+            if workspace is not None
+            else f"### ✅ 已载入 {source.name}\n"
+        )
+        + f"共 {len(document.lines)} 行，可编辑后导出。",
         line_number,
         line.pronunciation or "",
         document_pronunciation_to_editor_rows(document, line),
@@ -4478,6 +5032,46 @@ def _pronunciation_draft_signature(value: object) -> tuple[tuple[str, int, int],
     return tuple(signature)
 
 
+def _editor_row_source_ids(table: object, source_count: int) -> list[int | None]:
+    """Return the original line identity for each row that survives a table edit."""
+
+    source_ids: list[int | None] = []
+    for position, row in enumerate(_table_rows(table), 1):
+        padded = [*row, None, None][:2]
+        if str(padded[1] or "显示").strip() == LINE_STATUS_DELETED:
+            continue
+        try:
+            line_id = int(float(padded[0])) if padded[0] not in (None, "") else position
+        except (TypeError, ValueError):
+            line_id = position
+        source_ids.append(line_id if 1 <= line_id <= source_count else None)
+    return source_ids
+
+
+def _mapped_editor_line_number(
+    table: object,
+    source_count: int,
+    selected_line: int,
+    result_count: int,
+) -> int:
+    """Keep the selected lyric identity stable across deletion and row reordering."""
+
+    if result_count < 1:
+        raise ValueError("编辑结果中没有歌词行。")
+    selected = min(max(1, int(selected_line)), max(1, source_count))
+    matches = [
+        position
+        for position, source_id in enumerate(
+            _editor_row_source_ids(table, source_count),
+            1,
+        )
+        if source_id == selected
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return min(max(1, selected), result_count)
+
+
 def _editor_document_with_pending_changes(
     payload: dict[str, Any],
     line_table: object,
@@ -4485,12 +5079,20 @@ def _editor_document_with_pending_changes(
     token_timing_json: str | None = None,
     whole_pronunciation: str | None = None,
     pronunciation_table: object | None = None,
+    ripple_enabled: bool = False,
 ) -> tuple[LyricsDocument, dict[str, Any] | None]:
     """Persist current-line drafts before navigation and capture one undo snapshot."""
 
     original = document_from_payload(payload)
     selected = min(max(1, int(line_number)), len(original.lines))
     original_line = original.lines[selected - 1]
+    source_ids = _editor_row_source_ids(line_table, len(original.lines))
+    selected_matches = [
+        position
+        for position, source_id in enumerate(source_ids, 1)
+        if source_id == selected
+    ]
+    selected_after = selected_matches[0] if len(selected_matches) == 1 else None
     pronunciation_changed = False
     if pronunciation_table is not None:
         pronunciation_changed = (whole_pronunciation or "").strip() != (
@@ -4499,6 +5101,26 @@ def _editor_document_with_pending_changes(
             pronunciation_table
         ) != _pronunciation_draft_signature(
             document_pronunciation_to_editor_rows(original, original_line)
+        )
+
+    token_changed = False
+    if token_timing_json:
+        try:
+            submitted_tokens = json.loads(token_timing_json)
+            baseline_tokens = json.loads(token_timing_to_json(original_line))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            submitted_tokens = None
+            baseline_tokens = None
+        token_changed = (
+            isinstance(submitted_tokens, list)
+            and bool(submitted_tokens)
+            and submitted_tokens != baseline_tokens
+        )
+
+    if (pronunciation_changed or token_changed) and selected_after is None:
+        raise ValueError(
+            "当前句已被删除或重复，未保存的逐词/注音草稿无法安全对应；"
+            "请先撤销结构修改，保存当前句后再删除或重排。"
         )
 
     # A changed pronunciation draft still describes the pre-edit text. Save it
@@ -4516,28 +5138,72 @@ def _editor_document_with_pending_changes(
     edited = apply_editor_rows(base, line_table)
     changed = edited.to_dict() != original.to_dict()
 
-    if token_timing_json:
-        try:
-            submitted_tokens = json.loads(token_timing_json)
-            baseline_tokens = json.loads(token_timing_to_json(original.lines[selected - 1]))
-        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
-            submitted_tokens = None
-            baseline_tokens = None
-        if (
-            isinstance(submitted_tokens, list)
-            and submitted_tokens
-            and submitted_tokens != baseline_tokens
-        ):
-            edited = apply_token_timing(
-                edited,
-                document_to_editor_rows(edited),
-                selected,
-                token_timing_json,
-            )
-            changed = True
+    if token_changed and selected_after is not None:
+        edited = apply_token_timing(
+            edited,
+            document_to_editor_rows(edited),
+            selected_after,
+            token_timing_json or "[]",
+        )
+        changed = True
+
+    if ripple_enabled:
+        shifted = _ripple_global_editor_changes(
+            original,
+            edited,
+            True,
+            source_ids=source_ids,
+        )
+        changed = changed or bool(shifted)
 
     snapshot = _editor_undo_snapshot(original, selected) if changed else None
     return edited, snapshot
+
+
+def _ripple_global_editor_changes(
+    original: LyricsDocument,
+    edited: LyricsDocument,
+    enabled: bool,
+    *,
+    source_ids: Sequence[int | None] | None = None,
+) -> tuple[int, ...]:
+    """Ripple every directly extended row once, accounting for earlier propagated shifts."""
+
+    if not enabled:
+        return ()
+    if source_ids is None:
+        if len(original.lines) != len(edited.lines):
+            return ()
+        source_ids = list(range(1, len(edited.lines) + 1))
+    if len(source_ids) != len(edited.lines):
+        return ()
+    direct_ends = [line.end for line in edited.lines]
+    ripple_offsets = [0.0 for _line in edited.lines]
+    shifted_lines: set[int] = set()
+    for index, (source_id, direct_end) in enumerate(zip(source_ids, direct_ends), 1):
+        if source_id is None or not 1 <= source_id <= len(original.lines):
+            continue
+        old_line = original.lines[source_id - 1]
+        if (
+            old_line.end is None
+            or direct_end is None
+            or direct_end <= old_line.end + 1e-9
+        ):
+            continue
+        starts_before = [line.start for line in edited.lines]
+        newly_shifted = ripple_following_line_timing(
+            edited,
+            index,
+            previous_end=old_line.end + ripple_offsets[index - 1],
+        )
+        shifted_lines.update(newly_shifted)
+        for shifted_line_number in newly_shifted:
+            shifted_index = shifted_line_number - 1
+            old_start = starts_before[shifted_index]
+            new_start = edited.lines[shifted_index].start
+            if old_start is not None and new_start is not None:
+                ripple_offsets[shifted_index] += new_start - old_start
+    return tuple(sorted(shifted_lines))
 
 
 def _editor_rows_for_delete(
@@ -4720,6 +5386,7 @@ def save_editor_pronunciation_workspace(
     whole_line: str,
     pronunciation_table: object,
     undo_state: dict[str, Any],
+    ripple_enabled: bool = False,
 ) -> tuple[object, ...]:
     """Save every current-line draft once, without replaying a stale pronunciation table."""
 
@@ -4732,11 +5399,19 @@ def save_editor_pronunciation_workspace(
         token_timing_json,
         whole_line,
         pronunciation_table,
+        ripple_enabled,
+    )
+    selected = _mapped_editor_line_number(
+        line_table,
+        len(before.lines),
+        selected,
+        len(document.lines),
     )
     line = document.lines[selected - 1]
     result: tuple[object, ...] = (
         document.to_dict(),
         document_to_editor_rows(document),
+        selected,
         line.pronunciation or "",
         document_pronunciation_to_editor_rows(document, line),
         editor_preview_html(document, selected),
@@ -4777,19 +5452,33 @@ def nudge_editor_timing(
     *,
     start_delta: float = 0.0,
     end_delta: float = 0.0,
+    ripple_following: bool = True,
 ) -> tuple[dict[str, Any], list[list[object]], str, str]:
+    before = apply_editor_rows(document_from_payload(payload), line_table)
     document = nudge_editor_line_timing(
-        document_from_payload(payload),
+        before,
         line_table,
         int(line_number),
         start_delta=start_delta,
         end_delta=end_delta,
+        ripple_following=ripple_following,
     )
     line = document.lines[int(line_number) - 1]
     assert line.start is not None and line.end is not None
+    shifted = [
+        index + 1
+        for index, (old_line, new_line) in enumerate(zip(before.lines, document.lines))
+        if index != int(line_number) - 1
+        and (old_line.start, old_line.end) != (new_line.start, new_line.end)
+    ]
+    ripple_note = (
+        f"；已联动后移第 {shifted[0]}–{shifted[-1]} 行"
+        if shifted
+        else ""
+    )
     status = (
         f"第 {int(line_number)} 行：**{line.start:.2f}s → {line.end:.2f}s**"
-        f"（时长 {line.end - line.start:.2f}s）"
+        f"（时长 {line.end - line.start:.2f}s）{ripple_note}"
     )
     return (
         document.to_dict(),
@@ -4812,6 +5501,40 @@ def editor_token_workspace(
         editor_token_timeline_html(document, int(line_number)),
         token_timing_to_json(document.lines[index]),
     )
+
+
+@lru_cache(maxsize=32)
+def _cached_media_duration(path: str, modified_ns: int, size: int) -> float | None:
+    del modified_ns, size
+    return probe_media_duration(path)
+
+
+def editor_global_timeline_workspace(
+    payload: dict[str, Any],
+    line_table: object,
+    line_number: int,
+    audio_file: object | None = None,
+) -> str:
+    """Render the full-song navigator using the real media duration when available."""
+
+    try:
+        document = apply_editor_rows(document_from_payload(payload), line_table)
+        audio = _file_path(audio_file)
+        media_duration = None
+        if audio is not None and audio.is_file() and not _is_empty_audio_placeholder(audio):
+            stat = audio.stat()
+            media_duration = _cached_media_duration(
+                str(audio.resolve()),
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
+        return editor_global_timeline_html(
+            document,
+            int(line_number),
+            media_duration=media_duration,
+        )
+    except Exception as exc:
+        return f'<div class="kf-tip">全局时间轴暂不可用：{html.escape(str(exc))}</div>'
 
 
 def save_editor_token_timing(
@@ -5034,6 +5757,7 @@ def export_editor_project(
     pronunciation_table: object,
     output_name: str,
     token_timing_json: str | None = None,
+    ripple_enabled: bool = True,
 ) -> tuple[dict[str, Any], list[list[object]], str, list[str], str]:
     document, _snapshot = _editor_document_with_pending_changes(
         payload,
@@ -5042,6 +5766,7 @@ def export_editor_project(
         token_timing_json,
         whole_line,
         pronunciation_table,
+        ripple_enabled,
     )
     workspace = None
     manifest_value = document.metadata.get("workspace_manifest")
@@ -5053,7 +5778,10 @@ def export_editor_project(
     job_dir = workspace.manifest.parent if workspace is not None else _new_job_dir("editor")
     manifest_path = job_dir / PROJECT_FILENAME
     document.metadata["workspace_manifest"] = str(manifest_path)
-    stem = _safe_stem(output_name, fallback="edited-lyrics")
+    explicit_name = (output_name or "").strip()
+    display_name = workspace.name if workspace is not None else "edited-lyrics"
+    fallback_stem = _safe_stem(display_name, fallback="edited-lyrics")
+    stem = _safe_stem(explicit_name, fallback=fallback_stem)
     formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.visible_lines else ["json"]
     exports = export_formats(
         document,
@@ -5063,7 +5791,7 @@ def export_editor_project(
     )
     save_workspace_project(
         job_dir,
-        name=stem,
+        name=explicit_name or display_name,
         lyrics_project=exports["json"],
         audio=workspace.audio if workspace is not None else None,
         video=workspace.video if workspace is not None else None,
@@ -5098,6 +5826,7 @@ def export_editor_project_for_web(
     pronunciation_table: object,
     output_name: str,
     token_timing_json: str | None = None,
+    ripple_enabled: bool = True,
 ) -> tuple[dict[str, Any], object, str, list[str], str]:
     """Keep editor export errors visible in-page and persist their traceback."""
 
@@ -5110,6 +5839,7 @@ def export_editor_project_for_web(
             pronunciation_table,
             output_name,
             token_timing_json,
+            ripple_enabled,
         )
     except Exception as exc:
         log_path = _record_web_error("editor-export", exc)
@@ -5452,8 +6182,28 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _workspace_is_editable(workspace: WorkspaceProject) -> bool:
+    try:
+        document = read_lyrics(workspace.lyrics_project)
+        document.require_timed()
+        return bool(document.lines)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _valid_workspace_projects() -> list[WorkspaceProject]:
+    return [
+        workspace
+        for workspace in list_workspace_projects(_default_output_root())
+        if _workspace_is_editable(workspace)
+    ]
+
+
 def _recent_workspace_offer() -> tuple[str, str, bool]:
     workspace = load_recent_workspace(_default_output_root())
+    if workspace is None or not _workspace_is_editable(workspace):
+        projects = _valid_workspace_projects()
+        workspace = projects[0] if projects else None
     if workspace is None:
         return "", "## 没有找到上次工程\n点击下方按钮即可进入空白制作页。", False
     message = (
@@ -5462,6 +6212,65 @@ def _recent_workspace_offer() -> tuple[str, str, bool]:
         "无 MV / MV 预览；选择新建不会删除旧工程，之后仍可手动打开。"
     )
     return str(workspace.manifest), message, True
+
+
+def _workspace_choice_label(workspace: WorkspaceProject) -> str:
+    updated_at = getattr(workspace, "updated_at", None)
+    timestamp = (
+        updated_at.astimezone().strftime("%m-%d %H:%M")
+        if updated_at
+        else ""
+    )
+    suffix = f" · {timestamp}" if timestamp else ""
+    return f"{workspace.name}{suffix} · {workspace.manifest.parent.name}"
+
+
+def _workspace_dropdown_choices() -> list[tuple[str, str]]:
+    return [
+        (_workspace_choice_label(workspace), str(workspace.manifest))
+        for workspace in _valid_workspace_projects()
+    ]
+
+
+def _link_source_ids(
+    netease_link: str | None,
+    qqmusic_link: str | None,
+    utaten_link: str | None,
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    netease_match = re.search(r"(?:[?&]id=|/song/)(\d+)", netease_link or "", re.IGNORECASE)
+    if netease_match:
+        values["netease"] = netease_match.group(1)
+    qq_match = re.search(
+        r"(?:songDetail/|[?&](?:songmid|song_mid|mid)=)([A-Za-z0-9]+)",
+        qqmusic_link or "",
+        re.IGNORECASE,
+    )
+    if qq_match:
+        values["qqmusic"] = qq_match.group(1)
+    utaten_match = re.search(r"/lyric/([A-Za-z0-9]+)", utaten_link or "", re.IGNORECASE)
+    if utaten_match:
+        values["utaten"] = utaten_match.group(1)
+    return values
+
+
+def _matching_workspace_manifest(
+    netease_link: str | None,
+    qqmusic_link: str | None,
+    utaten_link: str | None,
+) -> str | None:
+    requested = _link_source_ids(netease_link, qqmusic_link, utaten_link)
+    if len(requested) != 1:
+        return None
+    for workspace in _valid_workspace_projects():
+        refs = (workspace.settings or {}).get("source_refs")
+        if not isinstance(refs, dict):
+            continue
+        for provider, source_id in requested.items():
+            reference = refs.get(provider)
+            if isinstance(reference, dict) and str(reference.get("id") or "") == source_id:
+                return str(workspace.manifest)
+    return None
 
 
 def create_web_app(
@@ -5478,6 +6287,7 @@ def create_web_app(
         ) from exc
 
     recent_manifest, recent_message, recent_available = _recent_workspace_offer()
+    workspace_choices = _workspace_dropdown_choices()
     initial_music_u = initial_netease_music_u or ""
     netease_session_broker = _NeteaseSessionBroker(initial_music_u)
     if not managed_netease_login:
@@ -5496,7 +6306,7 @@ def create_web_app(
         )
 
     with gr.Blocks(
-        title="Karaoke Forge｜本地卡拉 OK 工作台",
+        title=f"Karaoke Forge v{__version__}｜本地卡拉 OK 工作台",
         fill_width=True,
         delete_cache=(3600, 86400),
     ) as app:
@@ -5520,10 +6330,13 @@ def create_web_app(
         make_preview_active_row = gr.State(1)
         recent_workspace_manifest = gr.State(recent_manifest)
         gr.HTML(
-            """
+            f"""
             <div class="kf-shell">
               <section class="kf-hero">
-                <div class="kf-kicker">Karaoke Forge · Local Studio</div>
+                <div class="kf-kicker">
+                  <span>Karaoke Forge · Local Studio</span>
+                  <span class="kf-version" aria-label="当前版本 {__version__}">v{__version__}</span>
+                </div>
                 <h1 class="kf-title">让每一句歌词，<br>都踩准拍子。</h1>
                 <p class="kf-subtitle">
                   上传歌曲、MV 和歌词，剩下的交给本地工作台。
@@ -5545,18 +6358,29 @@ def create_web_app(
                 with gr.Column(scale=7, min_width=340):
                     with gr.Group(
                         elem_classes=["kf-card", "kf-resume-card"],
-                        visible=recent_available,
+                        visible=True,
                     ) as recent_workspace_prompt:
                         recent_workspace_message = gr.Markdown(recent_message)
+                        saved_workspace_selector = gr.Dropdown(
+                            label="已保存工程（自动选择最近有效工程）",
+                            choices=workspace_choices,
+                            value=recent_manifest or None,
+                            interactive=recent_available,
+                        )
                         with gr.Row():
                             continue_recent_workspace = gr.Button(
-                                "继续上次工程",
+                                "载入所选工程",
                                 variant="primary",
                                 interactive=recent_available,
                             )
-                            start_blank_workspace = gr.Button(
-                                "新建空白工程（不会删除旧工程）",
+                            continue_recent_workspace_editor = gr.Button(
+                                "载入并直接编辑",
+                                interactive=recent_available,
                             )
+                            start_blank_workspace = gr.Button(
+                                "不载入，继续当前制作页",
+                            )
+                            refresh_saved_workspaces = gr.Button("刷新工程列表")
                     with gr.Group(elem_classes="kf-card"):
                         gr.HTML('<div class="kf-section-label">Step 01 · 素材</div>')
                         gr.Markdown("## 选择制作素材")
@@ -5767,7 +6591,8 @@ def create_web_app(
                         with gr.Row():
                             make_name = gr.Textbox(
                                 label="成品名称",
-                                value="我的卡拉OK",
+                                value="",
+                                placeholder="留空时自动采用在线歌名或素材文件名",
                             )
                             make_language = gr.Dropdown(
                                 label="歌曲语言",
@@ -6319,6 +7144,24 @@ def create_web_app(
                             "← 返回制作页",
                             elem_id="editor-exit-workspace",
                         )
+                    with gr.Row(elem_id="editor-mode-bar"):
+                        editor_timing_mode = gr.Radio(
+                            choices=[
+                                ("逐句逐词精修", "line"),
+                                ("全局连续调整", "global"),
+                            ],
+                            value="line",
+                            label="编辑模式",
+                            interactive=True,
+                            scale=2,
+                            elem_id="editor-timing-mode",
+                        )
+                        editor_ripple_following = gr.Checkbox(
+                            label="本句句尾越过下一句时，联动后续歌词（合唱可关闭）",
+                            value=True,
+                            interactive=True,
+                            scale=3,
+                        )
                     with gr.Row(equal_height=True, elem_id="editor-main-grid"):
                         with (
                             gr.Column(
@@ -6346,7 +7189,7 @@ def create_web_app(
                                         type="filepath",
                                     )
                                     editor_source = gr.File(
-                                        label="带时间轴歌词或项目 JSON",
+                                        label="带时间轴歌词或 Karaoke Forge 歌词 JSON",
                                         file_types=[
                                             ".lrc",
                                             ".yrc",
@@ -6372,7 +7215,8 @@ def create_web_app(
                             with gr.Row():
                                 editor_name = gr.Textbox(
                                     label="导出名称",
-                                    value="编辑后的歌词",
+                                    value="",
+                                    placeholder="留空时沿用工程歌名",
                                 )
                                 editor_export = gr.Button(
                                     "保存并导出全部格式（同时载入制作页）",
@@ -6406,7 +7250,7 @@ def create_web_app(
                                 elem_classes="kf-sticky-preview",
                                 elem_id="editor-preview",
                             )
-                            with gr.Column(elem_id="editor-audio-panel"):
+                            with gr.Column(elem_id="editor-audio-panel") as editor_audio_panel:
                                 editor_line_audio = gr.Audio(
                                     label="当前句试听",
                                     interactive=False,
@@ -6432,7 +7276,7 @@ def create_web_app(
                                 container=False,
                                 elem_id="kf-token-json",
                             )
-                            with gr.Row(elem_id="editor-timing-actions"):
+                            with gr.Row(elem_id="editor-timing-actions") as editor_timing_actions:
                                 editor_save_tokens = gr.Button(
                                     "保存逐词时间",
                                     variant="primary",
@@ -6443,6 +7287,59 @@ def create_web_app(
                                 editor_start_later = gr.Button("开始 +0.1s")
                                 editor_end_earlier = gr.Button("结束 −0.1s")
                                 editor_end_later = gr.Button("结束 +0.1s")
+                            with gr.Column(
+                                visible=False,
+                                elem_id="editor-global-mode-panel",
+                            ) as editor_global_mode_panel:
+                                gr.Markdown(
+                                    "### 全局连续时间轴\n"
+                                    "整首音频只加载一次；点击句块或拖动红色播放头即可连续定位，"
+                                    "不再为每句重新生成试听片段。"
+                                )
+                                editor_global_audio = gr.Audio(
+                                    label="全曲连续试听",
+                                    interactive=False,
+                                    autoplay=False,
+                                    loop=False,
+                                    elem_id="editor-global-audio",
+                                )
+                                editor_global_timeline = gr.HTML(
+                                    '<div class="kf-tip">载入工程后，这里会显示全曲时间轴。</div>',
+                                    elem_id="editor-global-timeline",
+                                )
+                                editor_global_line_request = gr.Number(
+                                    value=1,
+                                    precision=0,
+                                    elem_id="kf-global-line-request",
+                                )
+                                editor_global_select_line = gr.Button(
+                                    "选择全局时间轴句子",
+                                    elem_id="kf-global-select-line",
+                                )
+                                editor_apply_global_rows = gr.Button(
+                                    "保存总览中的全局时间修改",
+                                    variant="secondary",
+                                )
+                                with gr.Row():
+                                    editor_global_scope = gr.Radio(
+                                        choices=[
+                                            ("整首歌", "all"),
+                                            ("当前句及之后", "suffix"),
+                                        ],
+                                        value="all",
+                                        label="平移范围",
+                                        interactive=True,
+                                    )
+                                    editor_global_offset = gr.Number(
+                                        value=0.1,
+                                        precision=3,
+                                        label="平移秒数（可为负）",
+                                    )
+                                    editor_apply_global_shift = gr.Button(
+                                        "应用全局平移",
+                                        variant="primary",
+                                        elem_classes="kf-primary",
+                                    )
 
                         with (
                             gr.Column(
@@ -6646,17 +7543,24 @@ def create_web_app(
                     )
 
         gr.HTML(
-            '<div class="kf-footer">Karaoke Forge · 本地处理 · '
+            f'<div class="kf-footer">Karaoke Forge v{__version__} · 本地处理 · '
             "请确保你拥有歌曲、歌词和视频的使用权</div>"
         )
         app.load(fn=None, js=TOKEN_TIMELINE_JS, queue=False)
 
         def refresh_recent_workspace_offer() -> tuple[object, ...]:
             manifest, message, available = _recent_workspace_offer()
+            choices = _workspace_dropdown_choices()
             return (
                 manifest,
+                gr.update(
+                    choices=choices,
+                    value=manifest or None,
+                    interactive=available,
+                ),
                 message,
-                gr.update(visible=available),
+                gr.update(visible=True),
+                gr.update(interactive=available),
                 gr.update(interactive=available),
             )
 
@@ -6664,9 +7568,62 @@ def create_web_app(
             refresh_recent_workspace_offer,
             outputs=[
                 recent_workspace_manifest,
+                saved_workspace_selector,
                 recent_workspace_message,
                 recent_workspace_prompt,
                 continue_recent_workspace,
+                continue_recent_workspace_editor,
+            ],
+            queue=False,
+        )
+        refresh_saved_workspaces.click(
+            refresh_recent_workspace_offer,
+            outputs=[
+                recent_workspace_manifest,
+                saved_workspace_selector,
+                recent_workspace_message,
+                recent_workspace_prompt,
+                continue_recent_workspace,
+                continue_recent_workspace_editor,
+            ],
+            queue=False,
+        )
+
+        def select_saved_workspace(manifest: str | None) -> tuple[object, ...]:
+            if not manifest:
+                return (
+                    "",
+                    "## 没有选择工程\n请选择一个已保存工程，或新建空白工程。",
+                    gr.update(interactive=False),
+                    gr.update(interactive=False),
+                )
+            try:
+                workspace = load_workspace_project(manifest)
+                if not _workspace_is_editable(workspace):
+                    raise ValueError("工程歌词已损坏、为空，或缺少完整时间轴。")
+                message = (
+                    f"## 已选择 **{html.escape(workspace.name)}**\n"
+                    "可以载入制作页，或直接进入歌词编辑器；切换不会删除任何旧工程。"
+                )
+                available = True
+            except Exception as exc:
+                message = f"## 工程暂时不可用\n{html.escape(str(exc))}"
+                available = False
+            return (
+                manifest,
+                message,
+                gr.update(interactive=available),
+                gr.update(interactive=available),
+            )
+
+        saved_workspace_selector.change(
+            select_saved_workspace,
+            inputs=saved_workspace_selector,
+            outputs=[
+                recent_workspace_manifest,
+                recent_workspace_message,
+                continue_recent_workspace,
+                continue_recent_workspace_editor,
             ],
             queue=False,
         )
@@ -7147,6 +8104,8 @@ def create_web_app(
                 countdown_gap_threshold,
                 progress_callback=update,
             )
+            _allow_gradio_file_paths(app, result.video, result.files)
+            _allow_gradio_result_workspaces(app, result.files)
             progress(1.0, desc="完成" if result.video else "未完成")
             return (
                 result.status,
@@ -7234,6 +8193,8 @@ def create_web_app(
                 music_u,
                 progress_callback=update,
             )
+            _allow_gradio_file_paths(app, result.project, result.audio, result.files)
+            _allow_gradio_result_workspaces(app, result.files)
             progress(1.0, desc="校准工程已就绪" if result.project else "未完成")
             if result.project:
                 token_timeline, token_json = editor_token_workspace(
@@ -7256,6 +8217,7 @@ def create_web_app(
                 {},
                 result.project,
                 result.audio,
+                result.project_name if result.project_name else gr.skip(),
                 result.files,
                 result.output_dir,
                 result.status,
@@ -7266,7 +8228,7 @@ def create_web_app(
         make_wrapper.__annotations__["request"] = gr.Request
         prepare_make_editor_wrapper.__annotations__["request"] = gr.Request
 
-        make_prepare_button.click(
+        prepare_editor_event = make_prepare_button.click(
             ensure_netease_session_for_download,
             inputs=[
                 make_netease_link,
@@ -7329,6 +8291,7 @@ def create_web_app(
                 editor_line_undo_payload,
                 editor_source,
                 editor_audio,
+                editor_name,
                 editor_downloads,
                 editor_output_directory,
                 make_status,
@@ -7337,8 +8300,20 @@ def create_web_app(
             ],
             show_progress="full",
         )
+        prepare_editor_event.then(
+            refresh_recent_workspace_offer,
+            outputs=[
+                recent_workspace_manifest,
+                saved_workspace_selector,
+                recent_workspace_message,
+                recent_workspace_prompt,
+                continue_recent_workspace,
+                continue_recent_workspace_editor,
+            ],
+            queue=False,
+        )
 
-        make_button.click(
+        make_event = make_button.click(
             ensure_netease_session_for_download,
             inputs=[
                 make_netease_link,
@@ -7463,6 +8438,59 @@ def create_web_app(
             concurrency_limit=1,
             concurrency_id="make-material-preview",
             show_progress="hidden",
+        )
+
+        def auto_select_workspace_for_links(
+            netease_link: str,
+            qqmusic_link: str,
+            utaten_link: str,
+        ) -> tuple[object, ...]:
+            manifest = _matching_workspace_manifest(
+                netease_link,
+                qqmusic_link,
+                utaten_link,
+            )
+            if not manifest:
+                return (
+                    gr.update(value=None),
+                    "",
+                    gr.update(visible=True),
+                    "## 当前链接没有匹配到已保存工程\n可从工程列表手动选择，或继续创建新工程。",
+                    gr.update(interactive=False),
+                    gr.update(interactive=False),
+                )
+            workspace = load_workspace_project(manifest)
+            message = (
+                f"## 已自动匹配工程 **{html.escape(workspace.name)}**\n"
+                "链接来源与已保存工程一致；点击“载入所选工程”或“载入并直接编辑”即可。"
+            )
+            return (
+                gr.update(value=manifest),
+                manifest,
+                gr.update(visible=True),
+                message,
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+            )
+
+        gr.on(
+            triggers=[
+                make_netease_link.change,
+                make_qqmusic_link.change,
+                make_utaten_link.change,
+            ],
+            fn=auto_select_workspace_for_links,
+            inputs=[make_netease_link, make_qqmusic_link, make_utaten_link],
+            outputs=[
+                saved_workspace_selector,
+                recent_workspace_manifest,
+                recent_workspace_prompt,
+                recent_workspace_message,
+                continue_recent_workspace,
+                continue_recent_workspace_editor,
+            ],
+            queue=False,
+            trigger_mode="always_last",
         )
 
         instant_preview_controls = [
@@ -7667,6 +8695,7 @@ def create_web_app(
         ) -> tuple[str, list[str], str, str | None]:
             progress((0, None), desc="正在读取 QQ 音乐公开歌词")
             result = run_qqmusic_job(link, name, rights_confirmed, output_root)
+            _allow_gradio_file_paths(app, result.files)
             progress(1.0, desc="完成" if result.files else "未完成")
             return result.status, result.files, result.log, result.output_dir
 
@@ -7728,15 +8757,26 @@ def create_web_app(
             except Exception as exc:
                 _record_web_error("restore-recent-workspace", exc)
                 result = [gr.skip() for _ in workspace_restore_outputs]
-                result[-2] = gr.update(visible=False)
+                result[-2] = gr.update(visible=True)
                 result[-1] = (
-                    "### ⚠️ 上次工程暂时无法恢复\n"
-                    "已打开空白制作页，旧工程文件没有被删除；可以稍后从编辑页手动打开。"
+                    "### ⚠️ 所选工程暂时无法恢复\n"
+                    "当前制作页内容没有被覆盖；可刷新工程列表或选择其他工程。"
                 )
                 return tuple(result)
 
-            audio = str(workspace.audio) if workspace.audio and workspace.audio.is_file() else None
+            _allow_gradio_workspace_paths(app, workspace)
+
             video = str(workspace.video) if workspace.video and workspace.video.is_file() else None
+            if workspace.audio and workspace.audio.is_file():
+                audio = str(workspace.audio)
+            elif (
+                workspace.video
+                and workspace.video.is_file()
+                and probe_media_has_audio(workspace.video) is True
+            ):
+                audio = str(workspace.video)
+            else:
+                audio = None
             cover = str(workspace.cover) if workspace.cover and workspace.cover.is_file() else None
             missing_assets = [
                 label
@@ -7824,7 +8864,7 @@ def create_web_app(
                 translation_margin_v,
                 show_countdown,
                 countdown_gap_threshold,
-                gr.update(visible=False),
+                gr.update(visible=True),
                 make_status,
             )
 
@@ -7858,8 +8898,23 @@ def create_web_app(
                 if path is None or not path.is_file():
                     raise ValueError("请先恢复工程，或选择一个项目 JSON / 时间轴歌词文件。")
                 loaded = load_editor_project_workspace(path)
+                workspace: WorkspaceProject | None = None
+                if path.name == PROJECT_FILENAME:
+                    workspace = load_workspace_project(path)
+                else:
+                    workspace = _workspace_for_lyrics_project(path)
+                loaded_document = document_from_payload(loaded[0])
+                project_name = (
+                    workspace.name
+                    if workspace is not None
+                    else str(
+                        loaded_document.metadata.get("ti")
+                        or loaded_document.metadata.get("title")
+                        or path.stem
+                    )
+                )
             except Exception as exc:
-                result = [gr.skip() for _ in range(14)]
+                result = [gr.skip() for _ in range(15)]
                 result[-2] = gr.update(selected="make")
                 result[-1] = f"### ⚠️ 暂时无法打开歌词编辑器\n{html.escape(str(exc))}"
                 return tuple(result)
@@ -7867,6 +8922,7 @@ def create_web_app(
                 *loaded,
                 str(path),
                 audio,
+                project_name,
                 gr.update(selected="editor"),
                 "### ✅ 歌词工程已载入编辑器\n可逐句试听和微调；制作页素材会继续保留。",
             )
@@ -7887,16 +8943,79 @@ def create_web_app(
                 editor_line_undo_payload,
                 editor_source,
                 editor_audio,
+                editor_name,
                 main_tabs,
                 make_status,
             ],
             show_progress="full",
         )
 
+        def open_selected_workspace_editor(manifest: str) -> tuple[object, ...]:
+            try:
+                workspace = load_workspace_project(manifest)
+                if not _workspace_is_editable(workspace):
+                    raise ValueError("工程歌词已损坏、为空，或缺少完整时间轴。")
+                if workspace.audio is not None and workspace.audio.is_file():
+                    audio: object = str(workspace.audio)
+                elif (
+                    workspace.video is not None
+                    and workspace.video.is_file()
+                    and probe_media_has_audio(workspace.video) is True
+                ):
+                    audio = str(workspace.video)
+                else:
+                    audio = None
+                return open_current_make_project_editor(workspace.manifest, audio)
+            except Exception as exc:
+                result = [gr.skip() for _ in range(15)]
+                result[-2] = gr.update(selected="make")
+                result[-1] = f"### ⚠️ 暂时无法打开所选工程\n{html.escape(str(exc))}"
+                return tuple(result)
+
+        continue_recent_workspace_editor.click(
+            restore_recent_workspace,
+            inputs=recent_workspace_manifest,
+            outputs=workspace_restore_outputs,
+            show_progress="full",
+        ).then(
+            open_selected_workspace_editor,
+            inputs=recent_workspace_manifest,
+            outputs=[
+                editor_payload,
+                editor_lines,
+                editor_status,
+                editor_line_number,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_preview,
+                editor_token_timeline,
+                editor_token_json,
+                editor_line_undo_payload,
+                editor_source,
+                editor_audio,
+                editor_name,
+                main_tabs,
+                make_status,
+            ],
+            show_progress="full",
+        )
+        make_event.then(
+            refresh_recent_workspace_offer,
+            outputs=[
+                recent_workspace_manifest,
+                saved_workspace_selector,
+                recent_workspace_message,
+                recent_workspace_prompt,
+                continue_recent_workspace,
+                continue_recent_workspace_editor,
+            ],
+            queue=False,
+        )
+
         def start_blank_workspace_choice() -> tuple[object, str]:
             return (
-                gr.update(visible=False),
-                "### ✅ 已打开空白工程\n上次工程仍保留在磁盘中，没有被删除。",
+                gr.update(visible=True),
+                "### ✅ 已保留当前制作页\n已保存工程没有被删除，可随时从上方载入。",
             )
 
         start_blank_workspace.click(
@@ -7916,7 +9035,9 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            ripple_enabled: bool,
         ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
             document, snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -7924,16 +9045,26 @@ def create_web_app(
                 token_json,
                 whole_pronunciation,
                 pronunciation_table,
+                ripple_enabled,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
             )
             rows = document_to_editor_rows(document)
-            result = load_editor_line(document.to_dict(), rows, line_number)
+            result = load_editor_line(document.to_dict(), rows, selected)
             token_timeline, token_json = editor_token_workspace(
                 result[0],
                 result[1],
-                int(line_number),
+                selected,
             )
             return (
-                *result,
+                result[0],
+                result[1],
+                selected,
+                *result[2:],
                 token_timeline,
                 token_json,
                 snapshot or undo_state,
@@ -7999,14 +9130,20 @@ def create_web_app(
             pronunciation_table: object,
         ) -> tuple[object, ...]:
             original = document_from_payload(payload)
-            selected = int(line_number)
+            original_selected = min(max(1, int(line_number)), len(original.lines))
             document, _snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
-                selected,
+                original_selected,
                 token_json,
                 whole_pronunciation,
                 pronunciation_table,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(original.lines),
+                original_selected,
+                len(document.lines),
             )
             rows = document_to_editor_rows(document)
             timeline, refreshed_token_json = editor_token_workspace(
@@ -8014,7 +9151,7 @@ def create_web_app(
                 rows,
                 selected,
             )
-            old_line = original.lines[selected - 1]
+            old_line = original.lines[original_selected - 1]
             new_line = document.lines[selected - 1]
             timing_changed = (old_line.start, old_line.end) != (
                 new_line.start,
@@ -8060,6 +9197,8 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            timing_mode: str,
+            ripple_enabled: bool,
             event: gr.SelectData,
         ) -> tuple[object, ...]:
             skipped = tuple(gr.skip() for _ in range(11))
@@ -8078,6 +9217,22 @@ def create_web_app(
                 return skipped
             line_number = selected_row + 1
             try:
+                before = document_from_payload(payload)
+                table_rows = _table_rows(table)
+                if selected_row >= len(table_rows):
+                    return skipped
+                selected_source_ids = _editor_row_source_ids(table, len(before.lines))
+                raw_row = [*table_rows[selected_row], None, None][:2]
+                if str(raw_row[1] or "显示").strip() == LINE_STATUS_DELETED:
+                    return skipped
+                try:
+                    requested_source_id = (
+                        int(float(raw_row[0]))
+                        if raw_row[0] not in (None, "")
+                        else selected_row + 1
+                    )
+                except (TypeError, ValueError):
+                    requested_source_id = selected_row + 1
                 document, snapshot = _editor_document_with_pending_changes(
                     payload,
                     table,
@@ -8085,6 +9240,17 @@ def create_web_app(
                     token_json,
                     whole_pronunciation,
                     pronunciation_table,
+                    ripple_enabled,
+                )
+                matches = [
+                    position
+                    for position, source_id in enumerate(selected_source_ids, 1)
+                    if source_id == requested_source_id
+                ]
+                line_number = (
+                    matches[0]
+                    if len(matches) == 1
+                    else min(max(1, line_number), len(document.lines))
                 )
                 rows = document_to_editor_rows(document)
                 loaded = load_editor_line(document.to_dict(), rows, line_number)
@@ -8095,12 +9261,19 @@ def create_web_app(
                 )
             except (TypeError, ValueError, IndexError):
                 return skipped
-            clip, timing_status = editor_audio_with_prefetch(
-                audio,
-                loaded[0],
-                loaded[1],
-                line_number,
-            )
+            if str(timing_mode) == "global":
+                clip = gr.skip()
+                timing_status = (
+                    f"已在全局时间轴选择第 {line_number} 行；"
+                    "整曲播放器保持连续，不会重新切片。"
+                )
+            else:
+                clip, timing_status = editor_audio_with_prefetch(
+                    audio,
+                    loaded[0],
+                    loaded[1],
+                    line_number,
+                )
             return (
                 loaded[0],
                 loaded[1] if snapshot else gr.skip(),
@@ -8126,10 +9299,13 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            ripple_enabled: bool,
             delta: int,
             *,
             load_audio: bool = True,
+            absolute_target: int | None = None,
         ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
             document, snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -8137,9 +9313,21 @@ def create_web_app(
                 token_json,
                 whole_pronunciation,
                 pronunciation_table,
+                ripple_enabled,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
             )
             target = min(
-                max(1, int(line_number) + int(delta)),
+                max(
+                    1,
+                    int(absolute_target)
+                    if absolute_target is not None
+                    else selected + int(delta),
+                ),
                 len(document.lines),
             )
             loaded = load_editor_line(
@@ -8199,6 +9387,54 @@ def create_web_app(
             queue=False,
             cancels=[editor_preview_event, editor_line_draft_event],
         )
+
+        def load_editor_workspace_assets(source: object) -> tuple[object, object]:
+            path = _file_path(source)
+            if path is None or not path.is_file():
+                return gr.skip(), gr.skip()
+            workspace: WorkspaceProject | None = None
+            if path.suffix.lower() == ".json":
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if (
+                        isinstance(data, dict)
+                        and data.get("schema_version") == 1
+                        and data.get("lyrics_project")
+                    ):
+                        workspace = load_workspace_project(path)
+                    elif isinstance(data, dict):
+                        workspace = _workspace_for_lyrics_project(path)
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    workspace = None
+            if workspace is None:
+                try:
+                    document = read_lyrics(path)
+                    project_name = str(
+                        document.metadata.get("ti")
+                        or document.metadata.get("title")
+                        or path.stem
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    project_name = path.stem
+                return gr.skip(), project_name
+            if workspace.audio is not None and workspace.audio.is_file():
+                audio: object = str(workspace.audio)
+            elif (
+                workspace.video is not None
+                and workspace.video.is_file()
+                and probe_media_has_audio(workspace.video) is True
+            ):
+                audio = str(workspace.video)
+            else:
+                audio = None
+            return audio, workspace.name
+
+        editor_load_event.then(
+            load_editor_workspace_assets,
+            inputs=editor_source,
+            outputs=[editor_audio, editor_name],
+            queue=False,
+        )
         editor_load_line_event = editor_load_line.click(
             load_editor_line_workspace,
             inputs=[
@@ -8209,10 +9445,12 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
                 editor_lines,
+                editor_line_number,
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_preview,
@@ -8234,6 +9472,8 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_timing_mode,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
@@ -8264,8 +9504,130 @@ def create_web_app(
             editor_timing_status,
             editor_line_undo_payload,
         ]
-        editor_previous_line.click(
-            lambda audio, payload, table, line_number, token_json, whole, units, undo_state: (
+
+        def switch_editor_timing_mode(
+            mode: str,
+            audio: object,
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            token_json: str,
+            whole_pronunciation: str,
+            pronunciation_table: object,
+            undo_state: dict[str, Any],
+            ripple_enabled: bool,
+        ) -> tuple[object, ...]:
+            global_mode = str(mode) == "global"
+            before = document_from_payload(payload)
+            document, snapshot = _editor_document_with_pending_changes(
+                payload,
+                table,
+                int(line_number),
+                token_json,
+                whole_pronunciation,
+                pronunciation_table,
+                ripple_enabled,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
+            )
+            rows = document_to_editor_rows(document)
+            line = document.lines[selected - 1]
+            timeline, refreshed_token_json = editor_token_workspace(
+                document.to_dict(),
+                rows,
+                selected,
+            )
+            if global_mode:
+                line_audio: object = None
+                timing_status = (
+                    "### 🎵 全局连续模式\n"
+                    "整曲音频保持加载；点句块或拖红线直接定位，空格暂停 / 继续。"
+                )
+            else:
+                line_audio, preview_status = editor_audio_with_prefetch(
+                    audio,
+                    document.to_dict(),
+                    rows,
+                    selected,
+                )
+                timing_status = f"### 🎤 逐句精修模式\n{preview_status}"
+            if snapshot:
+                timing_status += "\n切换模式前的当前句草稿已自动保存。"
+            return (
+                gr.update(visible=not global_mode),
+                gr.update(value=timeline, visible=not global_mode),
+                gr.update(visible=not global_mode),
+                gr.update(visible=global_mode),
+                timing_status,
+                document.to_dict(),
+                rows,
+                selected,
+                line.pronunciation or "",
+                document_pronunciation_to_editor_rows(document, line),
+                editor_preview_html(document, selected),
+                refreshed_token_json,
+                snapshot or undo_state,
+                line_audio,
+            )
+
+        editor_timing_mode.change(
+            switch_editor_timing_mode,
+            inputs=[
+                editor_timing_mode,
+                editor_audio,
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_line_undo_payload,
+                editor_ripple_following,
+            ],
+            outputs=[
+                editor_audio_panel,
+                editor_token_timeline,
+                editor_timing_actions,
+                editor_global_mode_panel,
+                editor_timing_status,
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_preview,
+                editor_token_json,
+                editor_line_undo_payload,
+                editor_line_audio,
+            ],
+            queue=False,
+        )
+        editor_audio.change(
+            lambda audio: audio,
+            inputs=editor_audio,
+            outputs=editor_global_audio,
+            queue=False,
+        )
+        gr.on(
+            triggers=[
+                editor_payload.change,
+                editor_lines.change,
+                editor_line_number.change,
+                editor_audio.change,
+            ],
+            fn=editor_global_timeline_workspace,
+            inputs=[editor_payload, editor_lines, editor_line_number, editor_audio],
+            outputs=editor_global_timeline,
+            queue=False,
+            trigger_mode="always_last",
+        )
+
+        editor_global_select_line.click(
+            lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, requested: (
                 step_editor_line_workspace(
                     audio,
                     payload,
@@ -8275,7 +9637,10 @@ def create_web_app(
                     whole,
                     units,
                     undo_state,
-                    -1,
+                    ripple,
+                    0,
+                    load_audio=False,
+                    absolute_target=int(requested),
                 )
             ),
             inputs=[
@@ -8287,13 +9652,242 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
+                editor_global_line_request,
+            ],
+            outputs=editor_line_workspace_outputs,
+            queue=False,
+            cancels=[editor_preview_event, editor_line_draft_event],
+        )
+
+        def global_workspace_result(
+            document: LyricsDocument,
+            line_number: int,
+            audio: object,
+            status: str,
+            undo_state: dict[str, Any],
+        ) -> tuple[object, ...]:
+            rows = document_to_editor_rows(document)
+            selected = min(max(1, int(line_number)), len(document.lines))
+            line = document.lines[selected - 1]
+            token_timeline, token_json = editor_token_workspace(
+                document.to_dict(),
+                rows,
+                selected,
+            )
+            return (
+                document.to_dict(),
+                rows,
+                selected,
+                line.pronunciation or "",
+                document_pronunciation_to_editor_rows(document, line),
+                editor_preview_html(document, selected),
+                token_timeline,
+                token_json,
+                editor_global_timeline_workspace(
+                    document.to_dict(), rows, selected, audio
+                ),
+                status,
+                undo_state,
+            )
+
+        def apply_global_rows_workspace(
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            ripple_enabled: bool,
+            audio: object,
+            undo_state: dict[str, Any],
+            token_json: str,
+            whole_pronunciation: str,
+            pronunciation_table: object,
+        ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
+            source_ids = _editor_row_source_ids(table, len(before.lines))
+            document, _pending_snapshot = _editor_document_with_pending_changes(
+                payload,
+                table,
+                int(line_number),
+                token_json,
+                whole_pronunciation,
+                pronunciation_table,
+                False,
+            )
+            shifted_lines = _ripple_global_editor_changes(
+                before,
+                document,
+                ripple_enabled,
+                source_ids=source_ids,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
+            )
+            changed = document.to_dict() != before.to_dict()
+            snapshot = (
+                _editor_undo_snapshot(before, int(line_number))
+                if changed
+                else undo_state
+            )
+            ripple_note = (
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
+                if shifted_lines
+                else ""
+            )
+            status = (
+                f"### ✅ 已保存全局总览修改{ripple_note}"
+                if changed
+                else "### ℹ️ 全局总览没有待保存的修改"
+            )
+            return global_workspace_result(
+                document,
+                selected,
+                audio,
+                status,
+                snapshot,
+            )
+
+        global_workspace_outputs = [
+            editor_payload,
+            editor_lines,
+            editor_line_number,
+            editor_whole_pronunciation,
+            editor_pronunciation_units,
+            editor_preview,
+            editor_token_timeline,
+            editor_token_json,
+            editor_global_timeline,
+            editor_timing_status,
+            editor_line_undo_payload,
+        ]
+        editor_apply_global_rows.click(
+            apply_global_rows_workspace,
+            inputs=[
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_ripple_following,
+                editor_audio,
+                editor_line_undo_payload,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+            ],
+            outputs=global_workspace_outputs,
+            queue=False,
+            cancels=[editor_preview_event, editor_line_draft_event],
+        )
+
+        def apply_global_shift_workspace(
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            offset: float,
+            scope: str,
+            audio: object,
+            undo_state: dict[str, Any],
+            token_json: str,
+            whole_pronunciation: str,
+            pronunciation_table: object,
+            ripple_enabled: bool,
+        ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
+            document, _pending_snapshot = _editor_document_with_pending_changes(
+                payload,
+                table,
+                int(line_number),
+                token_json,
+                whole_pronunciation,
+                pronunciation_table,
+                ripple_enabled,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
+            )
+            start_line = selected if str(scope) == "suffix" else 1
+            document, applied = shift_editor_timeline(
+                document,
+                document_to_editor_rows(document),
+                float(offset),
+                start_line=start_line,
+            )
+            changed = document.to_dict() != before.to_dict()
+            snapshot = (
+                _editor_undo_snapshot(before, int(line_number))
+                if changed
+                else undo_state
+            )
+            range_label = "当前句及之后" if start_line > 1 else "整首歌"
+            status = (
+                f"### ✅ 已将{range_label}整体平移 {applied:+.3f}s\n"
+                "所有逐词时长和句内相对位置均保持不变。"
+            )
+            return global_workspace_result(
+                document,
+                selected,
+                audio,
+                status,
+                snapshot,
+            )
+
+        editor_apply_global_shift.click(
+            apply_global_shift_workspace,
+            inputs=[
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_global_offset,
+                editor_global_scope,
+                editor_audio,
+                editor_line_undo_payload,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_ripple_following,
+            ],
+            outputs=global_workspace_outputs,
+            queue=False,
+            cancels=[editor_preview_event, editor_line_draft_event],
+        )
+        editor_previous_line.click(
+            lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, mode: (
+                step_editor_line_workspace(
+                    audio,
+                    payload,
+                    table,
+                    line_number,
+                    token_json,
+                    whole,
+                    units,
+                    undo_state,
+                    ripple,
+                    -1,
+                    load_audio=str(mode) != "global",
+                )
+            ),
+            inputs=[
+                editor_audio,
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_line_undo_payload,
+                editor_ripple_following,
+                editor_timing_mode,
             ],
             outputs=editor_line_workspace_outputs,
             queue=False,
             cancels=[editor_preview_event, editor_line_draft_event],
         )
         editor_next_line.click(
-            lambda audio, payload, table, line_number, token_json, whole, units, undo_state: (
+            lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, mode: (
                 step_editor_line_workspace(
                     audio,
                     payload,
@@ -8303,7 +9897,9 @@ def create_web_app(
                     whole,
                     units,
                     undo_state,
+                    ripple,
                     1,
+                    load_audio=str(mode) != "global",
                 )
             ),
             inputs=[
@@ -8315,6 +9911,8 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
+                editor_timing_mode,
             ],
             outputs=editor_line_workspace_outputs,
             queue=False,
@@ -8337,11 +9935,28 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            ripple_enabled: bool,
+            timing_mode: str,
             loop_enabled: bool,
         ) -> tuple[object, ...]:
-            document = apply_editor_rows(document_from_payload(payload), table)
-            target = _next_playable_editor_line(document, int(line_number))
-            if bool(loop_enabled) or target is None:
+            before = document_from_payload(payload)
+            document, _snapshot = _editor_document_with_pending_changes(
+                payload,
+                table,
+                int(line_number),
+                token_json,
+                whole_pronunciation,
+                pronunciation_table,
+                ripple_enabled,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
+            )
+            target = _next_playable_editor_line(document, selected)
+            if str(timing_mode) == "global" or bool(loop_enabled) or target is None:
                 return tuple(
                     gr.skip()
                     for _ in [*editor_line_workspace_outputs, editor_audio_refresh_trigger]
@@ -8355,8 +9970,10 @@ def create_web_app(
                 whole_pronunciation,
                 pronunciation_table,
                 undo_state,
-                target - int(line_number),
+                ripple_enabled,
+                0,
                 load_audio=False,
+                absolute_target=target,
             )
             return (*stepped, uuid4().hex)
 
@@ -8371,6 +9988,8 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
+                editor_timing_mode,
                 editor_loop_line,
             ],
             outputs=[*editor_line_workspace_outputs, editor_audio_refresh_trigger],
@@ -8401,13 +10020,25 @@ def create_web_app(
             show_progress="hidden",
         )
 
+        def refresh_editor_audio_for_mode(
+            audio: object,
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            mode: str,
+        ) -> tuple[object, object]:
+            if str(mode) == "global":
+                return gr.skip(), gr.skip()
+            return editor_audio_with_prefetch(audio, payload, table, line_number)
+
         editor_audio_refresh_trigger.change(
-            editor_audio_with_prefetch,
+            refresh_editor_audio_for_mode,
             inputs=[
                 editor_audio,
                 editor_payload,
                 editor_lines,
                 editor_line_number,
+                editor_timing_mode,
             ],
             outputs=[editor_line_audio, editor_timing_status],
             queue=True,
@@ -8449,18 +10080,47 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             action_request: str,
+            ripple_enabled: bool,
         ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
+            undo_focus = min(max(1, int(line_number)), len(before.lines))
+            request_data: dict[str, Any] | None = None
+            raw_action_row: int | None = None
             try:
-                request = json.loads(str(action_request or ""))
-                if str(request.get("action")) == "delete":
+                parsed_request = json.loads(str(action_request or ""))
+                if not isinstance(parsed_request, dict):
+                    raise TypeError
+                request_data = parsed_request
+                raw_action_row = int(parsed_request["row"])
+                raw_rows_before_action = _table_rows(table)
+                if (
+                    not bool(parsed_request.get("current"))
+                    and 0 <= raw_action_row < len(raw_rows_before_action)
+                ):
+                    raw_target = [*raw_rows_before_action[raw_action_row], None][:1]
+                    try:
+                        source_id = int(float(raw_target[0]))
+                    except (TypeError, ValueError):
+                        source_id = 0
+                    if 1 <= source_id <= len(before.lines):
+                        undo_focus = source_id
+                if str(parsed_request.get("action")) == "delete":
                     table = _editor_rows_for_delete(
                         payload,
                         table,
-                        int(request["row"]),
+                        raw_action_row,
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 # The line-action handler below owns the user-facing validation.
                 pass
+            if request_data is not None and bool(request_data.get("current")):
+                original_selected = min(max(1, int(line_number)), len(before.lines))
+                if _editor_row_source_ids(table, len(before.lines)).count(
+                    original_selected
+                ) != 1:
+                    raise ValueError(
+                        "当前句已被删除或重复；请先应用全局表格修改，再选择歌词行。"
+                    )
             document, _snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -8468,13 +10128,66 @@ def create_web_app(
                 token_json,
                 whole_pronunciation,
                 pronunciation_table,
+                False,
+            )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
             )
             rows = document_to_editor_rows(document)
-            return apply_editor_line_action(
+            if request_data is not None:
+                if bool(request_data.get("current")):
+                    mapped_action_row = selected - 1
+                elif raw_action_row is not None:
+                    raw_rows = _table_rows(table)
+                    if raw_action_row < 0 or raw_action_row >= len(raw_rows):
+                        raise ValueError("选择的歌词行已经变化，请重新选择。")
+                    mapped_action_row = -1
+                    for raw_index, raw_row in enumerate(raw_rows):
+                        padded = [*raw_row, None, None][:2]
+                        if str(padded[1] or "显示").strip() != LINE_STATUS_DELETED:
+                            mapped_action_row += 1
+                        if raw_index == raw_action_row:
+                            if str(padded[1] or "显示").strip() == LINE_STATUS_DELETED:
+                                raise ValueError("选择的歌词行已经删除，请重新选择。")
+                            break
+                else:
+                    raise ValueError("歌词行操作缺少目标行。")
+                request_data["row"] = mapped_action_row
+                action_request = json.dumps(request_data, ensure_ascii=False)
+            action_result = apply_editor_line_action(
                 document.to_dict(),
                 rows,
-                int(line_number),
+                selected,
                 action_request,
+            )
+            after = document_from_payload(action_result[0])
+            final_source_ids = _editor_row_source_ids(table, len(before.lines))
+            action = str(request_data.get("action")) if request_data is not None else ""
+            if action == "delete":
+                final_source_ids.pop(mapped_action_row)
+            elif action == "insert-before":
+                final_source_ids.insert(mapped_action_row, None)
+            elif action == "insert-after":
+                final_source_ids.insert(mapped_action_row + 1, None)
+            shifted_lines = _ripple_global_editor_changes(
+                before,
+                after,
+                ripple_enabled,
+                source_ids=final_source_ids,
+            )
+            ripple_note = (
+                f"\n已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行。"
+                if shifted_lines
+                else ""
+            )
+            final_selected = min(max(1, int(action_result[2])), len(after.lines))
+            return (
+                *_editor_selected_line_outputs(after, final_selected),
+                f"{action_result[8]}{ripple_note}",
+                _editor_undo_snapshot(before, undo_focus),
             )
 
         def apply_editor_current_line_action_workspace(
@@ -8485,9 +10198,10 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             action: str,
+            ripple_enabled: bool,
         ) -> tuple[object, ...]:
             request = json.dumps(
-                {"row": int(line_number) - 1, "action": action},
+                {"row": int(line_number) - 1, "action": action, "current": True},
                 ensure_ascii=False,
             )
             return apply_editor_line_action_workspace(
@@ -8498,6 +10212,7 @@ def create_web_app(
                 whole_pronunciation,
                 pronunciation_table,
                 request,
+                ripple_enabled,
             )
 
         editor_context_action_event = editor_apply_context_action.click(
@@ -8510,6 +10225,7 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_context_action,
+                editor_ripple_following,
             ],
             outputs=editor_line_action_outputs,
             queue=False,
@@ -8520,7 +10236,7 @@ def create_web_app(
             ],
         )
         editor_toggle_line_event = editor_toggle_line_hidden.click(
-            lambda payload, table, line_number, token_json, whole, units: (
+            lambda payload, table, line_number, token_json, whole, units, ripple: (
                 apply_editor_current_line_action_workspace(
                     payload,
                     table,
@@ -8529,6 +10245,7 @@ def create_web_app(
                     whole,
                     units,
                     "toggle-hidden",
+                    ripple,
                 )
             ),
             inputs=[
@@ -8538,6 +10255,7 @@ def create_web_app(
                 editor_token_json,
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
+                editor_ripple_following,
             ],
             outputs=editor_line_action_outputs,
             queue=False,
@@ -8548,7 +10266,7 @@ def create_web_app(
             ],
         )
         editor_delete_line_event = editor_delete_line.click(
-            lambda payload, table, line_number, token_json, whole, units: (
+            lambda payload, table, line_number, token_json, whole, units, ripple: (
                 apply_editor_current_line_action_workspace(
                     payload,
                     table,
@@ -8557,6 +10275,7 @@ def create_web_app(
                     whole,
                     units,
                     "delete",
+                    ripple,
                 )
             ),
             inputs=[
@@ -8566,6 +10285,7 @@ def create_web_app(
                 editor_token_json,
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
+                editor_ripple_following,
             ],
             outputs=editor_line_action_outputs,
             queue=False,
@@ -8598,13 +10318,28 @@ def create_web_app(
             undo_editor_event,
         ]:
             refresh_audio_after_editor_event(editor_event)
+        def listen_editor_line_for_mode(
+            audio: object,
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            mode: str,
+        ) -> tuple[object, str]:
+            if str(mode) == "global":
+                return (
+                    gr.skip(),
+                    "全局模式中请直接在整曲播放器上试听，不会重新生成逐句片段。",
+                )
+            return preview_editor_audio_line(audio, payload, table, line_number)
+
         editor_listen_line.click(
-            preview_editor_audio_line,
+            listen_editor_line_for_mode,
             inputs=[
                 editor_audio,
                 editor_payload,
                 editor_lines,
                 editor_line_number,
+                editor_timing_mode,
             ],
             outputs=[editor_line_audio, editor_timing_status],
             queue=False,
@@ -8620,11 +10355,18 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            ripple_enabled: bool,
             *,
             start_delta: float = 0.0,
             end_delta: float = 0.0,
         ) -> tuple[object, ...]:
             before = document_from_payload(payload)
+            source_ids = _editor_row_source_ids(table, len(before.lines))
+            original_selected = min(max(1, int(line_number)), len(before.lines))
+            if source_ids.count(original_selected) != 1:
+                raise ValueError(
+                    "当前句已被删除或重复；请先应用全局表格修改，再选择要微调的歌词。"
+                )
             document, pending_snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -8633,18 +10375,49 @@ def create_web_app(
                 whole_pronunciation,
                 pronunciation_table,
             )
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
+            )
             rows = document_to_editor_rows(document)
             result = nudge_editor_timing(
                 document.to_dict(),
                 rows,
-                line_number,
+                selected,
                 start_delta=start_delta,
                 end_delta=end_delta,
+                ripple_following=False,
+            )
+            after = document_from_payload(result[0])
+            shifted_lines = _ripple_global_editor_changes(
+                before,
+                after,
+                ripple_enabled,
+                source_ids=source_ids,
+            )
+            line = after.lines[selected - 1]
+            assert line.start is not None and line.end is not None
+            ripple_note = (
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
+                if shifted_lines
+                else ""
+            )
+            result = (
+                after.to_dict(),
+                document_to_editor_rows(after),
+                selected,
+                editor_preview_html(after, selected),
+                (
+                    f"第 {selected} 行：**{line.start:.2f}s → {line.end:.2f}s**"
+                    f"（时长 {line.end - line.start:.2f}s）{ripple_note}"
+                ),
             )
             token_timeline, token_json = editor_token_workspace(
                 result[0],
                 result[1],
-                int(line_number),
+                selected,
             )
             after = document_from_payload(result[0])
             next_undo = (
@@ -8657,7 +10430,7 @@ def create_web_app(
         for timing_button, timing_function in [
             (
                 editor_start_earlier,
-                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                lambda payload, table, line_number, token_json, whole, units, undo_state, ripple: (
                     nudge_editor_timing_workspace(
                         payload,
                         table,
@@ -8666,13 +10439,14 @@ def create_web_app(
                         whole,
                         units,
                         undo_state,
+                        ripple,
                         start_delta=-0.1,
                     )
                 ),
             ),
             (
                 editor_start_later,
-                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                lambda payload, table, line_number, token_json, whole, units, undo_state, ripple: (
                     nudge_editor_timing_workspace(
                         payload,
                         table,
@@ -8681,13 +10455,14 @@ def create_web_app(
                         whole,
                         units,
                         undo_state,
+                        ripple,
                         start_delta=0.1,
                     )
                 ),
             ),
             (
                 editor_end_earlier,
-                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                lambda payload, table, line_number, token_json, whole, units, undo_state, ripple: (
                     nudge_editor_timing_workspace(
                         payload,
                         table,
@@ -8696,13 +10471,14 @@ def create_web_app(
                         whole,
                         units,
                         undo_state,
+                        ripple,
                         end_delta=-0.1,
                     )
                 ),
             ),
             (
                 editor_end_later,
-                lambda payload, table, line_number, token_json, whole, units, undo_state: (
+                lambda payload, table, line_number, token_json, whole, units, undo_state, ripple: (
                     nudge_editor_timing_workspace(
                         payload,
                         table,
@@ -8711,6 +10487,7 @@ def create_web_app(
                         whole,
                         units,
                         undo_state,
+                        ripple,
                         end_delta=0.1,
                     )
                 ),
@@ -8726,10 +10503,12 @@ def create_web_app(
                     editor_whole_pronunciation,
                     editor_pronunciation_units,
                     editor_line_undo_payload,
+                    editor_ripple_following,
                 ],
                 outputs=[
                     editor_payload,
                     editor_lines,
+                    editor_line_number,
                     editor_preview,
                     editor_timing_status,
                     editor_token_timeline,
@@ -8753,8 +10532,10 @@ def create_web_app(
             whole_pronunciation: str,
             pronunciation_table: object,
             undo_state: dict[str, Any],
+            ripple_enabled: bool,
         ) -> tuple[object, ...]:
             before = document_from_payload(payload)
+            source_ids = _editor_row_source_ids(table, len(before.lines))
             document, pending_snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -8763,13 +10544,43 @@ def create_web_app(
                 whole_pronunciation,
                 pronunciation_table,
             )
-            result = save_editor_token_timing(
-                document.to_dict(),
-                document_to_editor_rows(document),
-                line_number,
-                token_json,
+            selected = _mapped_editor_line_number(
+                table,
+                len(before.lines),
+                int(line_number),
+                len(document.lines),
             )
-            after = document_from_payload(result[0])
+            # The pending-change helper has already validated and applied the
+            # token draft to its stable source line. Applying the same JSON a
+            # second time after deletion/reordering could overwrite a neighbour.
+            after = document
+            shifted_lines = _ripple_global_editor_changes(
+                before,
+                after,
+                ripple_enabled,
+                source_ids=source_ids,
+            )
+            line = after.lines[selected - 1]
+            assert line.start is not None and line.end is not None
+            ripple_note = (
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
+                if shifted_lines
+                else ""
+            )
+            result = (
+                after.to_dict(),
+                document_to_editor_rows(after),
+                selected,
+                line.pronunciation or "",
+                document_pronunciation_to_editor_rows(after, line),
+                editor_preview_html(after, selected),
+                editor_token_timeline_html(after, selected),
+                token_timing_to_json(line),
+                (
+                    f"### ✅ 已保存第 {selected} 行逐词时间\n"
+                    f"整句范围：**{line.start:.2f}s → {line.end:.2f}s**{ripple_note}。"
+                ),
+            )
             next_undo = (
                 pending_snapshot or _editor_undo_snapshot(before, int(line_number))
                 if after.to_dict() != before.to_dict()
@@ -8787,10 +10598,12 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
                 editor_lines,
+                editor_line_number,
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_preview,
@@ -8818,10 +10631,12 @@ def create_web_app(
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_line_undo_payload,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
                 editor_lines,
+                editor_line_number,
                 editor_whole_pronunciation,
                 editor_pronunciation_units,
                 editor_preview,
@@ -8835,8 +10650,48 @@ def create_web_app(
                 editor_auto_advance_event,
             ],
         )
+
+        def export_editor_project_workspace(
+            payload: dict[str, Any],
+            line_table: object,
+            line_number: int,
+            whole_line: str,
+            pronunciation_table: object,
+            output_name: str,
+            token_timing_json: str | None,
+            ripple_enabled: bool,
+        ) -> tuple[object, ...]:
+            before = document_from_payload(payload)
+            result = export_editor_project_for_web(
+                payload,
+                line_table,
+                line_number,
+                whole_line,
+                pronunciation_table,
+                output_name,
+                token_timing_json,
+                ripple_enabled,
+            )
+            try:
+                result_count = len(document_from_payload(result[0]).lines)
+                selected = _mapped_editor_line_number(
+                    line_table,
+                    len(before.lines),
+                    int(line_number),
+                    result_count,
+                )
+            except (TypeError, ValueError):
+                selected = min(max(1, int(line_number)), len(before.lines))
+            _allow_gradio_file_paths(app, result[3])
+            _allow_gradio_result_workspaces(app, result[3])
+            if isinstance(result[0], dict):
+                manifest_value = result[0].get("metadata", {}).get("workspace_manifest")
+                if manifest_value:
+                    _allow_gradio_workspace_paths(app, manifest_value)
+            return result[0], result[1], selected, *result[2:]
+
         editor_export_event = editor_export.click(
-            export_editor_project_for_web,
+            export_editor_project_workspace,
             inputs=[
                 editor_payload,
                 editor_lines,
@@ -8845,10 +10700,12 @@ def create_web_app(
                 editor_pronunciation_units,
                 editor_name,
                 editor_token_json,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
                 editor_lines,
+                editor_line_number,
                 editor_status,
                 editor_downloads,
                 editor_output_directory,
@@ -8885,8 +10742,10 @@ def create_web_app(
             output_name: str,
             audio_file: object | None,
             token_timing_json: str,
+            ripple_enabled: bool,
         ) -> tuple[object, ...]:
             try:
+                before = document_from_payload(payload)
                 timed_document, _snapshot = _editor_document_with_pending_changes(
                     payload,
                     line_table,
@@ -8894,10 +10753,16 @@ def create_web_app(
                     token_timing_json,
                     whole_line,
                     pronunciation_table,
+                    ripple_enabled,
                 )
                 timed_payload = timed_document.to_dict()
                 timed_rows = document_to_editor_rows(timed_document)
-                selected = min(max(1, int(line_number)), len(timed_document.lines))
+                selected = _mapped_editor_line_number(
+                    line_table,
+                    len(before.lines),
+                    int(line_number),
+                    len(timed_document.lines),
+                )
                 timed_line = timed_document.lines[selected - 1]
                 result = handoff_editor_to_make(
                     timed_payload,
@@ -8908,13 +10773,26 @@ def create_web_app(
                     output_name,
                     audio_file,
                 )
-                return (*result, gr.update(selected="make"), True)
+                _allow_gradio_file_paths(app, result[3], result[5], result[6])
+                _allow_gradio_result_workspaces(app, result[3])
+                metadata = result[0].get("metadata") if isinstance(result[0], dict) else None
+                if isinstance(metadata, dict) and metadata.get("workspace_manifest"):
+                    _allow_gradio_workspace_paths(app, metadata["workspace_manifest"])
+                return (
+                    result[0],
+                    result[1],
+                    selected,
+                    *result[2:],
+                    gr.update(selected="make"),
+                    True,
+                )
             except Exception as exc:
                 log_path = _record_web_error("editor-handoff", exc)
                 log_note = f"\n\n详细记录：`{log_path}`" if log_path else ""
                 return (
                     payload,
                     line_table,
+                    min(max(1, int(line_number)), len(document_from_payload(payload).lines)),
                     f"### ⚠️ 无法交给制作页\n{exc}{log_note}",
                     [],
                     str(_default_output_root()),
@@ -8935,10 +10813,12 @@ def create_web_app(
                 editor_name,
                 editor_audio,
                 editor_token_json,
+                editor_ripple_following,
             ],
             outputs=[
                 editor_payload,
                 editor_lines,
+                editor_line_number,
                 editor_status,
                 editor_downloads,
                 editor_output_directory,
@@ -9256,6 +11136,18 @@ def launch_web_app(
         neutral_hue="slate",
         radius_size="lg",
     )
+    allowed_paths = {str(output_root)}
+    for workspace in _valid_workspace_projects():
+        for path in (
+            workspace.manifest,
+            workspace.lyrics_project,
+            workspace.audio,
+            workspace.video,
+            workspace.cover,
+            *workspace.font_files,
+        ):
+            if path is not None and path.is_file():
+                allowed_paths.add(str(path.resolve()))
     app.queue(default_concurrency_limit=1).launch(
         server_name=host,
         server_port=port,
@@ -9264,5 +11156,5 @@ def launch_web_app(
         show_error=True,
         theme=theme,
         css=WEB_CSS,
-        allowed_paths=[str(output_root)],
+        allowed_paths=sorted(allowed_paths),
     )

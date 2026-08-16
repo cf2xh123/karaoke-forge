@@ -439,6 +439,8 @@ def nudge_editor_line_timing(
     *,
     start_delta: float = 0.0,
     end_delta: float = 0.0,
+    ripple_following: bool = True,
+    minimum_gap: float = 0.02,
 ) -> LyricsDocument:
     """Nudge one line edge without shifting already-correct interior tokens."""
 
@@ -449,6 +451,7 @@ def nudge_editor_line_timing(
     line = current.lines[index]
     if line.start is None or line.end is None:
         raise ValueError("当前歌词行没有完整时间，无法微调。")
+    previous_end = line.end
     new_start = max(0.0, line.start + float(start_delta))
     new_end = line.end + float(end_delta)
     if new_end <= new_start:
@@ -462,8 +465,108 @@ def nudge_editor_line_timing(
         line.tokens[-1].end = new_end
     line.start = new_start
     line.end = new_end
+    if ripple_following and new_end > previous_end:
+        ripple_following_line_timing(
+            current,
+            line_number,
+            previous_end=previous_end,
+            minimum_gap=minimum_gap,
+        )
     current.metadata["word_timing"] = "manual"
     return current
+
+
+def _shift_line_timing(line: LyricLine, offset: float) -> None:
+    """Move one complete line without changing any duration or relative token timing."""
+
+    if line.start is None or line.end is None:
+        return
+    line.start += offset
+    line.end += offset
+    for token in line.tokens:
+        token.start += offset
+        token.end += offset
+
+
+def _ripple_candidate(line: LyricLine) -> bool:
+    return line.start is not None and line.end is not None
+
+
+def _global_timeline_candidate(line: LyricLine) -> bool:
+    return bool(not line.hidden and line.text.strip() and _ripple_candidate(line))
+
+
+def ripple_following_line_timing(
+    document: LyricsDocument,
+    line_number: int,
+    *,
+    previous_end: float | None = None,
+    minimum_gap: float = 0.02,
+) -> tuple[int, ...]:
+    """Push only the following lines newly reached by an extended lyric boundary."""
+
+    index = int(line_number) - 1
+    if index < 0 or index >= len(document.lines):
+        raise ValueError(f"行号应在 1 到 {len(document.lines)} 之间。")
+    current = document.lines[index]
+    if current.end is None:
+        return ()
+    original_previous_end = current.end if previous_end is None else float(previous_end)
+    shifted_previous_end = current.end
+    gap = max(0.0, float(minimum_gap))
+    shifted_lines: list[int] = []
+    for candidate_index in range(index + 1, len(document.lines)):
+        candidate = document.lines[candidate_index]
+        if not _ripple_candidate(candidate):
+            continue
+        assert candidate.start is not None and candidate.end is not None
+        original_start = candidate.start
+        original_end = candidate.end
+        # Preserve any overlap that already existed before this edit. Only the
+        # newly introduced part of the intrusion travels down the timeline.
+        preserved_boundary = max(original_start, original_previous_end + gap)
+        shift = shifted_previous_end + gap - preserved_boundary
+        if shift <= 1e-9:
+            break
+        _shift_line_timing(candidate, shift)
+        shifted_lines.append(candidate_index + 1)
+        assert candidate.end is not None
+        shifted_previous_end = candidate.end
+        original_previous_end = original_end
+    if shifted_lines:
+        document.metadata["word_timing"] = "manual"
+    return tuple(shifted_lines)
+
+
+def shift_editor_timeline(
+    document: LyricsDocument,
+    table: object,
+    offset: float,
+    *,
+    start_line: int = 1,
+) -> tuple[LyricsDocument, float]:
+    """Shift the whole song, or the current suffix, while preserving token spacing."""
+
+    current = apply_editor_rows(document, table)
+    first_index = int(start_line) - 1
+    if first_index < 0 or first_index >= len(current.lines):
+        raise ValueError(f"行号应在 1 到 {len(current.lines)} 之间。")
+    timed = [
+        line
+        for line in current.lines[first_index:]
+        if line.start is not None and line.end is not None
+    ]
+    if not timed:
+        raise ValueError("所选范围没有可平移的完整时间轴。")
+    requested = float(offset)
+    earliest = min(line.start for line in timed if line.start is not None)
+    applied = max(requested, -earliest)
+    if abs(applied) <= 1e-12:
+        return current, 0.0
+    for line in timed:
+        _shift_line_timing(line, applied)
+    current.metadata["word_timing"] = "manual"
+    return current, applied
 
 
 def _line_ruby_html(
@@ -576,6 +679,71 @@ def editor_token_timeline_html(document: LyricsDocument, line_number: int) -> st
         'aria-label="当前播放时间；可左右拖动定位" tabindex="0"></div>'
         f"{''.join(blocks)}{''.join(handles)}"
         "</div></div></div></div>"
+    )
+
+
+def editor_global_timeline_html(
+    document: LyricsDocument,
+    line_number: int,
+    media_duration: float | None = None,
+) -> str:
+    """Render a whole-song navigator backed by one continuously loaded audio player."""
+
+    timed = [
+        (index, line)
+        for index, line in enumerate(document.lines, 1)
+        if _global_timeline_candidate(line)
+    ]
+    if not timed:
+        return '<div class="kf-tip">当前工程没有可用于全局模式的完整歌词时间轴。</div>'
+    lyric_end = max(float(line.end or 0.0) for _index, line in timed)
+    duration = max(1.0, lyric_end + 1.0, float(media_duration or 0.0))
+    minimum_width = max(1400, min(12000, round(duration * 14)))
+    blocks: list[str] = []
+    for index, line in timed:
+        assert line.start is not None and line.end is not None
+        left = line.start / duration * 100
+        width = max(0.22, (line.end - line.start) / duration * 100)
+        token_marks = "".join(
+            '<i class="kf-global-token" '
+            f'data-token-index="{token_index}" '
+            f'data-start="{token.start:.9f}" data-end="{token.end:.9f}" '
+            f'style="left:{max(0.0, (token.start - line.start) / max(0.01, line.end - line.start) * 100):.4f}%;'
+            f'width:{max(0.5, (token.end - token.start) / max(0.01, line.end - line.start) * 100):.4f}%"></i>'
+            for token_index, token in enumerate(line.tokens)
+        )
+        selected = " is-selected" if index == int(line_number) else ""
+        blocks.append(
+            '<button type="button" '
+            f'class="kf-global-line-block lane-{(index - 1) % 3}{selected}" '
+            f'data-line-number="{index}" data-start="{line.start:.6f}" '
+            f'data-end="{line.end:.6f}" style="left:{left:.6f}%;width:{width:.6f}%;" '
+            f'title="第 {index} 行 · {line.start:.2f}s–{line.end:.2f}s · 点击跳转">'
+            f'<span>{index}. {html.escape(line.text)}</span>{token_marks}</button>'
+        )
+    tick_step = 10 if duration <= 180 else 30 if duration <= 600 else 60
+    ticks = "".join(
+        '<span class="kf-global-tick" '
+        f'style="left:{second / duration * 100:.6f}%">{second // 60}:{second % 60:02d}</span>'
+        for second in range(0, int(duration) + 1, tick_step)
+    )
+    return (
+        '<div class="kf-global-timeline" '
+        f'data-duration="{duration:.6f}" data-line-count="{len(document.lines)}">'
+        '<div class="kf-global-toolbar"><div><b>全曲时间轴：</b>'
+        "点击句块会立刻跳到该句；红线可在全曲拖动。总览中的开始/结束秒仍可批量修改。"
+        '</div><div class="kf-global-actions">'
+        '<button type="button" class="kf-global-zoom-out">− 缩小</button>'
+        '<button type="button" class="kf-global-zoom-fit">适应全曲</button>'
+        '<button type="button" class="kf-global-zoom-in">＋ 放大</button>'
+        "</div></div>"
+        '<div class="kf-global-scroll"><div class="kf-global-canvas" '
+        f'data-base-width="{minimum_width}" style="min-width:{minimum_width}px">'
+        f'<div class="kf-global-ruler">{ticks}</div>'
+        '<div class="kf-global-track">'
+        '<div class="kf-global-playhead" role="slider" aria-label="全曲播放位置" '
+        'tabindex="0" style="left:0%"></div>'
+        f"{''.join(blocks)}</div></div></div></div>"
     )
 
 

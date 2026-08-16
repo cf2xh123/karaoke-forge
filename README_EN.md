@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.14.0` (Alpha). Windows setup and later launches can now
+> The current release is `0.15.0` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -29,6 +29,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   and five audio-reactive layouts, for 25 combinations with project-persistent settings;
 - Locate the actual song start inside an MV with multi-window audio fingerprints;
 - Use Vmoe karaoke ASS or public UtaTen/QQ Music/NetEase lyrics, and refine timing from audio;
+- When a project is created from a NetEase, QQ Music, or UtaTen link, use the official
+  fetched song title if the name field is left blank; an explicit custom name still wins;
 - When no local or MV audio is available, open a dedicated Edge window for one-click
   login on NetEase's official site; everyday Edge can stay open, with no DevTools or
   Firefox required; a valid dedicated login is restored on the next launch and the
@@ -42,15 +44,21 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
 - Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
-- Persist lyrics, media, cover art, fonts, and settings, then ask whether to continue the
-  latest project or start blank on the next web launch without deleting the saved project;
-  if browser file inputs lose their temporary values, recover assets from the project manifest;
+- Persist lyrics, media, cover art, fonts, and settings; on the next web launch, select the
+  newest valid project in a saved-project list without replacing the current page until the
+  user confirms. Load it into the Make page, load and edit it in one click, or keep the current
+  page without deleting saved work. Projects created under custom output roots remain indexed;
+  if browser file inputs lose their temporary values, recover assets from the saved manifest;
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with project-wide
   undo that restores and focuses the actual edited row even after playback has moved elsewhere;
-- Keep interior word timings fixed when nudging a line edge, and skip blank, hidden, or
-  untimed rows during automatic next-line playback;
+- Keep interior word timings fixed when nudging a line edge; when an extended line reaches
+  the next lyric, optional Ripple mode shifts only the affected following lines while preserving
+  their durations and token spacing;
+- Keep the detailed per-line workflow and add a continuous global mode that loads the whole
+  song once, supports continuous seeks from lyric blocks or the red playhead, keeps the KTV
+  preview following the active line and word timing, and shifts the global timeline as one operation;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview the song's actual lyrics against a matching MV frame, or against the selected
   cover-art scene when no MV is available; a link-only source uses online cover art and a
@@ -61,7 +69,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.14.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.15.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -165,7 +173,12 @@ but filters English readings even when an older project, manual edit, or importe
 already stored them. ASS-producing CLI commands expose the same final-output policy as
 `--no-auto-english-pronunciation`.
 
-The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or project JSON.
+The “Lyrics & Pronunciation Editor” loads timed LRC/YRC/SRT/VTT/ASS or lyric JSON directly.
+Open complete workspaces through the saved-project selector: uploading a manifest alone through
+the browser does not carry its adjacent assets. The selector chooses the newest valid project,
+or a project that matches a pasted NetEase/QQ Music/UtaTen source link, but this selection never
+replaces the current page until the user clicks **Load selected project** or **Load and edit**.
+Keeping the current page does not delete any saved project, and the list can be refreshed in place.
 Each row keeps source text, translation, timing, pronunciation, and visibility together.
 Hidden rows remain recoverable in JSON but are omitted from subtitle/video exports;
 deleted rows are removed permanently. A second editable table supports character-range
@@ -174,6 +187,13 @@ The per-token timeline also supports direct text edits: clearing and saving one 
 removes an unwanted character or space without changing the remaining token times.
 Current-line looping, automatic next-line playback, and Space-bar pause/resume are
 available while timing lyrics by ear.
+
+Per-line mode remains available for precise word and line-edge work. If extending a line end
+would intrude into the next lyric, Ripple can move the newly affected following lines without
+changing their internal durations or word spacing, and can be disabled when only the current
+line should change. Global mode keeps one whole-song audio source loaded: click a lyric block
+or drag the red playhead for continuous seeking while the KTV preview follows the active line
+and word timing, then use global shift to correct a whole-song offset in one operation.
 
 The NetEase tab accepts single-song links and uses anonymous public access by default.
 When authenticated audio is needed on Windows, click **One-click NetEase login**. The
