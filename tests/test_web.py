@@ -6,8 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from karaoke_forge import __version__
 from karaoke_forge.editor import (
     apply_pronunciation_rows,
+    document_from_payload,
     document_to_editor_rows,
     pronunciation_to_editor_rows,
 )
@@ -25,6 +27,7 @@ from karaoke_forge.web import (
     _editor_document_with_pending_changes,
     _file_path,
     _is_loopback_host,
+    _matching_workspace_manifest,
     _NeteaseSessionBroker,
     _next_playable_editor_line,
     _prepare_lyrics,
@@ -36,6 +39,7 @@ from karaoke_forge.web import (
     auto_configure_model_network_for_web,
     configure_model_network_for_web,
     create_web_app,
+    editor_global_timeline_workspace,
     environment_markdown,
     export_editor_project,
     exported_project_for_make,
@@ -53,6 +57,29 @@ from karaoke_forge.web import (
     subtitle_preview_html,
     undo_editor_line_action,
 )
+
+
+def test_homepage_displays_current_version(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+
+    app = create_web_app()
+    hero = next(
+        component
+        for component in app.blocks.values()
+        if type(component).__name__ == "HTML"
+        and "kf-hero" in str(getattr(component, "value", ""))
+    )
+    footer = next(
+        component
+        for component in app.blocks.values()
+        if type(component).__name__ == "HTML"
+        and "kf-footer" in str(getattr(component, "value", ""))
+    )
+
+    assert f"v{__version__}" in app.title
+    assert f"v{__version__}" in hero.value
+    assert "kf-version" in hero.value
+    assert f"Karaoke Forge v{__version__}" in footer.value
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "[::1]", "localhost"])
@@ -198,7 +225,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
     restored = restore_callback.fn(str(workspace.manifest))
 
     assert len(restore_callback.outputs) == len(restored) == 25
-    assert restored[-2]["visible"] is False
+    assert restored[-2]["visible"] is True
     assert "已恢复工程" in restored[-1]
     for marker, expected in restored_files.items():
         index = next(
@@ -207,6 +234,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
             if marker in str(getattr(output, "label", ""))
         )
         assert restored[index] == str(expected)
+        assert str(expected.resolve()) in app.allowed_paths
 
     monkeypatch.setattr("karaoke_forge.web.load_recent_workspace", lambda _root: workspace)
     offered = _recent_workspace_offer()
@@ -221,9 +249,11 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
     )
     refreshed = refresh_callback.fn()
     assert refreshed[0] == str(workspace.manifest)
-    assert "Restored project" in refreshed[1]
-    assert refreshed[2]["visible"] is True
-    assert refreshed[3]["interactive"] is True
+    assert refreshed[1]["value"] == str(workspace.manifest)
+    assert "Restored project" in refreshed[2]
+    assert refreshed[3]["visible"] is True
+    assert refreshed[4]["interactive"] is True
+    assert refreshed[5]["interactive"] is True
 
     blank_callback = next(
         block_function
@@ -231,7 +261,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         if getattr(block_function.fn, "__name__", "") == "start_blank_workspace_choice"
     )
     blank = blank_callback.fn()
-    assert blank[0]["visible"] is False
+    assert blank[0]["visible"] is True
     assert "没有被删除" in blank[1]
 
     def broken_lyrics(_path):
@@ -239,7 +269,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
 
     monkeypatch.setattr("karaoke_forge.web.read_lyrics", broken_lyrics)
     broken_restore = restore_callback.fn(str(workspace.manifest))
-    assert broken_restore[-2]["visible"] is False
+    assert broken_restore[-2]["visible"] is True
     assert "暂时无法恢复" in broken_restore[-1]
 
     monkeypatch.setattr("karaoke_forge.web.load_recent_workspace", lambda _root: None)
@@ -595,6 +625,8 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert "clearAuditionAfterLineChange" in TOKEN_TIMELINE_JS
     assert ".kf-live-karaoke-measure" in TOKEN_TIMELINE_JS
     assert ".kf-karaoke-token-core" in TOKEN_TIMELINE_JS
+    assert "updateGlobalKaraokeAt" in TOKEN_TIMELINE_JS
+    assert "playbackIsActive(globalParts)" in TOKEN_TIMELINE_JS
     assert "__karaokeForgeTokenAuditionGuardUntil" in EDITOR_STOP_GATE_JS
     assert "__karaokeForgeSuppressAutoAdvanceUntil" not in EDITOR_STOP_GATE_JS
     assert "const stoppedLine = Number(args[3])" in EDITOR_STOP_GATE_JS
@@ -621,7 +653,602 @@ def test_auto_advance_skips_hidden_blank_and_untimed_lines() -> None:
 
 def test_safe_stem_removes_windows_path_characters() -> None:
     assert _safe_stem("  my:karaoke*video?.mp4  ") == "my-karaoke-video"
+    assert _safe_stem("AC/DC") == "AC-DC"
+    assert _safe_stem(r"Artist\Song") == "Artist-Song"
+    assert _safe_stem("CON") == "_CON"
     assert _safe_stem("", fallback="song") == "song"
+
+
+def test_editor_blank_export_name_keeps_display_name_but_sanitizes_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    document = LyricsDocument(lines=[LyricLine(text="Line", start=1.0, end=2.0)])
+    source = project_dir / "source.json"
+    source.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+    workspace = save_workspace_project(
+        project_dir,
+        name="Song: Special?",
+        lyrics_project=source,
+        recent_root=tmp_path / "outputs",
+    )
+    document.metadata["workspace_manifest"] = str(workspace.manifest)
+
+    _payload, _rows, _status, files, _directory = export_editor_project(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        "",
+        [],
+        "",
+    )
+
+    assert load_workspace_project(workspace.manifest).name == "Song: Special?"
+    assert {Path(path).stem for path in files} == {
+        "Song-Special",
+        "Song-Special.enhanced",
+    }
+
+
+def test_workspace_link_matching_requires_one_exact_source(monkeypatch, tmp_path: Path) -> None:
+    lyrics = tmp_path / "lyrics.lrc"
+    lyrics.write_text("[00:01.00]Line\n", encoding="utf-8")
+    workspace = SimpleNamespace(
+        manifest=tmp_path / PROJECT_FILENAME,
+        lyrics_project=lyrics,
+        settings={
+            "source_refs": {
+                "netease": {"id": "42"},
+                "qqmusic": {"id": "0039MnYb0qxYhV"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.list_workspace_projects",
+        lambda _root: [workspace],
+    )
+
+    assert (
+        _matching_workspace_manifest(
+            "https://music.163.com/song?id=42",
+            "",
+            "",
+        )
+        == str(workspace.manifest)
+    )
+    assert (
+        _matching_workspace_manifest(
+            "https://music.163.com/song?id=41",
+            "",
+            "",
+        )
+        is None
+    )
+    assert (
+        _matching_workspace_manifest(
+            "https://music.163.com/song?id=42",
+            "https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV",
+            "",
+        )
+        is None
+    )
+
+
+def test_recent_workspace_offer_skips_a_project_with_corrupted_lyrics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "outputs"
+    first_lyrics = tmp_path / "first.lrc"
+    broken_lyrics = tmp_path / "broken.lrc"
+    first_lyrics.write_text("[00:01.00]Good\n", encoding="utf-8")
+    broken_lyrics.write_text("[00:01.00]Temporary\n", encoding="utf-8")
+    first = save_workspace_project(
+        root / "first",
+        name="First valid",
+        lyrics_project=first_lyrics,
+        recent_root=root,
+    )
+    broken = save_workspace_project(
+        root / "broken",
+        name="Newest broken",
+        lyrics_project=broken_lyrics,
+        recent_root=root,
+    )
+    broken.lyrics_project.write_text("not a timed lyrics document", encoding="utf-8")
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(root))
+
+    manifest, message, available = _recent_workspace_offer()
+
+    assert manifest == str(first.manifest)
+    assert "First valid" in message
+    assert available is True
+
+
+def test_global_timeline_workspace_passes_real_media_duration(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "song.m4a"
+    audio.write_bytes(b"audio")
+    document = LyricsDocument(
+        lines=[LyricLine(text="Line", start=1.0, end=2.0)]
+    )
+    captured: dict[str, object] = {}
+
+    def fake_duration(path: str, modified_ns: int, size: int) -> float:
+        captured["duration_args"] = (path, modified_ns, size)
+        return 123.456
+
+    def fake_timeline(
+        received: LyricsDocument,
+        line_number: int,
+        media_duration: float | None = None,
+    ) -> str:
+        captured["document"] = received
+        captured["line_number"] = line_number
+        captured["media_duration"] = media_duration
+        return "global-timeline"
+
+    monkeypatch.setattr("karaoke_forge.web._cached_media_duration", fake_duration)
+    monkeypatch.setattr("karaoke_forge.web.editor_global_timeline_html", fake_timeline)
+
+    rendered = editor_global_timeline_workspace(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        str(audio),
+    )
+
+    assert rendered == "global-timeline"
+    assert captured["line_number"] == 1
+    assert captured["media_duration"] == pytest.approx(123.456)
+    assert Path(captured["duration_args"][0]) == audio.resolve()
+
+
+def test_global_editor_callbacks_match_signatures_and_row_selection_has_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callbacks = {
+        getattr(block_function.fn, "__name__", ""): block_function
+        for block_function in app.fns.values()
+    }
+    expected_shapes = {
+        "editor_global_timeline_workspace": (4, 1),
+        "switch_editor_timing_mode": (10, 14),
+        "apply_global_rows_workspace": (9, 11),
+        "apply_global_shift_workspace": (11, 11),
+        "select_editor_row": (10, 11),
+        "load_editor_line_workspace": (8, 9),
+        "advance_editor_line_after_playback": (11, 12),
+        "apply_editor_line_action_workspace": (8, 10),
+        "save_editor_token_timing_workspace": (8, 10),
+        "save_editor_pronunciation_workspace": (8, 8),
+        "export_editor_project_workspace": (8, 6),
+        "handoff_editor_wrapper": (9, 10),
+    }
+
+    for name, (input_count, output_count) in expected_shapes.items():
+        callback = callbacks[name]
+        parameters = [
+            parameter
+            for parameter_name, parameter in inspect.signature(callback.fn).parameters.items()
+            if parameter_name not in {"event", "request", "progress"}
+        ]
+        assert len(callback.inputs) == len(parameters) == input_count
+        assert len(callback.outputs) == output_count
+
+    timing_mode = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "label", None) == "编辑模式"
+    )
+    assert timing_mode in callbacks["select_editor_row"].inputs
+
+
+def test_saving_a_longer_token_line_without_collision_does_not_report_a_ripple(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "save_editor_token_timing_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="A",
+                start=1.0,
+                end=2.0,
+                tokens=[KaraokeToken(text="A", start=1.0, end=2.0)],
+            ),
+            LyricLine(text="B", start=5.0, end=6.0),
+        ]
+    )
+
+    result = callback.fn(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":2.5}]',
+        "",
+        [],
+        {},
+        True,
+    )
+
+    assert "已保存第 1 行逐词时间" in result[8]
+    assert "联动后移" not in result[8]
+
+
+def test_global_multi_line_edits_account_for_ripples_already_applied(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_rows_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=3.5),
+            LyricLine(text="B", start=3.0, end=5.0),
+            LyricLine(text="C", start=4.8, end=6.0),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[0][3] = 3.7
+    rows[1][3] = 5.2
+
+    result = callback.fn(document.to_dict(), rows, 1, True, None, {}, "", "", [])
+    edited = document_from_payload(result[0])
+
+    assert edited.lines[2].start == pytest.approx(5.2)
+    assert edited.lines[2].end == pytest.approx(6.4)
+
+
+def test_global_save_clamps_selection_after_deleting_the_last_line(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_rows_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(text="B", start=3.0, end=4.0),
+            LyricLine(text="C", start=5.0, end=6.0),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[-1][1] = "删除"
+
+    result = callback.fn(document.to_dict(), rows, 3, True, None, {}, "", "", [])
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["A", "B"]
+    assert result[2] == 2
+
+
+def test_token_save_does_not_reapply_a_deleted_lines_draft_to_its_neighbour(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "save_editor_token_timing_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(
+                text="B",
+                start=3.0,
+                end=4.0,
+                tokens=[KaraokeToken(text="B", start=3.0, end=4.0)],
+            ),
+            LyricLine(
+                text="C",
+                start=5.0,
+                end=6.0,
+                tokens=[KaraokeToken(text="C", start=5.0, end=6.0)],
+            ),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[-1][1] = "删除"
+
+    result = callback.fn(
+        document.to_dict(),
+        rows,
+        3,
+        '[{"text":"C","start":5.0,"end":6.0}]',
+        "",
+        [],
+        {},
+        True,
+    )
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["A", "B"]
+    assert edited.lines[1].tokens[0].text == "B"
+    assert result[2] == 2
+
+
+def test_line_action_maps_context_row_after_pending_deletion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "apply_editor_line_action_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(text="B", start=3.0, end=4.0),
+            LyricLine(text="C", start=5.0, end=6.0),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[0][1] = "删除"
+
+    result = callback.fn(
+        document.to_dict(),
+        rows,
+        2,
+        "",
+        "",
+        [],
+        json.dumps({"row": 2, "action": "toggle-hidden"}),
+        True,
+    )
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["B", "C"]
+    assert edited.lines[0].hidden is False
+    assert edited.lines[1].hidden is True
+    assert result[9]["line_number"] == 3
+
+
+def test_deleting_an_extended_current_line_does_not_leave_a_ripple_behind(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "apply_editor_line_action_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(
+                text="B",
+                start=3.0,
+                end=5.0,
+                tokens=[KaraokeToken(text="B", start=3.0, end=5.0)],
+            ),
+            LyricLine(text="C", start=5.0, end=6.0),
+        ]
+    )
+
+    result = callback.fn(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        2,
+        '[{"text":"B","start":3.0,"end":5.5}]',
+        "",
+        [],
+        json.dumps({"row": 1, "action": "delete", "current": True}),
+        True,
+    )
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["A", "C"]
+    assert edited.lines[1].start == pytest.approx(5.0)
+
+
+def test_switching_to_global_mode_commits_pending_tokens_and_ripple(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "switch_editor_timing_mode"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="A",
+                start=1.0,
+                end=2.0,
+                tokens=[KaraokeToken(text="A", start=1.0, end=2.0)],
+            ),
+            LyricLine(text="B", start=3.0, end=4.0),
+        ]
+    )
+
+    result = callback.fn(
+        "global",
+        None,
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":3.5}]',
+        "",
+        [],
+        {},
+        True,
+    )
+    edited = document_from_payload(result[5])
+
+    assert edited.lines[0].end == pytest.approx(3.5)
+    assert edited.lines[1].start == pytest.approx(3.52)
+    assert result[13] is None
+    assert "草稿已自动保存" in result[4]
+
+
+def test_auto_advance_uses_the_mapped_current_line_after_pending_deletion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "advance_editor_line_after_playback"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(text="B", start=3.0, end=4.0),
+            LyricLine(text="C", start=5.0, end=6.0),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[0][1] = "删除"
+
+    result = callback.fn(
+        None,
+        document.to_dict(),
+        rows,
+        2,
+        "",
+        "",
+        [],
+        {},
+        True,
+        "line",
+        False,
+    )
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["B", "C"]
+    assert result[2] == 2
+
+
+def test_project_asset_loader_clears_audio_when_the_new_workspace_has_none(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    lyrics = tmp_path / "lyrics.lrc"
+    lyrics.write_text("[00:01.00]Line\n", encoding="utf-8")
+    workspace = save_workspace_project(
+        tmp_path / "outputs" / "silent-project",
+        name="Silent project",
+        lyrics_project=lyrics,
+        recent_root=tmp_path / "outputs",
+    )
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "load_editor_workspace_assets"
+    )
+
+    audio, name = callback.fn(str(workspace.manifest))
+
+    assert audio is None
+    assert name == "Silent project"
+
+
+def test_editor_export_allows_new_files_from_a_custom_workspace_created_after_launch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    default_root = tmp_path / "default-outputs"
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(default_root))
+    app = create_web_app()
+
+    document = LyricsDocument(lines=[LyricLine(text="Line", start=1.0, end=2.0)])
+    lyrics = tmp_path / "source.json"
+    lyrics.write_text(json.dumps(document.to_dict()), encoding="utf-8")
+    audio = tmp_path / "source.wav"
+    audio.write_bytes(b"workspace-audio")
+    workspace = save_workspace_project(
+        tmp_path / "custom" / "song",
+        name="Custom song",
+        lyrics_project=lyrics,
+        audio=audio,
+        recent_root=default_root,
+    )
+    document.metadata["workspace_manifest"] = str(workspace.manifest)
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "")
+        == "export_editor_project_workspace"
+    )
+
+    result = callback.fn(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        "",
+        [],
+        "",
+        "[]",
+        True,
+    )
+
+    assert result[4]
+    assert workspace.audio is not None
+    for path in [*result[4], workspace.audio, workspace.manifest]:
+        assert str(Path(path).resolve()) in app.allowed_paths
+
+
+def test_unmatched_link_clears_a_previous_automatic_project_selection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "auto_select_workspace_for_links"
+    )
+
+    result = callback.fn("https://music.163.com/song?id=999", "", "")
+
+    assert result[0]["value"] is None
+    assert result[1] == ""
+    assert result[4]["interactive"] is False
+    assert "没有匹配" in result[3]
 
 
 def test_file_path_accepts_gradio_file_data_dict() -> None:
@@ -777,6 +1404,30 @@ def test_web_editor_loads_and_exports_hidden_rows(
     project = next(Path(path) for path in files if path.endswith(".json"))
     assert "Credit" not in lrc.read_text(encoding="utf-8")
     assert '"hidden": true' in project.read_text(encoding="utf-8")
+
+
+def test_web_editor_loads_a_workspace_manifest_directly(tmp_path: Path) -> None:
+    lyrics = tmp_path / "lyrics.json"
+    document = LyricsDocument(
+        lines=[LyricLine(text="Manifest lyric", start=1.0, end=2.0)]
+    )
+    lyrics.write_text(
+        json.dumps(document.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    workspace = save_workspace_project(
+        tmp_path / "workspace",
+        name="Manifest Song",
+        lyrics_project=lyrics,
+        recent_root=tmp_path,
+    )
+
+    payload, rows, status, line_number, *_rest = load_editor_project(workspace.manifest)
+
+    assert line_number == 1
+    assert rows[0][4] == "Manifest lyric"
+    assert payload["metadata"]["workspace_manifest"] == str(workspace.manifest)
+    assert "已载入工程 Manifest Song" in status
 
 
 def test_web_editor_all_hidden_still_exports_recoverable_json(
@@ -1035,7 +1686,7 @@ def test_saving_pronunciation_after_pending_token_delete_does_not_reapply_old_sp
     )
 
     assert saved[1][0][4] == "AC"
-    assert saved[3] == [["A", "a", 0, 1], ["C", "see", 1, 2]]
+    assert saved[4] == [["A", "a", 0, 1], ["C", "see", 1, 2]]
     assert saved[-1]
 
 
@@ -1348,6 +1999,65 @@ def test_make_page_prepares_editor_without_reuploading_inputs(
     assert "无需重复上传" in result.log
     assert "不下载音频" in result.log
     assert "可校准 KTV 工程已生成" in result.status
+
+
+@pytest.mark.parametrize(
+    ("output_name", "expected_name", "expected_project_stem"),
+    [
+        ("", "Linked Song", "Linked-Song-校准工程"),
+        ("Director Cut", "Director Cut", "Director-Cut"),
+    ],
+)
+def test_editor_project_naming_uses_online_title_without_altering_explicit_name(
+    output_name: str,
+    expected_name: str,
+    expected_project_stem: str,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    audio = tmp_path / "song.m4a"
+    video = tmp_path / "mv.webm"
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    info = NeteaseSongInfo(
+        song_id="42",
+        title="Linked Song",
+        artists=("Artist",),
+        canonical_url="https://music.163.com/song?id=42",
+        page_lyrics="[00:01.00]Hello world\n",
+        word_lyrics="[1000,1000](1000,400,0)Hello(1400,600,0) world\n",
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web.fetch_public_netease_info",
+        lambda _link: info,
+    )
+    monkeypatch.setattr(
+        "karaoke_forge.web._materialize_auto_pronunciation",
+        lambda _document, **_kwargs: 0,
+    )
+
+    result = prepare_make_editor_job(
+        str(audio),
+        str(video),
+        None,
+        "",
+        output_name,
+        "自动识别",
+        "small",
+        "auto",
+        False,
+        netease_link=info.canonical_url,
+        use_netease_lyrics=True,
+        rights_confirmed=True,
+        timing_refinement="off",
+        output_root=str(tmp_path / "output"),
+    )
+
+    assert result.project is not None
+    assert Path(result.project).stem == expected_project_stem
+    workspace = load_workspace_project(Path(result.project).parent / PROJECT_FILENAME)
+    assert workspace.name == expected_name
 
 
 def test_make_page_downloads_logged_in_netease_audio_for_calibration(

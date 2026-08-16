@@ -12,9 +12,12 @@ from karaoke_forge.editor import (
     apply_token_timing,
     document_from_payload,
     document_to_editor_rows,
+    editor_global_timeline_html,
     editor_preview_html,
     editor_token_timeline_html,
     nudge_editor_line_timing,
+    ripple_following_line_timing,
+    shift_editor_timeline,
     token_timing_to_json,
 )
 from karaoke_forge.formats import parse_lrc, parse_yrc, write_json, write_lrc, write_srt
@@ -141,6 +144,127 @@ def test_editor_nudges_only_edge_tokens_and_keeps_the_interior_fixed() -> None:
     assert (edited.lines[0].tokens[1].start, edited.lines[0].tokens[1].end) == original[1]
     assert edited.lines[0].tokens[-1].start == original[-1][0]
     assert edited.lines[0].tokens[-1].end == 3.88
+
+
+def test_editor_ripple_pushes_following_lines_without_retiming_their_tokens() -> None:
+    document = parse_yrc(
+        "[1000,2000](1000,1000,0)A(2000,1000,0)B\n"
+        "[3050,1000](3050,500,0)C(3550,500,0)D\n"
+        "[4100,1000](4100,500,0)E(4600,500,0)F\n"
+        "[7000,1000](7000,1000,0)G\n"
+    )
+    rows = document_to_editor_rows(document)
+    second_offsets = [
+        (token.start - document.lines[1].start, token.end - document.lines[1].start)
+        for token in document.lines[1].tokens
+    ]
+
+    edited = nudge_editor_line_timing(document, rows, 1, end_delta=0.2)
+
+    assert edited.lines[0].end == pytest.approx(3.2)
+    assert edited.lines[1].start == pytest.approx(3.22)
+    assert edited.lines[2].start == pytest.approx(4.24)
+    assert edited.lines[3].start == pytest.approx(7.0)
+    shifted_offsets = [
+        (token.start - edited.lines[1].start, token.end - edited.lines[1].start)
+        for token in edited.lines[1].tokens
+    ]
+    for shifted, original in zip(shifted_offsets, second_offsets):
+        assert shifted == pytest.approx(original)
+
+
+def test_editor_ripple_can_be_disabled_for_intentional_overlaps() -> None:
+    document = parse_lrc("[00:01.00]First\n[00:03.00]Second\n[00:05.00]Third\n")
+    rows = document_to_editor_rows(document)
+
+    edited = nudge_editor_line_timing(
+        document,
+        rows,
+        1,
+        end_delta=1.0,
+        ripple_following=False,
+    )
+
+    assert edited.lines[0].end > edited.lines[1].start
+    assert edited.lines[1].start == document.lines[1].start
+
+
+def test_ripple_preserves_an_existing_overlap_instead_of_cleaning_the_document() -> None:
+    document = parse_lrc("[00:01.00]First\n[00:03.00]Second\n[00:05.00]Third\n")
+    document.lines[0].end = 3.5
+    document.lines[0].tokens[-1].end = 3.5
+    document.lines[1].end = 5.0
+    document.lines[1].tokens[-1].end = 5.0
+    old_overlap = document.lines[0].end - document.lines[1].start
+    document.lines[0].end += 0.2
+    document.lines[0].tokens[-1].end += 0.2
+
+    shifted = ripple_following_line_timing(document, 1, previous_end=3.5)
+
+    assert shifted == (2, 3)
+    assert document.lines[0].end - document.lines[1].start == pytest.approx(old_overlap)
+
+
+def test_ripple_keeps_hidden_and_timed_blank_rows_on_the_same_timeline() -> None:
+    document = parse_lrc(
+        "[00:01.00]First\n[00:03.00]\n[00:04.00]Hidden cue\n[00:05.00]Last\n"
+    )
+    document.lines[2].hidden = True
+    old_starts = [line.start for line in document.lines]
+    assert document.lines[0].end is not None
+    previous_end = document.lines[0].end
+    document.lines[0].end += 2.5
+    document.lines[0].tokens[-1].end = document.lines[0].end
+
+    shifted = ripple_following_line_timing(
+        document,
+        1,
+        previous_end=previous_end,
+    )
+
+    assert 2 in shifted
+    assert 3 in shifted
+    assert document.lines[1].start > old_starts[1]
+    assert document.lines[2].start > old_starts[2]
+
+
+def test_global_shift_moves_line_and_token_times_by_the_same_offset() -> None:
+    document = parse_yrc(
+        "[1000,1000](1000,500,0)A(1500,500,0)B\n"
+        "[3000,1000](3000,1000,0)C\n"
+    )
+
+    shifted, applied = shift_editor_timeline(
+        document,
+        document_to_editor_rows(document),
+        -5.0,
+        start_line=2,
+    )
+
+    assert applied == pytest.approx(-3.0)
+    assert shifted.lines[0].start == 1.0
+    assert shifted.lines[1].start == 0.0
+    assert shifted.lines[1].tokens[0].start == 0.0
+    assert shifted.lines[1].end - shifted.lines[1].start == pytest.approx(1.0)
+
+
+def test_global_timeline_renders_all_playable_lines_and_selected_line() -> None:
+    document = parse_lrc("[00:01.00]A\n[00:03.00]B\n[00:05.00]C\n")
+
+    timeline = editor_global_timeline_html(document, 2)
+
+    assert timeline.count("kf-global-line-block") == 3
+    assert 'data-line-number="2"' in timeline
+    assert "is-selected" in timeline
+    assert "kf-global-playhead" in timeline
+
+
+def test_global_timeline_uses_real_media_duration_for_intro_and_outro() -> None:
+    document = parse_lrc("[00:10.00]A\n[00:20.00]B\n")
+
+    timeline = editor_global_timeline_html(document, 1, media_duration=180.0)
+
+    assert 'data-duration="180.000000"' in timeline
 
 
 def test_editor_saves_word_pronunciation_and_ass_uses_it() -> None:
