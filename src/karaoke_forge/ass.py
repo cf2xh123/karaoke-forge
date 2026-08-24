@@ -247,13 +247,16 @@ def _inactive_display_windows(
     line = lines[index]
     assert line.start is not None
     previous = lines[index - 1] if index else None
-    following = lines[index + 1] if index + 1 < len(lines) else None
     display_start = previous.start if previous is not None else line.start
-    display_end = following.start if following is not None else render_ends[index]
-    assert display_start is not None and display_end is not None
+    assert display_start is not None
+    if index >= 2:
+        # The target row may still be occupied by the lyric two places back
+        # during an intentional two-line overlap. Do not draw the upcoming
+        # preview on top of that active lyric.
+        display_start = max(display_start, render_ends[index - 2])
+    display_end = line.start
 
     after_break = break_before.get(index)
-    before_break = break_before.get(index + 1)
     windows: list[tuple[float, float]] = []
     if after_break is not None:
         # Keep the normal next-line preview while the preceding line is being
@@ -264,9 +267,6 @@ def _inactive_display_windows(
         windows.append((cue_start, display_end))
     else:
         windows.append((display_start, display_end))
-
-    if before_break is not None:
-        windows = [(start, min(end, render_ends[index])) for start, end in windows]
     return [(start, end) for start, end in windows if end >= start + 0.01]
 
 
@@ -340,6 +340,62 @@ def _pronunciation_position(
     return max(10.0, min(width - 10.0, x)), max(10.0, y)
 
 
+def _countdown_position(
+    line: LyricLine,
+    pronunciation: PronunciationLine | None,
+    row: int,
+    style: AssStyle,
+    badge_width: int,
+    badge_height: int,
+) -> tuple[float, float]:
+    """Place the cue above the actual upcoming KTV row and its reading."""
+
+    width, height = style.resolution
+    available_width = max(1.0, width - 2.0 * style.karaoke_margin_h)
+    line_width = min(available_width, max(float(style.font_size), _text_width(line.text, style)))
+    if row == 0:
+        x = style.karaoke_margin_h + line_width / 2.0
+        row_margin = style.margin_v + style.font_size + style.karaoke_row_gap
+    else:
+        x = width - style.karaoke_margin_h - line_width / 2.0
+        row_margin = style.margin_v
+
+    lyric_top = height - row_margin - style.font_size
+    has_reading = pronunciation is not None and any(
+        unit.reading.strip() for unit in pronunciation.units
+    )
+    if has_reading:
+        lyric_top -= style.pronunciation_gap + style.pronunciation_font_size
+    cue_gap = max(12, round(style.font_size * 0.22))
+    y = lyric_top - cue_gap - badge_height / 2.0
+
+    half_width = badge_width / 2.0
+    half_height = badge_height / 2.0
+    x = max(half_width + 20.0, min(width - half_width - 20.0, x))
+    y = max(half_height + 20.0, min(height - half_height - 20.0, y))
+    return x, y
+
+
+def _countdown_backdrop_drawing(width: int, height: int) -> str:
+    """Return a rounded-left, arrow-ended ASS vector path for the cue lamps."""
+
+    radius = max(8, round(height * 0.28))
+    nose = max(22, round(height * 0.58))
+    body_end = width - nose
+    middle = height // 2
+    half_radius = max(1, radius // 2)
+    return (
+        f"m {radius} 0 "
+        f"l {body_end} 0 "
+        f"l {width} {middle} "
+        f"l {body_end} {height} "
+        f"l {radius} {height} "
+        f"b {half_radius} {height} 0 {height - half_radius} 0 {height - radius} "
+        f"l 0 {radius} "
+        f"b 0 {half_radius} {half_radius} 0 {radius} 0"
+    )
+
+
 def _pronunciation_karaoke(
     unit: PronunciationUnit,
     line: LyricLine,
@@ -369,7 +425,9 @@ def _pronunciation_karaoke(
 
 def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
     document.require_timed()
-    lines = document.visible_lines
+    # Timed blank rows are useful editor/interchange markers, but they must not
+    # consume a KTV row, flip upper/lower parity, or create empty ASS events.
+    lines = [line for line in document.visible_lines if line.text.strip()]
     style = style or AssStyle()
     width, height = style.resolution
     primary = _ass_color(style.highlight_color)
@@ -378,20 +436,17 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
     translation = _ass_color(style.translation_color)
     pronunciation_color = _ass_color(style.pronunciation_color)
     countdown_muted = _ass_color(style.text_color, alpha=0x88)
+    countdown_backdrop = _ass_color(style.outline_color, alpha=0x38)
+    countdown_border = _ass_color(style.highlight_color, alpha=0x18)
     upper_margin = style.margin_v + style.font_size + style.karaoke_row_gap
     pronunciation_outline = max(1.0, min(style.outline, 2.0))
     countdown_size = max(28, round(style.font_size * 0.55))
-    countdown_y = max(
-        40,
-        height
-        - upper_margin
-        - style.font_size
-        - (style.pronunciation_font_size if style.show_pronunciation else 0)
-        - 24,
-    )
+    countdown_width = max(180, round(style.font_size * 3.6))
+    countdown_height = max(48, round(style.font_size * 0.92))
+    countdown_drawing = _countdown_backdrop_drawing(countdown_width, countdown_height)
     gap_threshold = max(1.0, float(style.countdown_gap_threshold))
     lead_in = max(0.5, float(style.countdown_lead_in))
-    render_ends = [
+    estimated_render_ends = [
         _estimated_display_end(
             line,
             lines[index + 1] if index + 1 < len(lines) else None,
@@ -399,12 +454,36 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
         )
         for index, line in enumerate(lines)
     ]
+    render_ends: list[float] = []
+    for index, (line, estimated_end) in enumerate(zip(lines, estimated_render_ends)):
+        assert line.start is not None
+        same_row_successor = lines[index + 2] if index + 2 < len(lines) else None
+        if same_row_successor is not None:
+            assert same_row_successor.start is not None
+            estimated_end = min(estimated_end, same_row_successor.start)
+        render_ends.append(max(line.start, estimated_end))
+
     break_before: dict[int, tuple[float, float]] = {}
+    preceding_render_end = 0.0
     for index, line in enumerate(lines):
         assert line.start is not None
-        gap_start = render_ends[index - 1] if index else 0.0
+        gap_start = preceding_render_end
         if line.start - gap_start >= gap_threshold:
             break_before[index] = (gap_start, line.start)
+        preceding_render_end = max(preceding_render_end, render_ends[index])
+
+    pronunciations = [
+        (
+            _line_pronunciation(
+                line,
+                auto_pronunciation=style.auto_pronunciation,
+                auto_english_pronunciation=style.auto_english_pronunciation,
+            )
+            if style.show_pronunciation
+            else None
+        )
+        for line in lines
+    ]
 
     header = f"""[Script Info]
 ; Generated by Karaoke Forge
@@ -424,27 +503,16 @@ Style: Pronunciation,{style.font},{style.pronunciation_font_size},{primary},{pro
 Style: PronunciationInactive,{style.font},{style.pronunciation_font_size},{pronunciation_color},{pronunciation_color},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 Style: Translation,{style.font},{style.translation_font_size},{translation},{translation},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},8,60,60,{style.translation_margin_v},1
 Style: Countdown,{style.font},{countdown_size},{primary},{primary},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
+Style: CountdownBackdrop,{style.font},1,{countdown_backdrop},{countdown_backdrop},{countdown_border},&H00000000,0,0,0,0,100,100,0,0,1,2,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events: list[str] = []
-    pronunciations = [
-        (
-            _line_pronunciation(
-                line,
-                auto_pronunciation=style.auto_pronunciation,
-                auto_english_pronunciation=style.auto_english_pronunciation,
-            )
-            if style.show_pronunciation
-            else None
-        )
-        for line in lines
-    ]
 
-    # Keep the current line and the next line visible, then roll one row at a
-    # time. Long instrumental breaks are split into two preview windows so the
-    # middle remains visually clean and the upcoming line returns for its cue.
+    # An inactive event is only an upcoming-line preview. It ends exactly when
+    # that line becomes active, so the same text is never painted twice.
+    # Long instrumental breaks split the preview so the middle remains clean.
     for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
         row = index % 2
@@ -482,6 +550,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             cue_duration = line_start - cue_start
             if cue_duration < 0.03:
                 continue
+            target_line = lines[index]
+            target_row = index % 2
+            countdown_x, countdown_y = _countdown_position(
+                target_line,
+                pronunciations[index],
+                target_row,
+                style,
+                countdown_width,
+                countdown_height,
+            )
+            backdrop_left = countdown_x - countdown_width / 2.0
+            backdrop_top = countdown_y - countdown_height / 2.0
+            events.append(
+                "Dialogue: 4,"
+                f"{ass_clock(cue_start)},{ass_clock(line_start)},"
+                "CountdownBackdrop,,0,0,0,,"
+                f"{{\\an7\\pos({backdrop_left:.1f},{backdrop_top:.1f})"
+                f"\\1c{countdown_backdrop}\\3c{countdown_border}"
+                "\\bord2\\shad0\\fad(100,120)\\p1}"
+                f"{countdown_drawing}"
+            )
             stage_duration = cue_duration / 3
             for stage in range(3):
                 start = cue_start + stage * stage_duration
@@ -491,25 +580,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     color = primary if dot <= stage else countdown_muted
                     dots.append(f"{{\\1c{color}}}●")
                 events.append(
-                    "Dialogue: 4,"
+                    "Dialogue: 5,"
                     f"{ass_clock(start)},{ass_clock(end)},Countdown,,0,0,0,,"
-                    f"{{\\an2\\pos({width / 2:.1f},{countdown_y:.1f})"
+                    f"{{\\an5\\pos({countdown_x - countdown_height * 0.10:.1f},"
+                    f"{countdown_y:.1f})"
                     "\\fad(100,120)\\fscx92\\fscy92"
                     "\\t(0,260,\\fscx116\\fscy116)"
-                    "\\t(260,700,\\fscx100\\fscy100)}}"
+                    "\\t(260,700,\\fscx100\\fscy100)}"
                     + r"\h\h".join(dots)
                 )
 
     for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
         render_end = render_ends[index]
+        if render_end < line.start + 0.01:
+            continue
         if style.show_translation and line.translation:
-            events.append(
-                "Dialogue: 3,"
-                f"{ass_clock(line.start)},{ass_clock(render_end)},"
-                f"Translation,,0,0,0,,{{\\fad(120,180)}}"
-                f"{_escape_ass_text(line.translation)}"
-            )
+            translation_end = render_end
+            if index + 1 < len(lines):
+                assert lines[index + 1].start is not None
+                translation_end = min(translation_end, lines[index + 1].start)
+            if translation_end >= line.start + 0.01:
+                events.append(
+                    "Dialogue: 3,"
+                    f"{ass_clock(line.start)},{ass_clock(translation_end)},"
+                    f"Translation,,0,0,0,,{{\\fad(120,180)}}"
+                    f"{_escape_ass_text(line.translation)}"
+                )
         if line.tokens:
             lyric_text = _karaoke_text(line, render_end)
         else:

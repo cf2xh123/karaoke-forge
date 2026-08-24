@@ -702,9 +702,11 @@ def editor_global_timeline_html(
     playback_duration = probed_media_duration if probed_media_duration > 0 else duration
     minimum_width = max(1400, min(12000, round(duration * 14)))
     blocks: list[str] = []
+    edges: list[str] = []
     for index, line in timed:
         assert line.start is not None and line.end is not None
         left = line.start / duration * 100
+        right = line.end / duration * 100
         width = max(0.22, (line.end - line.start) / duration * 100)
         token_marks = "".join(
             '<i class="kf-global-token" '
@@ -719,9 +721,35 @@ def editor_global_timeline_html(
             '<button type="button" '
             f'class="kf-global-line-block lane-{(index - 1) % 3}{selected}" '
             f'data-line-number="{index}" data-start="{line.start:.6f}" '
-            f'data-end="{line.end:.6f}" style="left:{left:.6f}%;width:{width:.6f}%;" '
+            f'data-end="{line.end:.6f}" data-text="{html.escape(line.text, quote=True)}" '
+            f'style="left:{left:.6f}%;width:{width:.6f}%;" '
             f'title="第 {index} 行 · {line.start:.2f}s–{line.end:.2f}s · 点击跳转并逐字微调">'
             f'<span>{index}. {html.escape(line.text)}</span>{token_marks}</button>'
+        )
+        lane = (index - 1) % 3
+        edge_common = (
+            f'data-line-number="{index}" data-start="{line.start:.6f}" '
+            f'data-end="{line.end:.6f}" data-text="{html.escape(line.text, quote=True)}" '
+        )
+        start_flip = " is-flipped" if left <= 0.000001 else ""
+        end_flip = " is-flipped" if right >= 99.999999 else ""
+        edges.extend(
+            [
+                (
+                    '<button type="button" '
+                    f'class="kf-global-line-edge is-start lane-{lane}{start_flip}" '
+                    f'{edge_common}data-edge="start" style="left:{left:.6f}%;" '
+                    f'aria-label="拖动第 {index} 行句首" '
+                    f'title="拖动句首：{line.start:.2f}s"></button>'
+                ),
+                (
+                    '<button type="button" '
+                    f'class="kf-global-line-edge is-end lane-{lane}{end_flip}" '
+                    f'{edge_common}data-edge="end" style="left:{right:.6f}%;" '
+                    f'aria-label="拖动第 {index} 行句尾" '
+                    f'title="拖动句尾：{line.end:.2f}s"></button>'
+                ),
+            ]
         )
     tick_step = 10 if duration <= 180 else 30 if duration <= 600 else 60
     ticks = "".join(
@@ -734,7 +762,8 @@ def editor_global_timeline_html(
         f'data-duration="{duration:.6f}" data-media-duration="{playback_duration:.6f}" '
         f'data-line-count="{len(document.lines)}">'
         '<div class="kf-global-toolbar"><div><b>全曲时间轴：</b>'
-        "点击句块会立刻跳到该句，并在下方打开逐字微调；红线会跟随播放，也可在全曲拖动。"
+        "点击句块会立刻跳到该句，并在下方打开逐字微调；拖动句块两侧亮边可直接修改句首/句尾；"
+        "红线会跟随播放，也可在全曲拖动。"
         "总览中的开始/结束秒仍可批量修改。"
         '</div><div class="kf-global-actions">'
         '<button type="button" class="kf-global-zoom-out">− 缩小</button>'
@@ -748,7 +777,7 @@ def editor_global_timeline_html(
         '<div class="kf-global-playhead" role="slider" aria-label="全曲播放位置" '
         f'aria-valuemin="0" aria-valuemax="{duration:.3f}" aria-valuenow="0" '
         'tabindex="0" style="left:0%"></div>'
-        f"{''.join(blocks)}</div></div></div></div>"
+        f"{''.join(blocks)}{''.join(edges)}</div></div></div></div>"
     )
 
 

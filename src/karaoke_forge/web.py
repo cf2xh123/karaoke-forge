@@ -682,7 +682,9 @@ WEB_CSS = """
 #kf-line-context-action,
 #kf-line-context-apply,
 #kf-global-line-request,
-#kf-global-select-line {
+#kf-global-select-line,
+#kf-global-edge-request,
+#kf-global-edge-apply {
   display: none !important;
 }
 
@@ -1132,6 +1134,50 @@ WEB_CSS = """
   z-index: 4;
 }
 .kf-global-line-block.is-playing { filter: brightness(1.3); }
+.kf-global-line-edge {
+  position: absolute;
+  z-index: 9;
+  width: 12px;
+  height: 42px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.kf-global-line-edge.lane-0 { top: 8px; }
+.kf-global-line-edge.lane-1 { top: 59px; }
+.kf-global-line-edge.lane-2 { top: 110px; }
+.kf-global-line-edge.is-start { transform: translateX(-100%); }
+.kf-global-line-edge.is-start.is-flipped { transform: none; }
+.kf-global-line-edge.is-end.is-flipped { transform: translateX(-100%); }
+.kf-global-line-edge::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(255, 244, 138, .92);
+  box-shadow: 0 0 0 1px rgba(17,24,39,.5), 0 0 7px rgba(250,204,21,.8);
+}
+.kf-global-line-edge.is-start::after { right: 0; }
+.kf-global-line-edge.is-end::after { left: 0; }
+.kf-global-line-edge.is-start.is-flipped::after { left: 0; right: auto; }
+.kf-global-line-edge.is-end.is-flipped::after { left: auto; right: 0; }
+.kf-global-line-edge:hover::after,
+.kf-global-line-edge:focus-visible::after,
+.kf-global-line-edge.is-dragging::after {
+  width: 4px;
+  background: #fef08a;
+  box-shadow: 0 0 0 1px #111827, 0 0 12px rgba(250,204,21,.95);
+}
+.kf-global-timeline[data-edge-saving="true"] .kf-global-line-edge {
+  cursor: wait;
+  opacity: .55;
+}
 .kf-editor-preview-stage.is-global-gap .kf-editor-preview-translation,
 .kf-editor-preview-stage.is-global-gap .kf-editor-preview-row {
   opacity: 0;
@@ -1704,6 +1750,16 @@ TOKEN_TIMELINE_JS = r"""
     }, 15);
   };
 
+  const applyGlobalLineEdge = (request) => {
+    if (!setHiddenInput("#kf-global-edge-request", JSON.stringify(request))) return false;
+    window.setTimeout(() => {
+      const root = document.querySelector("#kf-global-edge-apply");
+      const button = root?.matches?.("button") ? root : root?.querySelector("button");
+      button?.click();
+    }, 15);
+    return true;
+  };
+
   const markGlobalLineSelected = (timeline, lineNumber) => {
     const requested = Math.trunc(Number(lineNumber));
     if (!timeline || !Number.isFinite(requested) || requested < 1) return false;
@@ -1850,6 +1906,7 @@ TOKEN_TIMELINE_JS = r"""
         }
       }
       const manualSelectionActive = Boolean(window.__karaokeForgePendingGlobalSeek) ||
+        Boolean(window.__karaokeForgeDraggingGlobalLineEdge) ||
         performance.now() < Number(window.__karaokeForgeGlobalManualSelectionUntil || 0);
       let currentTime = playbackSeconds(globalParts, playbackDuration);
       const pendingSeek = window.__karaokeForgePendingGlobalSeek;
@@ -1881,7 +1938,11 @@ TOKEN_TIMELINE_JS = r"""
           !playbackActive && globalRatio !== null && globalRatio >= 0.99999;
         window.__karaokeForgeGlobalPlaybackWasActive = playbackActive;
         const playhead = globalTimeline?.querySelector(".kf-global-playhead");
-        if (playhead && !window.__karaokeForgeDraggingGlobalPlayhead) {
+        if (
+          playhead &&
+          !window.__karaokeForgeDraggingGlobalPlayhead &&
+          !window.__karaokeForgeDraggingGlobalLineEdge
+        ) {
           playhead.style.left = `${percent}%`;
           playhead.setAttribute("aria-valuenow", currentTime.toFixed(2));
         }
@@ -1890,6 +1951,7 @@ TOKEN_TIMELINE_JS = r"""
         if (
           playbackActive &&
           !window.__karaokeForgeDraggingGlobalPlayhead &&
+          !window.__karaokeForgeDraggingGlobalLineEdge &&
           scrollArea && canvas &&
           canvas.scrollWidth > scrollArea.clientWidth
         ) {
@@ -1940,7 +2002,8 @@ TOKEN_TIMELINE_JS = r"""
         if (
           playbackActive && !looped && activeBlock &&
           !manualSelectionActive &&
-          !window.__karaokeForgeDraggingGlobalPlayhead
+          !window.__karaokeForgeDraggingGlobalPlayhead &&
+          !window.__karaokeForgeDraggingGlobalLineEdge
         ) {
           const activeLine = Number(activeBlock.dataset.lineNumber);
           if (window.__karaokeForgeGlobalFollowLine !== activeLine) {
@@ -2433,6 +2496,7 @@ TOKEN_TIMELINE_JS = r"""
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      window.__karaokeForgeCancelGlobalLineEdgeDrag?.();
       setOverviewOpen(false);
       closeLineContextMenu();
       closeTokenContextMenu();
@@ -2488,6 +2552,182 @@ TOKEN_TIMELINE_JS = r"""
     return seekGlobalTimeline(timeline, parts, ratio * canvasDuration);
   };
 
+  document.addEventListener("pointerdown", (event) => {
+    const edge = event.target.closest?.(".kf-global-line-edge");
+    if (
+      !edge ||
+      event.button !== 0 ||
+      event.isPrimary === false ||
+      window.__karaokeForgeDraggingGlobalLineEdge
+    ) return;
+    const timeline = edge.closest(".kf-global-timeline");
+    const track = edge.closest(".kf-global-track");
+    const lineNumber = Number(edge.dataset.lineNumber);
+    const edgeName = edge.dataset.edge;
+    const block = timeline?.querySelector(
+      `.kf-global-line-block[data-line-number="${lineNumber}"]`
+    );
+    if (
+      !timeline || !track || !block ||
+      timeline.dataset.edgeSaving === "true" ||
+      !Number.isInteger(lineNumber) ||
+      !["start", "end"].includes(edgeName)
+    ) return;
+    const duration = Math.max(Number(timeline.dataset.duration) || 0, 0.01);
+    const baseStart = Number(block.dataset.start);
+    const baseEnd = Number(block.dataset.end);
+    if (!Number.isFinite(baseStart) || !Number.isFinite(baseEnd) || baseEnd <= baseStart) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const parts = waveSurferPartsFor("#editor-global-audio");
+    const resumeAfterDrag = playbackIsActive(parts);
+    window.__karaokeForgePendingGlobalSeek = null;
+    pauseForEditorMutation();
+    window.__karaokeForgeDraggingGlobalLineEdge = true;
+    window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 10000;
+    window.__karaokeForgeGlobalFollowLine = lineNumber;
+    markGlobalLineSelected(timeline, lineNumber);
+    edge.classList.add("is-dragging");
+
+    const pointerId = event.pointerId;
+    const originalBlockLeft = block.style.left;
+    const originalBlockWidth = block.style.width;
+    const originalEdgeLeft = edge.style.left;
+    const originalFlipped = edge.classList.contains("is-flipped");
+    const tokenBlocks = Array.from(block.querySelectorAll(".kf-global-token"))
+      .sort((left, right) => Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex));
+    const firstTokenEnd = Number(tokenBlocks.at(0)?.dataset.end);
+    const lastTokenStart = Number(tokenBlocks.at(-1)?.dataset.start);
+    let previewSeconds = edgeName === "start" ? baseStart : baseEnd;
+    const pointerStartX = event.clientX;
+    let pointerMoved = false;
+    let finished = false;
+
+    const secondsFromPointer = (clientX) => {
+      const bounds = track.getBoundingClientRect();
+      if (bounds.width <= 0) return previewSeconds;
+      const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
+      let seconds = Math.round(ratio * duration * 100) / 100;
+      if (edgeName === "start") {
+        const tokenLimit = Number.isFinite(firstTokenEnd)
+          ? firstTokenEnd - 0.01
+          : baseEnd - 0.01;
+        seconds = Math.min(baseEnd - 0.01, tokenLimit, Math.max(0, seconds));
+      } else {
+        const tokenLimit = Number.isFinite(lastTokenStart)
+          ? lastTokenStart + 0.01
+          : baseStart + 0.01;
+        seconds = Math.max(baseStart + 0.01, tokenLimit, Math.min(duration, seconds));
+      }
+      return Math.round(Math.max(0, Math.min(duration, seconds)) * 100) / 100;
+    };
+
+    const previewAt = (seconds) => {
+      previewSeconds = seconds;
+      const nextStart = edgeName === "start" ? seconds : baseStart;
+      const nextEnd = edgeName === "end" ? seconds : baseEnd;
+      block.style.left = `${nextStart / duration * 100}%`;
+      block.style.width = `${Math.max(0.22, (nextEnd - nextStart) / duration * 100)}%`;
+      edge.style.left = `${seconds / duration * 100}%`;
+      edge.classList.toggle(
+        "is-flipped",
+        edgeName === "start" ? seconds <= 0.000001 : seconds >= duration - 0.000001
+      );
+      edge.setAttribute("aria-valuenow", seconds.toFixed(2));
+      edge.title = `拖动${edgeName === "start" ? "句首" : "句尾"}：${seconds.toFixed(2)}s`;
+      if (!seekGlobalTimeline(timeline, parts, seconds)) {
+        const playhead = timeline.querySelector(".kf-global-playhead");
+        if (playhead) playhead.style.left = `${seconds / duration * 100}%`;
+      }
+    };
+
+    const restorePreview = () => {
+      block.style.left = originalBlockLeft;
+      block.style.width = originalBlockWidth;
+      edge.style.left = originalEdgeLeft;
+      edge.classList.toggle("is-flipped", originalFlipped);
+      edge.classList.remove("is-dragging");
+      edge.removeAttribute("aria-valuenow");
+      edge.title = `拖动${edgeName === "start" ? "句首" : "句尾"}：${(
+        edgeName === "start" ? baseStart : baseEnd
+      ).toFixed(2)}s`;
+    };
+
+    const removeListeners = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", pointerUp);
+      window.removeEventListener("pointercancel", pointerCancel);
+      edge.removeEventListener("lostpointercapture", lostCapture);
+      if (edge.hasPointerCapture?.(pointerId)) edge.releasePointerCapture?.(pointerId);
+      if (window.__karaokeForgeCancelGlobalLineEdgeDrag === cancelFromOutside) {
+        window.__karaokeForgeCancelGlobalLineEdgeDrag = null;
+      }
+    };
+
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      removeListeners();
+      restorePreview();
+      window.__karaokeForgeDraggingGlobalLineEdge = false;
+      window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 420;
+      const original = edgeName === "start" ? baseStart : baseEnd;
+      const changed = pointerMoved && Math.abs(previewSeconds - original) >= 0.005;
+      if (!commit || !changed) {
+        if (resumeAfterDrag) playPlayback(parts);
+        return;
+      }
+      timeline.dataset.edgeSaving = "true";
+      const submitted = applyGlobalLineEdge({
+        line: lineNumber,
+        edge: edgeName,
+        seconds: previewSeconds,
+        base_start: baseStart,
+        base_end: baseEnd,
+        text: block.dataset.text || "",
+      });
+      if (!submitted) delete timeline.dataset.edgeSaving;
+      window.setTimeout(() => {
+        if (document.body.contains(timeline)) delete timeline.dataset.edgeSaving;
+      }, 4500);
+    };
+
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId || finished) return;
+      moveEvent.preventDefault();
+      pointerMoved ||= Math.abs(moveEvent.clientX - pointerStartX) >= 1;
+      previewAt(secondsFromPointer(moveEvent.clientX));
+    };
+    const pointerUp = (finishEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      finishEvent.preventDefault();
+      pointerMoved ||= Math.abs(finishEvent.clientX - pointerStartX) >= 1;
+      if (pointerMoved) previewAt(secondsFromPointer(finishEvent.clientX));
+      finish(true);
+    };
+    const pointerCancel = (finishEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      finish(false);
+    };
+    const lostCapture = (finishEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      finish(false);
+    };
+    function cancelFromOutside() {
+      finish(false);
+    }
+
+    edge.setPointerCapture?.(pointerId);
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", pointerUp, { passive: false });
+    window.addEventListener("pointercancel", pointerCancel);
+    edge.addEventListener("lostpointercapture", lostCapture);
+    window.__karaokeForgeCancelGlobalLineEdgeDrag = cancelFromOutside;
+    previewAt(previewSeconds);
+  }, true);
+
   document.addEventListener("click", (event) => {
     const zoomButton = event.target.closest?.(
       ".kf-global-zoom-in, .kf-global-zoom-out, .kf-global-zoom-fit"
@@ -2530,7 +2770,10 @@ TOKEN_TIMELINE_JS = r"""
 
   document.addEventListener("pointerdown", (event) => {
     const track = event.target.closest?.(".kf-global-track");
-    if (!track || event.target.closest?.(".kf-global-line-block")) return;
+    if (
+      !track ||
+      event.target.closest?.(".kf-global-line-block, .kf-global-line-edge")
+    ) return;
     const timeline = track.closest(".kf-global-timeline");
     const parts = waveSurferPartsFor("#editor-global-audio");
     if (!timeline || !parts) return;
@@ -2605,6 +2848,11 @@ TOKEN_TIMELINE_JS = r"""
       event.altKey ||
       isTextEntry(event.target)
     ) return;
+    if (window.__karaokeForgeDraggingGlobalLineEdge) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     const pendingSeek = window.__karaokeForgePendingGlobalSeek;
     const parts = waveSurferParts();
     if (!parts && !pendingSeek) return;
@@ -2627,6 +2875,7 @@ TOKEN_TIMELINE_JS = r"""
 
   document.addEventListener("change", (event) => {
     if (!event.target.closest?.("#editor-timing-mode")) return;
+    window.__karaokeForgeCancelGlobalLineEdgeDrag?.();
     window.__karaokeForgePendingGlobalSeek = null;
     window.__karaokeForgeGlobalManualSelectionUntil = 0;
     window.__karaokeForgeGlobalPlaybackWasActive = false;
@@ -7532,6 +7781,14 @@ def create_web_app(
                                     "选择全局时间轴句子",
                                     elem_id="kf-global-select-line",
                                 )
+                                editor_global_edge_request = gr.Textbox(
+                                    value="",
+                                    elem_id="kf-global-edge-request",
+                                )
+                                editor_global_edge_apply = gr.Button(
+                                    "应用全局时间轴句界",
+                                    elem_id="kf-global-edge-apply",
+                                )
                                 editor_apply_global_rows = gr.Button(
                                     "保存总览中的全局时间修改",
                                     variant="secondary",
@@ -10015,6 +10272,165 @@ def create_web_app(
             editor_timing_status,
             editor_line_undo_payload,
         ]
+
+        def apply_global_line_edge_workspace(
+            payload: dict[str, Any],
+            table: object,
+            line_number: int,
+            token_json: str,
+            whole_pronunciation: str,
+            pronunciation_table: object,
+            undo_state: dict[str, Any],
+            ripple_enabled: bool,
+            audio: object,
+            request_json: str,
+        ) -> tuple[object, ...]:
+            try:
+                request_payload = json.loads(request_json or "")
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("全局句界拖动请求无效，请重新拖动一次。") from exc
+            if not isinstance(request_payload, dict):
+                raise TypeError("全局句界拖动请求格式无效。")
+
+            edge = str(request_payload.get("edge") or "").strip().lower()
+            if edge not in {"start", "end"}:
+                raise ValueError("全局句界只能调整句首或句尾。")
+            raw_line = request_payload.get("line")
+            if isinstance(raw_line, bool):
+                raise TypeError("全局句界拖动请求缺少有效的行号。")
+            try:
+                requested_line = float(raw_line)
+                seconds = float(request_payload.get("seconds"))
+                base_start = float(request_payload.get("base_start"))
+                base_end = float(request_payload.get("base_end"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("全局句界拖动请求缺少有效的行号或时间。") from exc
+            if (
+                not math.isfinite(requested_line)
+                or not requested_line.is_integer()
+                or requested_line < 1
+                or not all(math.isfinite(value) for value in (seconds, base_start, base_end))
+            ):
+                raise ValueError("全局句界拖动请求包含无效时间。")
+            if seconds < 0:
+                raise ValueError("歌词时间不能早于 0 秒。")
+            target = int(requested_line)
+
+            before = document_from_payload(payload)
+            source_ids = _editor_row_source_ids(table, len(before.lines))
+            timeline_document = apply_editor_rows(before, table)
+            if target > len(timeline_document.lines):
+                raise ValueError("要调整的歌词行已经不存在，请刷新全局时间轴后重试。")
+            timeline_line = timeline_document.lines[target - 1]
+            if (
+                timeline_line.hidden
+                or not timeline_line.text.strip()
+                or timeline_line.start is None
+                or timeline_line.end is None
+            ):
+                raise ValueError("要调整的歌词行当前不可见或没有完整时间。")
+            request_text = str(request_payload.get("text") or "")
+            stale = (
+                request_text != timeline_line.text
+                or abs(base_start - timeline_line.start) > 0.002
+                or abs(base_end - timeline_line.end) > 0.002
+            )
+            if stale:
+                raise ValueError("全局时间轴已经变化，请在刷新后的句块上重新拖动。")
+            base_edge = base_start if edge == "start" else base_end
+            if abs(seconds - base_edge) < 0.0005:
+                selected = min(max(1, int(line_number)), len(before.lines))
+                edge_label = "句首" if edge == "start" else "句尾"
+                return global_workspace_result(
+                    before,
+                    selected,
+                    audio,
+                    f"### ℹ️ 第 {target} 行{edge_label}时间没有变化",
+                    undo_state,
+                )
+
+            document, _pending_snapshot = _editor_document_with_pending_changes(
+                payload,
+                table,
+                int(line_number),
+                token_json,
+                whole_pronunciation,
+                pronunciation_table,
+                False,
+            )
+            if target > len(document.lines):
+                raise ValueError("要调整的歌词行已经不存在，请刷新全局时间轴后重试。")
+            current = document.lines[target - 1]
+            if (
+                current.hidden
+                or not current.text.strip()
+                or current.start is None
+                or current.end is None
+            ):
+                raise ValueError("要调整的歌词行当前不可见或没有完整时间。")
+
+            original_edge = current.start if edge == "start" else current.end
+            if abs(seconds - original_edge) < 0.0005:
+                after = document
+            else:
+                after = nudge_editor_line_timing(
+                    document,
+                    document_to_editor_rows(document),
+                    target,
+                    start_delta=seconds - current.start if edge == "start" else 0.0,
+                    end_delta=seconds - current.end if edge == "end" else 0.0,
+                    ripple_following=False,
+                )
+            shifted_lines = _ripple_global_editor_changes(
+                before,
+                after,
+                ripple_enabled,
+                source_ids=source_ids,
+            )
+            changed = after.to_dict() != before.to_dict()
+            source_focus = source_ids[target - 1] if target <= len(source_ids) else None
+            focus = (
+                source_focus
+                if source_focus is not None and 1 <= source_focus <= len(before.lines)
+                else min(max(1, int(line_number)), len(before.lines))
+            )
+            next_undo = _editor_undo_snapshot(before, focus) if changed else undo_state
+            line = after.lines[target - 1]
+            assert line.start is not None and line.end is not None
+            ripple_note = (
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
+                if shifted_lines
+                else ""
+            )
+            edge_label = "句首" if edge == "start" else "句尾"
+            status = (
+                f"### ✅ 已拖动第 {target} 行{edge_label}\n"
+                f"当前范围：**{line.start:.2f}s → {line.end:.2f}s**{ripple_note}。"
+                if changed
+                else f"### ℹ️ 第 {target} 行{edge_label}时间没有变化"
+            )
+            return global_workspace_result(after, target, audio, status, next_undo)
+
+        editor_global_edge_apply.click(
+            apply_global_line_edge_workspace,
+            inputs=[
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_line_undo_payload,
+                editor_ripple_following,
+                editor_audio,
+                editor_global_edge_request,
+            ],
+            outputs=global_workspace_outputs,
+            queue=False,
+            trigger_mode="always_last",
+            cancels=[editor_preview_event, editor_line_draft_event],
+        )
+
         editor_apply_global_rows.click(
             apply_global_rows_workspace,
             inputs=[

@@ -184,7 +184,7 @@ def resolve_netease_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-            headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.15.1"},
+            headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/0.15.2"},
         method="GET",
     )
     try:
@@ -199,7 +199,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
     request = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.15.1",
+            "User-Agent": "Mozilla/5.0 Karaoke-Forge/0.15.2",
             "Referer": "https://music.163.com/",
         },
     )
