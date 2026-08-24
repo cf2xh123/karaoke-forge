@@ -697,7 +697,9 @@ def editor_global_timeline_html(
     if not timed:
         return '<div class="kf-tip">当前工程没有可用于全局模式的完整歌词时间轴。</div>'
     lyric_end = max(float(line.end or 0.0) for _index, line in timed)
-    duration = max(1.0, lyric_end + 1.0, float(media_duration or 0.0))
+    probed_media_duration = float(media_duration or 0.0)
+    duration = max(1.0, lyric_end + 1.0, probed_media_duration)
+    playback_duration = probed_media_duration if probed_media_duration > 0 else duration
     minimum_width = max(1400, min(12000, round(duration * 14)))
     blocks: list[str] = []
     for index, line in timed:
@@ -718,7 +720,7 @@ def editor_global_timeline_html(
             f'class="kf-global-line-block lane-{(index - 1) % 3}{selected}" '
             f'data-line-number="{index}" data-start="{line.start:.6f}" '
             f'data-end="{line.end:.6f}" style="left:{left:.6f}%;width:{width:.6f}%;" '
-            f'title="第 {index} 行 · {line.start:.2f}s–{line.end:.2f}s · 点击跳转">'
+            f'title="第 {index} 行 · {line.start:.2f}s–{line.end:.2f}s · 点击跳转并逐字微调">'
             f'<span>{index}. {html.escape(line.text)}</span>{token_marks}</button>'
         )
     tick_step = 10 if duration <= 180 else 30 if duration <= 600 else 60
@@ -729,9 +731,11 @@ def editor_global_timeline_html(
     )
     return (
         '<div class="kf-global-timeline" '
-        f'data-duration="{duration:.6f}" data-line-count="{len(document.lines)}">'
+        f'data-duration="{duration:.6f}" data-media-duration="{playback_duration:.6f}" '
+        f'data-line-count="{len(document.lines)}">'
         '<div class="kf-global-toolbar"><div><b>全曲时间轴：</b>'
-        "点击句块会立刻跳到该句；红线可在全曲拖动。总览中的开始/结束秒仍可批量修改。"
+        "点击句块会立刻跳到该句，并在下方打开逐字微调；红线会跟随播放，也可在全曲拖动。"
+        "总览中的开始/结束秒仍可批量修改。"
         '</div><div class="kf-global-actions">'
         '<button type="button" class="kf-global-zoom-out">− 缩小</button>'
         '<button type="button" class="kf-global-zoom-fit">适应全曲</button>'
@@ -742,6 +746,7 @@ def editor_global_timeline_html(
         f'<div class="kf-global-ruler">{ticks}</div>'
         '<div class="kf-global-track">'
         '<div class="kf-global-playhead" role="slider" aria-label="全曲播放位置" '
+        f'aria-valuemin="0" aria-valuemax="{duration:.3f}" aria-valuenow="0" '
         'tabindex="0" style="left:0%"></div>'
         f"{''.join(blocks)}</div></div></div></div>"
     )

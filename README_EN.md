@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.15.0` (Alpha). Windows setup and later launches can now
+> The current release is `0.15.1` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -57,8 +57,9 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   the next lyric, optional Ripple mode shifts only the affected following lines while preserving
   their durations and token spacing;
 - Keep the detailed per-line workflow and add a continuous global mode that loads the whole
-  song once, supports continuous seeks from lyric blocks or the red playhead, keeps the KTV
-  preview following the active line and word timing, and shifts the global timeline as one operation;
+  song once: click any lyric block to edit its individual tokens below; the red playhead follows
+  playback in real time and can also seek continuously, while the KTV preview follows the active
+  line and word timing and the global timeline can be shifted as one operation;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
 - Preview the song's actual lyrics against a matching MV frame, or against the selected
   cover-art scene when no MV is available; a link-only source uses online cover art and a
@@ -69,7 +70,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.15.0` alpha. Check the generated timeline before a final render.
+This is a usable `0.15.1` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -192,8 +193,9 @@ Per-line mode remains available for precise word and line-edge work. If extendin
 would intrude into the next lyric, Ripple can move the newly affected following lines without
 changing their internal durations or word spacing, and can be disabled when only the current
 line should change. Global mode keeps one whole-song audio source loaded: click a lyric block
-or drag the red playhead for continuous seeking while the KTV preview follows the active line
-and word timing, then use global shift to correct a whole-song offset in one operation.
+to load its per-token editor below, or drag the real-time red playhead for continuous seeking
+while the KTV preview follows the active line and word timing, then use global shift to correct
+a whole-song offset in one operation.
 
 The NetEase tab accepts single-song links and uses anonymous public access by default.
 When authenticated audio is needed on Windows, click **One-click NetEase login**. The

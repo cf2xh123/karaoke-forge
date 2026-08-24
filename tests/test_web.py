@@ -626,7 +626,30 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert ".kf-live-karaoke-measure" in TOKEN_TIMELINE_JS
     assert ".kf-karaoke-token-core" in TOKEN_TIMELINE_JS
     assert "updateGlobalKaraokeAt" in TOKEN_TIMELINE_JS
+    assert "workspaceLinesMatch(tokenTimeline, preview)" in TOKEN_TIMELINE_JS
     assert "playbackIsActive(globalParts)" in TOKEN_TIMELINE_JS
+    assert "const media = progress && wrapper" in TOKEN_TIMELINE_JS
+    assert "globalPlaybackDuration" in TOKEN_TIMELINE_JS
+    assert "playbackSeconds(globalParts, playbackDuration)" in TOKEN_TIMELINE_JS
+    assert "seekEditorAbsoluteTime" in TOKEN_TIMELINE_JS
+    assert "markGlobalLineSelected" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeLastDisplayedEditorLine" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeGlobalManualSelectionUntil" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeGlobalPlaybackWasActive" in TOKEN_TIMELINE_JS
+    assert "globalRatio >= 0.99999" in TOKEN_TIMELINE_JS
+    assert "looped && justFinished" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgePendingGlobalSeek" in TOKEN_TIMELINE_JS
+    assert "queueGlobalSeek" in TOKEN_TIMELINE_JS
+    assert "pendingSeek.play = !Boolean(pendingSeek.play)" in TOKEN_TIMELINE_JS
+    assert 'visibleElement(".kf-global-timeline")' in TOKEN_TIMELINE_JS
+    assert 'track.addEventListener("lostpointercapture", finish)' in TOKEN_TIMELINE_JS
+    assert '"#editor-line-audio, #editor-global-audio"' in TOKEN_TIMELINE_JS
+    assert "timeline.__kfLastSeekSeconds = target" in TOKEN_TIMELINE_JS
+    assert "playbackActive && !looped && activeBlock" in TOKEN_TIMELINE_JS
+    poll_source = TOKEN_TIMELINE_JS.split("const pollWaveSurfer = () => {", 1)[1]
+    assert poll_source.index("requestAnimationFrame(pollWaveSurfer)") < poll_source.index(
+        'visibleElement(".kf-token-editor")'
+    )
     assert "__karaokeForgeTokenAuditionGuardUntil" in EDITOR_STOP_GATE_JS
     assert "__karaokeForgeSuppressAutoAdvanceUntil" not in EDITOR_STOP_GATE_JS
     assert "const stoppedLine = Number(args[3])" in EDITOR_STOP_GATE_JS
@@ -850,6 +873,35 @@ def test_global_editor_callbacks_match_signatures_and_row_selection_has_mode(
         if getattr(component, "label", None) == "编辑模式"
     )
     assert timing_mode in callbacks["select_editor_row"].inputs
+
+    line_number = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "elem_id", None) == "editor-current-line"
+    )
+    global_timeline = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "elem_id", None) == "editor-global-timeline"
+    )
+    global_render = next(
+        dependency
+        for dependency in app.config["dependencies"]
+        if dependency["outputs"] == [global_timeline._id]
+    )
+    assert (line_number._id, "change") not in global_render["targets"]
+
+    global_request = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "elem_id", None) == "kf-global-line-request"
+    )
+    global_select = next(
+        dependency
+        for dependency in app.config["dependencies"]
+        if global_request._id in dependency["inputs"]
+    )
+    assert global_select["trigger_mode"] == "always_last"
 
 
 def test_saving_a_longer_token_line_without_collision_does_not_report_a_ripple(
@@ -1115,8 +1167,180 @@ def test_switching_to_global_mode_commits_pending_tokens_and_ripple(
 
     assert edited.lines[0].end == pytest.approx(3.5)
     assert edited.lines[1].start == pytest.approx(3.52)
+    assert result[0]["visible"] is False
+    assert result[1]["visible"] is True
+    assert 'data-line-number="1"' in result[1]["value"]
+    assert result[2]["visible"] is True
+    assert result[3]["visible"] is True
     assert result[13] is None
     assert "草稿已自动保存" in result[4]
+
+    line_result = callback.fn(
+        "line",
+        None,
+        edited.to_dict(),
+        document_to_editor_rows(edited),
+        1,
+        result[11],
+        "",
+        [],
+        result[12],
+        True,
+    )
+    assert line_result[0]["visible"] is True
+    assert line_result[1]["visible"] is True
+    assert line_result[2]["visible"] is True
+    assert line_result[3]["visible"] is False
+
+
+def test_global_sentence_click_loads_its_token_editor_without_rebuilding_payload(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if any(
+            getattr(component, "elem_id", None) == "kf-global-line-request"
+            for component in block_function.inputs
+        )
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="AB",
+                start=1.0,
+                end=3.0,
+                tokens=[
+                    KaraokeToken(text="A", start=1.0, end=2.0),
+                    KaraokeToken(text="B", start=2.0, end=3.0),
+                ],
+            ),
+            LyricLine(
+                text="CD",
+                start=4.0,
+                end=6.0,
+                tokens=[
+                    KaraokeToken(text="C", start=4.0, end=5.0),
+                    KaraokeToken(text="D", start=5.0, end=6.0),
+                ],
+            ),
+        ]
+    )
+
+    result = callback.fn(
+        None,
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":2.0},'
+        '{"text":"B","start":2.0,"end":3.0}]',
+        "",
+        [],
+        {},
+        True,
+        2,
+    )
+
+    assert result[0] == {"__type__": "update"}
+    assert result[1] == {"__type__": "update"}
+    assert result[2] == 2
+    assert 'data-line-number="2"' in result[6]
+    assert json.loads(result[7]) == [
+        {"text": "C", "start": 4.0, "end": 5.0},
+        {"text": "D", "start": 5.0, "end": 6.0},
+    ]
+    assert result[8] == {"__type__": "update"}
+    assert "下方逐字微调区已载入这句" in result[9]
+
+    with_pending_tokens = callback.fn(
+        None,
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"A","start":1.0,"end":2.0},'
+        '{"text":"B","start":2.0,"end":3.5}]',
+        "",
+        [],
+        {},
+        True,
+        2,
+    )
+    edited = document_from_payload(with_pending_tokens[0])
+    assert edited.lines[0].end == pytest.approx(3.5)
+    assert with_pending_tokens[2] == 2
+    assert with_pending_tokens[10]
+
+
+def test_repeated_global_row_edits_do_not_restore_stale_token_times(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    preview_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "preview_editor_line_draft"
+    )
+    save_callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_rows_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="A",
+                start=1.0,
+                end=2.0,
+                tokens=[KaraokeToken(text="A", start=1.0, end=2.0)],
+            ),
+            LyricLine(text="B", start=6.0, end=7.0),
+        ]
+    )
+    token_json = '[{"text":"A","start":1.0,"end":2.0}]'
+    first_rows = document_to_editor_rows(document)
+    first_rows[0][3] = 3.0
+    first_preview = preview_callback.fn(
+        document.to_dict(), first_rows, 1, token_json, "", []
+    )
+    token_after_first_preview = (
+        token_json
+        if first_preview[2] == {"__type__": "update"}
+        else first_preview[2]
+    )
+    second_rows = [list(row) for row in first_rows]
+    second_rows[0][3] = 4.0
+    second_preview = preview_callback.fn(
+        document.to_dict(), second_rows, 1, token_after_first_preview, "", []
+    )
+    token_after_second_preview = (
+        token_after_first_preview
+        if second_preview[2] == {"__type__": "update"}
+        else second_preview[2]
+    )
+
+    assert first_preview[2] == {"__type__": "update"}
+    assert second_preview[2] == {"__type__": "update"}
+
+    saved = save_callback.fn(
+        document.to_dict(),
+        second_rows,
+        1,
+        True,
+        None,
+        {},
+        token_after_second_preview,
+        "",
+        [],
+    )
+    edited = document_from_payload(saved[0])
+
+    assert edited.lines[0].end == pytest.approx(4.0)
+    assert edited.lines[0].tokens[-1].end == pytest.approx(4.0)
 
 
 def test_auto_advance_uses_the_mapped_current_line_after_pending_deletion(
@@ -1158,6 +1382,8 @@ def test_auto_advance_uses_the_mapped_current_line_after_pending_deletion(
 
     assert [line.text for line in edited.lines] == ["B", "C"]
     assert result[2] == 2
+    assert "已自动切换到第 2 行" in result[9]
+    assert "全局时间轴选中" not in result[9]
 
 
 def test_project_asset_loader_clears_audio_when_the_new_workspace_has_none(

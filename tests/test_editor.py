@@ -21,6 +21,7 @@ from karaoke_forge.editor import (
     token_timing_to_json,
 )
 from karaoke_forge.formats import parse_lrc, parse_yrc, write_json, write_lrc, write_srt
+from karaoke_forge.models import LyricLine, LyricsDocument
 
 
 def test_editor_hides_and_deletes_complete_lyric_rows() -> None:
@@ -257,6 +258,10 @@ def test_global_timeline_renders_all_playable_lines_and_selected_line() -> None:
     assert 'data-line-number="2"' in timeline
     assert "is-selected" in timeline
     assert "kf-global-playhead" in timeline
+    assert "点击跳转并逐字微调" in timeline
+    assert 'aria-valuemin="0"' in timeline
+    assert 'aria-valuemax="' in timeline
+    assert 'aria-valuenow="0"' in timeline
 
 
 def test_global_timeline_uses_real_media_duration_for_intro_and_outro() -> None:
@@ -265,6 +270,18 @@ def test_global_timeline_uses_real_media_duration_for_intro_and_outro() -> None:
     timeline = editor_global_timeline_html(document, 1, media_duration=180.0)
 
     assert 'data-duration="180.000000"' in timeline
+    assert 'data-media-duration="180.000000"' in timeline
+
+
+def test_global_timeline_keeps_media_clock_separate_from_canvas_padding() -> None:
+    document = LyricsDocument(
+        lines=[LyricLine(text="Last line", start=18.0, end=19.5)]
+    )
+
+    timeline = editor_global_timeline_html(document, 1, media_duration=20.0)
+
+    assert 'data-duration="20.500000"' in timeline
+    assert 'data-media-duration="20.000000"' in timeline
 
 
 def test_editor_saves_word_pronunciation_and_ass_uses_it() -> None:
