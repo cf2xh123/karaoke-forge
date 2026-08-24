@@ -186,7 +186,7 @@ def save_workspace_project(
     manifest = root / PROJECT_FILENAME
     data = {
         "schema_version": 1,
-        "app_version": "0.15.1",
+        "app_version": "0.15.2",
         "name": name,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "lyrics_project": _relative_or_absolute(lyrics, root),

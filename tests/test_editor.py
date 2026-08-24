@@ -264,6 +264,21 @@ def test_global_timeline_renders_all_playable_lines_and_selected_line() -> None:
     assert 'aria-valuenow="0"' in timeline
 
 
+def test_global_timeline_renders_exact_sibling_edges_for_short_lines() -> None:
+    document = LyricsDocument(lines=[LyricLine(text="A", start=1.0, end=1.001)])
+
+    timeline = editor_global_timeline_html(document, 1)
+    duration = 2.001
+
+    assert timeline.count("kf-global-line-edge") == 2
+    assert 'data-edge="start"' in timeline
+    assert 'data-edge="end"' in timeline
+    assert f'data-edge="start" style="left:{1.0 / duration * 100:.6f}%;"' in timeline
+    assert f'data-edge="end" style="left:{1.001 / duration * 100:.6f}%;"' in timeline
+    assert "width:0.220000%" in timeline
+    assert "拖动句块两侧亮边" in timeline
+
+
 def test_global_timeline_uses_real_media_duration_for_intro_and_outro() -> None:
     document = parse_lrc("[00:10.00]A\n[00:20.00]B\n")
 

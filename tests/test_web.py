@@ -646,6 +646,12 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert '"#editor-line-audio, #editor-global-audio"' in TOKEN_TIMELINE_JS
     assert "timeline.__kfLastSeekSeconds = target" in TOKEN_TIMELINE_JS
     assert "playbackActive && !looped && activeBlock" in TOKEN_TIMELINE_JS
+    assert 'closest?.(".kf-global-line-edge")' in TOKEN_TIMELINE_JS
+    assert "applyGlobalLineEdge" in TOKEN_TIMELINE_JS
+    assert "pointerMoved && Math.abs(previewSeconds - original)" in TOKEN_TIMELINE_JS
+    assert "__karaokeForgeCancelGlobalLineEdgeDrag" in TOKEN_TIMELINE_JS
+    assert '.kf-global-line-block, .kf-global-line-edge' in TOKEN_TIMELINE_JS
+    assert 'timeline.dataset.edgeSaving = "true"' in TOKEN_TIMELINE_JS
     poll_source = TOKEN_TIMELINE_JS.split("const pollWaveSurfer = () => {", 1)[1]
     assert poll_source.index("requestAnimationFrame(pollWaveSurfer)") < poll_source.index(
         'visibleElement(".kf-token-editor")'
@@ -846,6 +852,7 @@ def test_global_editor_callbacks_match_signatures_and_row_selection_has_mode(
         "editor_global_timeline_workspace": (4, 1),
         "switch_editor_timing_mode": (10, 14),
         "apply_global_rows_workspace": (9, 11),
+        "apply_global_line_edge_workspace": (10, 11),
         "apply_global_shift_workspace": (11, 11),
         "select_editor_row": (10, 11),
         "load_editor_line_workspace": (8, 9),
@@ -902,6 +909,19 @@ def test_global_editor_callbacks_match_signatures_and_row_selection_has_mode(
         if global_request._id in dependency["inputs"]
     )
     assert global_select["trigger_mode"] == "always_last"
+
+    global_edge_request = next(
+        component
+        for component in app.blocks.values()
+        if getattr(component, "elem_id", None) == "kf-global-edge-request"
+    )
+    global_edge_apply = next(
+        dependency
+        for dependency in app.config["dependencies"]
+        if global_edge_request._id in dependency["inputs"]
+    )
+    assert global_edge_apply["trigger_mode"] == "always_last"
+    assert global_timeline._id in global_edge_apply["outputs"]
 
 
 def test_saving_a_longer_token_line_without_collision_does_not_report_a_ripple(
@@ -969,6 +989,290 @@ def test_global_multi_line_edits_account_for_ripples_already_applied(
 
     assert edited.lines[2].start == pytest.approx(5.2)
     assert edited.lines[2].end == pytest.approx(6.4)
+
+
+def test_global_line_edge_drag_changes_only_the_edge_and_ripples_following_lines(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_line_edge_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="AB",
+                start=1.0,
+                end=2.0,
+                tokens=[
+                    KaraokeToken(text="A", start=1.0, end=1.4),
+                    KaraokeToken(text="B", start=1.4, end=2.0),
+                ],
+            ),
+            LyricLine(
+                text="C",
+                start=2.5,
+                end=3.5,
+                tokens=[KaraokeToken(text="C", start=2.5, end=3.5)],
+            ),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    token_json = json.dumps(
+        [
+            {"text": "A", "start": 1.0, "end": 1.4},
+            {"text": "B", "start": 1.4, "end": 2.0},
+        ]
+    )
+
+    result = callback.fn(
+        document.to_dict(),
+        rows,
+        1,
+        token_json,
+        "",
+        [],
+        {},
+        True,
+        None,
+        json.dumps(
+            {
+                "line": 1,
+                "edge": "end",
+                "seconds": 2.8,
+                "base_start": 1.0,
+                "base_end": 2.0,
+                "text": "AB",
+            }
+        ),
+    )
+    edited = document_from_payload(result[0])
+
+    assert edited.lines[0].start == pytest.approx(1.0)
+    assert edited.lines[0].end == pytest.approx(2.8)
+    assert edited.lines[0].tokens[0].start == pytest.approx(1.0)
+    assert edited.lines[0].tokens[0].end == pytest.approx(1.4)
+    assert edited.lines[0].tokens[1].start == pytest.approx(1.4)
+    assert edited.lines[0].tokens[1].end == pytest.approx(2.8)
+    assert edited.lines[1].start == pytest.approx(2.82)
+    assert edited.lines[1].end == pytest.approx(3.82)
+    assert edited.lines[1].tokens[0].start == pytest.approx(2.82)
+    assert edited.lines[1].tokens[0].end == pytest.approx(3.82)
+    assert result[2] == 1
+    assert "已拖动第 1 行句尾" in result[9]
+    assert "联动后移第 2–2 行" in result[9]
+    assert result[10]["document"] == document.to_dict()
+
+    restored = undo_editor_line_action(result[0], result[1], result[2], result[10])
+    assert document_from_payload(restored[0]).to_dict() == document.to_dict()
+
+
+def test_global_line_edge_drag_can_keep_overlap_and_maps_post_table_line_numbers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_line_edge_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(text="A", start=1.0, end=2.0),
+            LyricLine(text="B", start=3.0, end=4.0),
+            LyricLine(text="C", start=5.0, end=6.0),
+        ]
+    )
+    rows = document_to_editor_rows(document)
+    rows[0][1] = "删除"
+
+    result = callback.fn(
+        document.to_dict(),
+        rows,
+        2,
+        "",
+        "",
+        [],
+        {},
+        False,
+        None,
+        json.dumps(
+            {
+                "line": 1,
+                "edge": "end",
+                "seconds": 5.4,
+                "base_start": 3.0,
+                "base_end": 4.0,
+                "text": "B",
+            }
+        ),
+    )
+    edited = document_from_payload(result[0])
+
+    assert [line.text for line in edited.lines] == ["B", "C"]
+    assert edited.lines[0].end == pytest.approx(5.4)
+    assert edited.lines[1].start == pytest.approx(5.0)
+    assert result[2] == 1
+    assert result[10]["line_number"] == 2
+
+
+def test_global_line_edge_drag_preserves_another_lines_pending_word_edit_and_undo(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_line_edge_workspace"
+    )
+    document = LyricsDocument(
+        lines=[
+            LyricLine(
+                text="A",
+                start=1.0,
+                end=2.0,
+                tokens=[KaraokeToken(text="A", start=1.0, end=2.0)],
+            ),
+            LyricLine(
+                text="BC",
+                start=3.0,
+                end=4.0,
+                tokens=[
+                    KaraokeToken(text="B", start=3.0, end=3.4),
+                    KaraokeToken(text="C", start=3.4, end=4.0),
+                ],
+            ),
+        ]
+    )
+
+    result = callback.fn(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        '[{"text":"改","start":1.0,"end":2.0}]',
+        "",
+        [],
+        {"existing": "history"},
+        False,
+        None,
+        json.dumps(
+            {
+                "line": 2,
+                "edge": "start",
+                "seconds": 2.8,
+                "base_start": 3.0,
+                "base_end": 4.0,
+                "text": "BC",
+            }
+        ),
+    )
+    edited = document_from_payload(result[0])
+
+    assert edited.lines[0].text == "改"
+    assert edited.lines[1].start == pytest.approx(2.8)
+    assert edited.lines[1].tokens[0].start == pytest.approx(2.8)
+    assert edited.lines[1].tokens[0].end == pytest.approx(3.4)
+    assert edited.lines[1].tokens[1].start == pytest.approx(3.4)
+    assert edited.lines[1].tokens[1].end == pytest.approx(4.0)
+    assert result[2] == 2
+    assert result[10]["document"] == document.to_dict()
+
+    restored = undo_editor_line_action(result[0], result[1], result[2], result[10])
+    assert document_from_payload(restored[0]).to_dict() == document.to_dict()
+
+
+def test_global_line_edge_noop_keeps_existing_undo_state(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_line_edge_workspace"
+    )
+    document = LyricsDocument(lines=[LyricLine(text="A", start=1.0, end=2.0)])
+    existing_undo = {"existing": "history"}
+
+    result = callback.fn(
+        document.to_dict(),
+        document_to_editor_rows(document),
+        1,
+        "",
+        "",
+        [],
+        existing_undo,
+        True,
+        None,
+        json.dumps(
+            {
+                "line": 1,
+                "edge": "end",
+                "seconds": 2.0,
+                "base_start": 1.0,
+                "base_end": 2.0,
+                "text": "A",
+            }
+        ),
+    )
+
+    assert result[0] == document_from_payload(document.to_dict()).to_dict()
+    assert result[10] == existing_undo
+    assert "时间没有变化" in result[9]
+
+
+@pytest.mark.parametrize(
+    "request_update",
+    [
+        {"seconds": float("nan")},
+        {"seconds": float("inf")},
+        {"edge": "middle"},
+        {"line": 4},
+        {"base_end": 8.0},
+    ],
+)
+def test_global_line_edge_drag_rejects_invalid_or_stale_requests(
+    monkeypatch,
+    tmp_path: Path,
+    request_update: dict[str, object],
+) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    app = create_web_app()
+    callback = next(
+        block_function
+        for block_function in app.fns.values()
+        if getattr(block_function.fn, "__name__", "") == "apply_global_line_edge_workspace"
+    )
+    document = LyricsDocument(lines=[LyricLine(text="A", start=1.0, end=2.0)])
+    request = {
+        "line": 1,
+        "edge": "end",
+        "seconds": 2.4,
+        "base_start": 1.0,
+        "base_end": 2.0,
+        "text": "A",
+    }
+    request.update(request_update)
+
+    with pytest.raises((TypeError, ValueError)):
+        callback.fn(
+            document.to_dict(),
+            document_to_editor_rows(document),
+            1,
+            "",
+            "",
+            [],
+            {},
+            True,
+            None,
+            json.dumps(request),
+        )
 
 
 def test_global_save_clamps_selection_after_deleting_the_last_line(
