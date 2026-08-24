@@ -1046,6 +1046,14 @@ WEB_CSS = """
 }
 #editor-global-mode-panel { min-width: 0; }
 #editor-global-audio { position: sticky; top: 8px; z-index: 19; }
+#editor-token-tuning-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(15, 23, 42, .1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .62);
+}
+#editor-token-tuning-panel h3 { margin-top: 0; }
 .kf-global-timeline {
   --kf-global-zoom: 1;
   overflow: hidden;
@@ -1256,9 +1264,15 @@ TOKEN_TIMELINE_JS = r"""
     refreshTimeline(timeline);
   };
 
+  const elementIsVisible = (element) => Boolean(
+    element && (
+      element.offsetParent !== null ||
+      Number(element.getClientRects?.().length || 0) > 0
+    )
+  );
+
   const visibleElement = (selector) =>
-    Array.from(document.querySelectorAll(selector))
-      .find((element) => element.offsetParent !== null);
+    Array.from(document.querySelectorAll(selector)).find(elementIsVisible);
 
   const displayedEditorLine = () => {
     const input = document.querySelector("#editor-current-line input");
@@ -1448,15 +1462,15 @@ TOKEN_TIMELINE_JS = r"""
   };
 
   const waveSurferPartsFor = (selector) => {
-    const host = document.querySelector(selector);
-    if (!host || host.offsetParent === null) return null;
+    const host = visibleElement(selector);
+    if (!host) return null;
     const queue = [host];
     const visited = new Set();
     let progress = null;
     let wrapper = null;
     let playButton = null;
     let rateButton = null;
-    let media = null;
+    const mediaCandidates = new Set();
     while (queue.length) {
       const root = queue.shift();
       if (!root || visited.has(root)) continue;
@@ -1466,11 +1480,25 @@ TOKEN_TIMELINE_JS = r"""
       const controls = root.querySelector?.('[data-testid="waveform-controls"]');
       playButton ||= controls?.querySelector(".play-pause-button");
       rateButton ||= controls?.querySelector(".control-wrapper > button:last-child");
-      media ||= root.querySelector?.("audio");
+      root.querySelectorAll?.("audio").forEach((candidate) => {
+        mediaCandidates.add(candidate);
+      });
       root.querySelectorAll?.("*").forEach((element) => {
         if (element.shadowRoot) queue.push(element.shadowRoot);
       });
     }
+    const usableMedia = (candidate) => {
+      const duration = Number(candidate?.duration);
+      const hasSource = Boolean(
+        candidate?.currentSrc || candidate?.getAttribute?.("src")
+      );
+      return hasSource || (Number.isFinite(duration) && duration > 0);
+    };
+    // Gradio keeps an empty native <audio> beside the real WaveSurfer player.
+    // Once waveform parts exist, their progress/button state is authoritative.
+    const media = progress && wrapper
+      ? null
+      : Array.from(mediaCandidates).find(usableMedia) || null;
     return (progress && wrapper) || media
       ? { host, progress, wrapper, playButton, rateButton, media }
       : null;
@@ -1478,7 +1506,7 @@ TOKEN_TIMELINE_JS = r"""
 
   const globalEditorModeActive = () => {
     const panel = document.querySelector("#editor-global-mode-panel");
-    return Boolean(panel && panel.offsetParent !== null);
+    return elementIsVisible(panel) || Boolean(visibleElement(".kf-global-timeline"));
   };
 
   const waveSurferParts = () => waveSurferPartsFor(
@@ -1495,6 +1523,29 @@ TOKEN_TIMELINE_JS = r"""
     }
     const width = Number.parseFloat(parts?.progress?.style?.width || "");
     return Number.isFinite(width) ? Math.min(1, Math.max(0, width / 100)) : null;
+  };
+
+  const globalPlaybackDuration = (timeline, parts) => {
+    const candidates = [
+      Number(parts?.media?.duration),
+      Number(timeline?.dataset.mediaDuration),
+      Number(timeline?.dataset.duration),
+    ];
+    return candidates.find((duration) => Number.isFinite(duration) && duration > 0) || 0.01;
+  };
+
+  const playbackSeconds = (parts, duration) => {
+    const mediaDuration = Number(parts?.media?.duration);
+    const mediaTime = Number(parts?.media?.currentTime);
+    if (
+      Number.isFinite(mediaDuration) &&
+      mediaDuration > 0 &&
+      Number.isFinite(mediaTime)
+    ) {
+      return Math.min(mediaDuration, Math.max(0, mediaTime));
+    }
+    const ratio = waveProgressRatio(parts);
+    return ratio === null ? null : ratio * Math.max(0.01, Number(duration) || 0);
   };
 
   const seekWaveSurfer = (parts, ratio) => {
@@ -1514,6 +1565,24 @@ TOKEN_TIMELINE_JS = r"""
     };
     parts.wrapper.dispatchEvent(new MouseEvent("click", options));
     return true;
+  };
+
+  const seekEditorAbsoluteTime = (timeline, parts, absoluteTime) => {
+    if (!timeline || !parts || !Number.isFinite(absoluteTime)) return false;
+    if (globalEditorModeActive()) {
+      window.__karaokeForgePendingGlobalSeek = null;
+      return seekGlobalTimeline(
+        visibleElement(".kf-global-timeline"),
+        parts,
+        absoluteTime
+      );
+    }
+    const lineStart = Number(timeline.dataset.lineStart);
+    const lineEnd = Number(timeline.dataset.lineEnd);
+    if (![lineStart, lineEnd].every(Number.isFinite) || lineEnd <= lineStart) {
+      return false;
+    }
+    return seekWaveSurfer(parts, (absoluteTime - lineStart) / (lineEnd - lineStart));
   };
 
   const seekFromTimelinePointer = (timeline, clientX) => {
@@ -1536,7 +1605,7 @@ TOKEN_TIMELINE_JS = r"""
     const requested = clipStart + trackRatio * (clipEnd - clipStart);
     const seekableEnd = Math.max(lineStart, lineEnd - 0.01);
     const absoluteTime = Math.min(seekableEnd, Math.max(lineStart, requested));
-    seekWaveSurfer(parts, (absoluteTime - lineStart) / (lineEnd - lineStart));
+    seekEditorAbsoluteTime(timeline, parts, absoluteTime);
     updatePlaybackAt(absoluteTime - clipStart);
     return true;
   };
@@ -1635,6 +1704,18 @@ TOKEN_TIMELINE_JS = r"""
     }, 15);
   };
 
+  const markGlobalLineSelected = (timeline, lineNumber) => {
+    const requested = Math.trunc(Number(lineNumber));
+    if (!timeline || !Number.isFinite(requested) || requested < 1) return false;
+    let matched = false;
+    timeline.querySelectorAll(".kf-global-line-block").forEach((block) => {
+      const selected = Number(block.dataset.lineNumber) === requested;
+      block.classList.toggle("is-selected", selected);
+      matched ||= selected;
+    });
+    return matched;
+  };
+
   const updateGlobalKaraokeAt = (activeBlock, absoluteTime) => {
     const preview = visibleElement(".kf-editor-preview-stage");
     const activeLine = Number(activeBlock?.dataset.lineNumber);
@@ -1644,6 +1725,12 @@ TOKEN_TIMELINE_JS = r"""
     );
     preview?.classList.toggle("is-global-gap", !matches);
     if (!matches) return;
+    const tokenTimeline = visibleElement(".kf-token-editor");
+    if (workspaceLinesMatch(tokenTimeline, preview)) {
+      // The shared token editor contains the newest unsaved drag/text draft.
+      // pollWaveSurfer already used it to update the fill in this frame.
+      return;
+    }
     const karaoke = preview.querySelector(".kf-live-karaoke-current");
     const measure = karaoke?.querySelector(".kf-live-karaoke-measure");
     const measureBounds = measure?.getBoundingClientRect();
@@ -1687,8 +1774,12 @@ TOKEN_TIMELINE_JS = r"""
   };
 
   const pollWaveSurfer = () => {
+    window.__karaokeForgeWavePollFrame = requestAnimationFrame(pollWaveSurfer);
+    const globalMode = globalEditorModeActive();
     const timeline = visibleElement(".kf-token-editor");
-    const parts = waveSurferParts();
+    const parts = waveSurferPartsFor(
+      globalMode ? "#editor-global-audio" : "#editor-line-audio"
+    );
     const ratio = waveProgressRatio(parts);
     applyPlaybackRate(parts);
     const preview = visibleElement(".kf-editor-preview-stage");
@@ -1696,14 +1787,19 @@ TOKEN_TIMELINE_JS = r"""
       timeline &&
       preview &&
       workspaceLinesMatch(timeline, preview) &&
-      ratio !== null &&
       !window.__karaokeForgeDraggingPlayhead
     ) {
       const clipStart = Number(timeline.dataset.clipStart);
-      const lineStart = Number(preview?.dataset.lineStart);
-      const lineEnd = Number(preview?.dataset.lineEnd);
-      if (Number.isFinite(lineStart) && Number.isFinite(lineEnd)) {
-        const absoluteTime = lineStart + ratio * Math.max(0.01, lineEnd - lineStart);
+      const lineStart = Number(preview.dataset.lineStart);
+      const lineEnd = Number(preview.dataset.lineEnd);
+      const globalTimeline = visibleElement(".kf-global-timeline");
+      const globalDuration = globalPlaybackDuration(globalTimeline, parts);
+      const absoluteTime = globalMode
+        ? playbackSeconds(parts, globalDuration)
+        : (ratio === null
+          ? null
+          : lineStart + ratio * Math.max(0.01, lineEnd - lineStart));
+      if (Number.isFinite(absoluteTime)) {
         updatePlaybackAt(absoluteTime - clipStart);
         const auditionStopAt = Number(window.__karaokeForgeTokenAuditionStopAt);
         if (
@@ -1716,62 +1812,148 @@ TOKEN_TIMELINE_JS = r"""
         }
       }
     }
-    if (globalEditorModeActive()) {
+    if (globalMode) {
       const globalTimeline = visibleElement(".kf-global-timeline");
-      const globalParts = waveSurferPartsFor("#editor-global-audio");
-      const mediaDuration = Number(globalParts?.media?.duration);
-      const timelineDuration = Number(globalTimeline?.dataset.duration);
-      const duration = Math.max(
-        Number.isFinite(mediaDuration) ? mediaDuration : 0,
-        Number.isFinite(timelineDuration) ? timelineDuration : 0,
+      const globalParts = parts || waveSurferPartsFor("#editor-global-audio");
+      const playbackDuration = globalPlaybackDuration(globalTimeline, globalParts);
+      const canvasDuration = Math.max(
+        Number(globalTimeline?.dataset.duration) || 0,
+        playbackDuration,
         0.01
       );
-      const mediaTime = Number(globalParts?.media?.currentTime);
-      const globalRatio = waveProgressRatio(globalParts);
-      const currentTime = Number.isFinite(mediaTime)
-        ? mediaTime
-        : (globalRatio === null ? 0 : globalRatio * duration);
-      const playhead = globalTimeline?.querySelector(".kf-global-playhead");
-      if (playhead && !window.__karaokeForgeDraggingGlobalPlayhead) {
-        playhead.style.left = `${Math.min(100, Math.max(0, currentTime / duration * 100))}%`;
-      }
-      let activeBlock = null;
-      globalTimeline?.querySelectorAll(".kf-global-line-block").forEach((block) => {
-        const start = Number(block.dataset.start);
-        const end = Number(block.dataset.end);
-        const active = currentTime >= start && currentTime < end;
-        block.classList.toggle("is-playing", active);
-        if (active) {
-          activeBlock ||= block;
-          block.setAttribute("aria-current", "true");
-        } else {
-          block.removeAttribute("aria-current");
-        }
-      });
-      const loopInput = document.querySelector("#editor-loop-line input[type='checkbox']");
-      const selectedBlock = globalTimeline?.querySelector(".kf-global-line-block.is-selected");
-      let looped = false;
+      const playbackActive = playbackIsActive(globalParts);
+      const displayedLine = displayedEditorLine();
       if (
-        loopInput?.checked && selectedBlock && globalParts?.media &&
-        playbackIsActive(globalParts) &&
-        currentTime >= Number(selectedBlock.dataset.end) - 0.04
+        Number.isFinite(displayedLine) && displayedLine >= 1 &&
+        displayedLine !== Number(window.__karaokeForgeLastDisplayedEditorLine)
       ) {
-        globalParts.media.currentTime = Number(selectedBlock.dataset.start);
-        looped = true;
-      }
-      if (!looped && activeBlock) {
-        const activeLine = Number(activeBlock.dataset.lineNumber);
-        if (window.__karaokeForgeGlobalFollowLine !== activeLine) {
-          window.__karaokeForgeGlobalFollowLine = activeLine;
-          globalTimeline?.querySelectorAll(".kf-global-line-block.is-selected")
-            .forEach((block) => block.classList.remove("is-selected"));
-          activeBlock.classList.add("is-selected");
-          selectGlobalLine(activeLine);
+        window.__karaokeForgeLastDisplayedEditorLine = displayedLine;
+        const followsPlayback = displayedLine ===
+          Number(window.__karaokeForgeGlobalFollowLine);
+        if (!followsPlayback) {
+          window.__karaokeForgeGlobalFollowLine = displayedLine;
+          markGlobalLineSelected(globalTimeline, displayedLine);
+          const requestedBlock = globalTimeline?.querySelector(
+            `.kf-global-line-block[data-line-number="${displayedLine}"]`
+          );
+          if (requestedBlock) {
+            queueGlobalSeek(
+              globalTimeline,
+              globalParts,
+              Number(requestedBlock.dataset.start),
+              playbackActive
+            );
+          }
+          window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
+        } else if (!playbackActive) {
+          markGlobalLineSelected(globalTimeline, displayedLine);
         }
       }
-      updateGlobalKaraokeAt(looped ? selectedBlock : activeBlock, currentTime);
+      const manualSelectionActive = Boolean(window.__karaokeForgePendingGlobalSeek) ||
+        performance.now() < Number(window.__karaokeForgeGlobalManualSelectionUntil || 0);
+      let currentTime = playbackSeconds(globalParts, playbackDuration);
+      const pendingSeek = window.__karaokeForgePendingGlobalSeek;
+      if (pendingSeek) {
+        const now = performance.now();
+        const pendingTarget = Math.min(
+          playbackDuration,
+          Math.max(0, Number(pendingSeek.seconds) || 0)
+        );
+        const reachedTarget = Number.isFinite(currentTime) &&
+          Math.abs(currentTime - pendingTarget) <= 0.45;
+        if (reachedTarget && (!pendingSeek.play || playbackActive)) {
+          window.__karaokeForgePendingGlobalSeek = null;
+        } else if (now >= Number(pendingSeek.expiresAt || 0)) {
+          window.__karaokeForgePendingGlobalSeek = null;
+        } else if (
+          globalParts && now - Number(pendingSeek.lastAttempt || 0) >= 120
+        ) {
+          pendingSeek.lastAttempt = now;
+          seekGlobalTimeline(globalTimeline, globalParts, pendingTarget);
+          if (pendingSeek.play) playPlayback(globalParts);
+          currentTime = playbackSeconds(globalParts, playbackDuration);
+        }
+      }
+      if (Number.isFinite(currentTime)) {
+        const percent = Math.min(100, Math.max(0, currentTime / canvasDuration * 100));
+        const globalRatio = waveProgressRatio(globalParts);
+        const justFinished = Boolean(window.__karaokeForgeGlobalPlaybackWasActive) &&
+          !playbackActive && globalRatio !== null && globalRatio >= 0.99999;
+        window.__karaokeForgeGlobalPlaybackWasActive = playbackActive;
+        const playhead = globalTimeline?.querySelector(".kf-global-playhead");
+        if (playhead && !window.__karaokeForgeDraggingGlobalPlayhead) {
+          playhead.style.left = `${percent}%`;
+          playhead.setAttribute("aria-valuenow", currentTime.toFixed(2));
+        }
+        const scrollArea = globalTimeline?.querySelector(".kf-global-scroll");
+        const canvas = globalTimeline?.querySelector(".kf-global-canvas");
+        if (
+          playbackActive &&
+          !window.__karaokeForgeDraggingGlobalPlayhead &&
+          scrollArea && canvas &&
+          canvas.scrollWidth > scrollArea.clientWidth
+        ) {
+          const target = percent / 100 * canvas.scrollWidth;
+          const safeLeft = scrollArea.scrollLeft + scrollArea.clientWidth * 0.15;
+          const safeRight = scrollArea.scrollLeft + scrollArea.clientWidth * 0.85;
+          const lastTarget = Number(globalTimeline.__kfLastFollowTarget ?? -100000);
+          if (
+            (target < safeLeft || target > safeRight) &&
+            Math.abs(target - lastTarget) > scrollArea.clientWidth * 0.16
+          ) {
+            globalTimeline.__kfLastFollowTarget = target;
+            scrollArea.scrollTo({
+              left: Math.max(0, target - scrollArea.clientWidth / 2),
+              behavior: "smooth",
+            });
+          }
+        }
+        let activeBlock = null;
+        globalTimeline?.querySelectorAll(".kf-global-line-block").forEach((block) => {
+          const start = Number(block.dataset.start);
+          const end = Number(block.dataset.end);
+          const active = currentTime >= start && currentTime < end;
+          block.classList.toggle("is-playing", active);
+          if (active) {
+            activeBlock ||= block;
+            block.setAttribute("aria-current", "true");
+          } else {
+            block.removeAttribute("aria-current");
+          }
+        });
+        const loopInput = document.querySelector("#editor-loop-line input[type='checkbox']");
+        const selectedBlock = globalTimeline?.querySelector(".kf-global-line-block.is-selected");
+        let looped = false;
+        if (
+          loopInput?.checked && selectedBlock &&
+          !manualSelectionActive &&
+          (playbackActive || justFinished) &&
+          currentTime >= Number(selectedBlock.dataset.end) - 0.04
+        ) {
+          looped = seekGlobalTimeline(
+            globalTimeline,
+            globalParts,
+            Number(selectedBlock.dataset.start)
+          );
+          if (looped && justFinished) playPlayback(globalParts);
+        }
+        if (
+          playbackActive && !looped && activeBlock &&
+          !manualSelectionActive &&
+          !window.__karaokeForgeDraggingGlobalPlayhead
+        ) {
+          const activeLine = Number(activeBlock.dataset.lineNumber);
+          if (window.__karaokeForgeGlobalFollowLine !== activeLine) {
+            window.__karaokeForgeGlobalFollowLine = activeLine;
+            markGlobalLineSelected(globalTimeline, activeLine);
+            selectGlobalLine(activeLine);
+          }
+        }
+        updateGlobalKaraokeAt(looped ? selectedBlock : activeBlock, currentTime);
+      }
+    } else {
+      window.__karaokeForgeGlobalPlaybackWasActive = false;
     }
-    window.__karaokeForgeWavePollFrame = requestAnimationFrame(pollWaveSurfer);
   };
   if (window.__karaokeForgeWavePollFrame) {
     cancelAnimationFrame(window.__karaokeForgeWavePollFrame);
@@ -1961,7 +2143,6 @@ TOKEN_TIMELINE_JS = r"""
     const lineEnd = Number(preview?.dataset.lineEnd);
     const start = Number(block.dataset.start);
     const end = Number(block.dataset.end);
-    const duration = Math.max(0.01, lineEnd - lineStart);
     if (![lineStart, lineEnd, start, end].every(Number.isFinite)) return;
     const scrollArea = timeline.querySelector(".kf-token-scroll");
     if (scrollArea) {
@@ -1974,7 +2155,7 @@ TOKEN_TIMELINE_JS = r"""
       });
     }
     pausePlayback(parts);
-    seekWaveSurfer(parts, (start - lineStart) / duration);
+    seekEditorAbsoluteTime(timeline, parts, start);
     clearTokenStopTimer();
     clearTokenAuditionGuard();
     const tokenDuration = Math.max(0.01, end - start);
@@ -2156,7 +2337,8 @@ TOKEN_TIMELINE_JS = r"""
     if (event.target.closest?.(editorActionSelector)) {
       pauseForEditorMutation();
     }
-    if (event.target.closest?.("#editor-line-audio")) {
+    if (event.target.closest?.("#editor-line-audio, #editor-global-audio")) {
+      window.__karaokeForgePendingGlobalSeek = null;
       clearTokenStopTimer();
       clearTokenAuditionGuard();
       clearEditorMutationGuard();
@@ -2262,25 +2444,39 @@ TOKEN_TIMELINE_JS = r"""
     parts: waveSurferPartsFor("#editor-global-audio"),
   });
 
-  const seekGlobalTimeline = (timeline, parts, seconds) => {
+  function seekGlobalTimeline(timeline, parts, seconds) {
     if (!timeline || !parts) return false;
     const mediaDuration = Number(parts.media?.duration);
-    const timelineDuration = Number(timeline.dataset.duration);
-    const duration = Math.max(
-      Number.isFinite(mediaDuration) ? mediaDuration : 0,
-      Number.isFinite(timelineDuration) ? timelineDuration : 0,
+    const playbackDuration = globalPlaybackDuration(timeline, parts);
+    const canvasDuration = Math.max(
+      Number(timeline.dataset.duration) || 0,
+      playbackDuration,
       0.01
     );
-    const target = Math.min(duration, Math.max(0, Number(seconds) || 0));
+    const target = Math.min(playbackDuration, Math.max(0, Number(seconds) || 0));
+    timeline.__kfLastSeekSeconds = target;
     if (parts.media && Number.isFinite(mediaDuration) && mediaDuration > 0) {
       parts.media.currentTime = Math.min(mediaDuration, target);
     } else {
-      seekWaveSurfer(parts, target / duration);
+      seekWaveSurfer(parts, target / playbackDuration);
     }
     const playhead = timeline.querySelector(".kf-global-playhead");
-    if (playhead) playhead.style.left = `${target / duration * 100}%`;
+    if (playhead) playhead.style.left = `${target / canvasDuration * 100}%`;
     return true;
-  };
+  }
+
+  function queueGlobalSeek(timeline, parts, seconds, shouldPlay) {
+    const requested = Math.max(0, Number(seconds) || 0);
+    window.__karaokeForgePendingGlobalSeek = {
+      seconds: requested,
+      play: Boolean(shouldPlay),
+      expiresAt: performance.now() + 2500,
+      lastAttempt: performance.now(),
+    };
+    const moved = seekGlobalTimeline(timeline, parts, requested);
+    if (shouldPlay) playPlayback(parts);
+    return moved;
+  }
 
   const seekGlobalFromPointer = (timeline, parts, clientX) => {
     const track = timeline?.querySelector(".kf-global-track");
@@ -2288,12 +2484,8 @@ TOKEN_TIMELINE_JS = r"""
     const bounds = track.getBoundingClientRect();
     if (bounds.width <= 0) return false;
     const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
-    const duration = Math.max(
-      Number(parts?.media?.duration) || 0,
-      Number(timeline.dataset.duration) || 0,
-      0.01
-    );
-    return seekGlobalTimeline(timeline, parts, ratio * duration);
+    const canvasDuration = Math.max(Number(timeline.dataset.duration) || 0, 0.01);
+    return seekGlobalTimeline(timeline, parts, ratio * canvasDuration);
   };
 
   document.addEventListener("click", (event) => {
@@ -2323,13 +2515,17 @@ TOKEN_TIMELINE_JS = r"""
     if (!block) return;
     event.preventDefault();
     event.stopPropagation();
+    clearTokenStopTimer();
+    clearTokenAuditionGuard();
+    clearEditorMutationGuard();
     const { timeline, parts } = globalTimelineParts();
-    timeline?.querySelectorAll(".kf-global-line-block.is-selected")
-      .forEach((selected) => selected.classList.remove("is-selected"));
-    block.classList.add("is-selected");
-    seekGlobalTimeline(timeline, parts, Number(block.dataset.start));
-    selectGlobalLine(Number(block.dataset.lineNumber));
-    playPlayback(parts);
+    const lineNumber = Number(block.dataset.lineNumber);
+    window.__karaokeForgeLastDisplayedEditorLine = displayedEditorLine();
+    window.__karaokeForgeGlobalFollowLine = lineNumber;
+    window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
+    markGlobalLineSelected(timeline, lineNumber);
+    queueGlobalSeek(timeline, parts, Number(block.dataset.start), true);
+    selectGlobalLine(lineNumber);
   }, true);
 
   document.addEventListener("pointerdown", (event) => {
@@ -2339,6 +2535,10 @@ TOKEN_TIMELINE_JS = r"""
     const parts = waveSurferPartsFor("#editor-global-audio");
     if (!timeline || !parts) return;
     event.preventDefault();
+    clearTokenStopTimer();
+    clearTokenAuditionGuard();
+    clearEditorMutationGuard();
+    window.__karaokeForgePendingGlobalSeek = null;
     const resumeAfterDrag = playbackIsActive(parts);
     pausePlayback(parts);
     window.__karaokeForgeDraggingGlobalPlayhead = true;
@@ -2350,18 +2550,43 @@ TOKEN_TIMELINE_JS = r"""
       moveEvent.preventDefault();
       seekGlobalFromPointer(timeline, parts, moveEvent.clientX);
     };
+    let finished = false;
     const finish = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
+      if (finished || finishEvent.pointerId !== pointerId) return;
+      finished = true;
       track.removeEventListener("pointermove", move);
       track.removeEventListener("pointerup", finish);
       track.removeEventListener("pointercancel", finish);
-      track.releasePointerCapture?.(pointerId);
+      track.removeEventListener("lostpointercapture", finish);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (track.hasPointerCapture?.(pointerId)) {
+        track.releasePointerCapture?.(pointerId);
+      }
       window.__karaokeForgeDraggingGlobalPlayhead = false;
+      const requestedTime = Number(timeline.__kfLastSeekSeconds);
+      const requestedBlock = Array.from(
+        timeline.querySelectorAll(".kf-global-line-block")
+      ).find((block) => (
+        requestedTime >= Number(block.dataset.start) &&
+        requestedTime < Number(block.dataset.end)
+      ));
+      if (requestedBlock) {
+        const requestedLine = Number(requestedBlock.dataset.lineNumber);
+        window.__karaokeForgeLastDisplayedEditorLine = displayedEditorLine();
+        window.__karaokeForgeGlobalFollowLine = requestedLine;
+        window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
+        markGlobalLineSelected(timeline, requestedLine);
+        selectGlobalLine(requestedLine);
+      }
       if (resumeAfterDrag) playPlayback(parts);
     };
     track.addEventListener("pointermove", move);
     track.addEventListener("pointerup", finish);
     track.addEventListener("pointercancel", finish);
+    track.addEventListener("lostpointercapture", finish);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   }, true);
 
   const isTextEntry = (target) => {
@@ -2380,20 +2605,31 @@ TOKEN_TIMELINE_JS = r"""
       event.altKey ||
       isTextEntry(event.target)
     ) return;
+    const pendingSeek = window.__karaokeForgePendingGlobalSeek;
     const parts = waveSurferParts();
-    if (!parts) return;
+    if (!parts && !pendingSeek) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.type !== "keydown" || event.repeat) return;
     clearTokenStopTimer();
-    if (playbackIsActive(parts)) pausePlayback(parts);
-    else playPlayback(parts);
+    if (pendingSeek) {
+      pendingSeek.play = !Boolean(pendingSeek.play);
+      if (pendingSeek.play) playPlayback(parts);
+      else pausePlayback(parts);
+    } else if (playbackIsActive(parts)) {
+      pausePlayback(parts);
+    } else {
+      playPlayback(parts);
+    }
   };
   document.addEventListener("keydown", handlePlaybackSpace, true);
   document.addEventListener("keyup", handlePlaybackSpace, true);
 
   document.addEventListener("change", (event) => {
     if (!event.target.closest?.("#editor-timing-mode")) return;
+    window.__karaokeForgePendingGlobalSeek = null;
+    window.__karaokeForgeGlobalManualSelectionUntil = 0;
+    window.__karaokeForgeGlobalPlaybackWasActive = false;
     ["#editor-line-audio", "#editor-global-audio"].forEach((selector) => {
       const parts = waveSurferPartsFor(selector);
       pausePlayback(parts);
@@ -7258,35 +7494,14 @@ def create_web_app(
                                     loop=False,
                                     elem_id="editor-line-audio",
                                 )
-                                editor_timing_status = gr.Markdown(
-                                    "从歌词总览选择一句即可自动播放。",
-                                    elem_id="editor-timing-status",
-                                )
                                 editor_audio_refresh_trigger = gr.Textbox(
                                     value="",
                                     visible=False,
                                 )
-                            editor_token_timeline = gr.HTML(
-                                '<div class="kf-tip">选择歌词后，这里会显示可拖动的逐词时间条。</div>',
-                                elem_id="editor-token-timeline",
+                            editor_timing_status = gr.Markdown(
+                                "从歌词总览选择一句即可自动播放。",
+                                elem_id="editor-timing-status",
                             )
-                            editor_token_json = gr.Textbox(
-                                value="[]",
-                                show_label=False,
-                                container=False,
-                                elem_id="kf-token-json",
-                            )
-                            with gr.Row(elem_id="editor-timing-actions") as editor_timing_actions:
-                                editor_save_tokens = gr.Button(
-                                    "保存逐词时间",
-                                    variant="primary",
-                                    elem_classes="kf-primary",
-                                    elem_id="editor-save-tokens",
-                                )
-                                editor_start_earlier = gr.Button("开始 −0.1s")
-                                editor_start_later = gr.Button("开始 +0.1s")
-                                editor_end_earlier = gr.Button("结束 −0.1s")
-                                editor_end_later = gr.Button("结束 +0.1s")
                             with gr.Column(
                                 visible=False,
                                 elem_id="editor-global-mode-panel",
@@ -7294,7 +7509,8 @@ def create_web_app(
                                 gr.Markdown(
                                     "### 全局连续时间轴\n"
                                     "整首音频只加载一次；点击句块或拖动红色播放头即可连续定位，"
-                                    "不再为每句重新生成试听片段。"
+                                    "不再为每句重新生成试听片段。点击任一句后，可直接在下方继续"
+                                    "精修这句的每个字。"
                                 )
                                 editor_global_audio = gr.Audio(
                                     label="全曲连续试听",
@@ -7340,6 +7556,35 @@ def create_web_app(
                                         variant="primary",
                                         elem_classes="kf-primary",
                                     )
+                            with gr.Column(elem_id="editor-token-tuning-panel"):
+                                gr.Markdown(
+                                    "### 当前句逐字微调\n"
+                                    "全局模式中点击上方任一句即可载入；可改字、删字、拖动黄色"
+                                    "边界，并用红线定位到整曲中的真实时间。"
+                                )
+                                editor_token_timeline = gr.HTML(
+                                    '<div class="kf-tip">选择歌词后，这里会显示可拖动的逐词时间条。</div>',
+                                    elem_id="editor-token-timeline",
+                                )
+                                editor_token_json = gr.Textbox(
+                                    value="[]",
+                                    show_label=False,
+                                    container=False,
+                                    elem_id="kf-token-json",
+                                )
+                                with gr.Row(
+                                    elem_id="editor-timing-actions"
+                                ) as editor_timing_actions:
+                                    editor_save_tokens = gr.Button(
+                                        "保存逐词时间",
+                                        variant="primary",
+                                        elem_classes="kf-primary",
+                                        elem_id="editor-save-tokens",
+                                    )
+                                    editor_start_earlier = gr.Button("开始 −0.1s")
+                                    editor_start_later = gr.Button("开始 +0.1s")
+                                    editor_end_earlier = gr.Button("结束 −0.1s")
+                                    editor_end_later = gr.Button("结束 +0.1s")
 
                         with (
                             gr.Column(
@@ -9146,7 +9391,7 @@ def create_web_app(
                 len(document.lines),
             )
             rows = document_to_editor_rows(document)
-            timeline, refreshed_token_json = editor_token_workspace(
+            timeline, _ = editor_token_workspace(
                 document.to_dict(),
                 rows,
                 selected,
@@ -9160,7 +9405,7 @@ def create_web_app(
             return (
                 editor_preview_html(document, selected),
                 timeline,
-                refreshed_token_json,
+                gr.skip(),
                 uuid4().hex if timing_changed else gr.skip(),
             )
 
@@ -9275,7 +9520,7 @@ def create_web_app(
                     line_number,
                 )
             return (
-                loaded[0],
+                loaded[0] if snapshot else gr.skip(),
                 loaded[1] if snapshot else gr.skip(),
                 line_number,
                 loaded[2],
@@ -9303,6 +9548,7 @@ def create_web_app(
             delta: int,
             *,
             load_audio: bool = True,
+            continuous_mode: bool = False,
             absolute_target: int | None = None,
         ) -> tuple[object, ...]:
             before = document_from_payload(payload)
@@ -9347,11 +9593,17 @@ def create_web_app(
                     loaded[1],
                     target,
                 )
+            elif continuous_mode:
+                clip = gr.skip()
+                timing_status = (
+                    f"已在全局时间轴选中第 {target} 行；整曲播放保持连续，"
+                    "下方逐字微调区已载入这句。"
+                )
             else:
                 clip = gr.skip()
                 timing_status = f"已自动切换到第 {target} 行，正在准备试听音频……"
             return (
-                loaded[0],
+                loaded[0] if snapshot else gr.skip(),
                 loaded[1] if snapshot else gr.skip(),
                 target,
                 loaded[2],
@@ -9559,8 +9811,8 @@ def create_web_app(
                 timing_status += "\n切换模式前的当前句草稿已自动保存。"
             return (
                 gr.update(visible=not global_mode),
-                gr.update(value=timeline, visible=not global_mode),
-                gr.update(visible=not global_mode),
+                gr.update(value=timeline, visible=True),
+                gr.update(visible=True),
                 gr.update(visible=global_mode),
                 timing_status,
                 document.to_dict(),
@@ -9616,7 +9868,6 @@ def create_web_app(
             triggers=[
                 editor_payload.change,
                 editor_lines.change,
-                editor_line_number.change,
                 editor_audio.change,
             ],
             fn=editor_global_timeline_workspace,
@@ -9640,6 +9891,7 @@ def create_web_app(
                     ripple,
                     0,
                     load_audio=False,
+                    continuous_mode=True,
                     absolute_target=int(requested),
                 )
             ),
@@ -9657,6 +9909,7 @@ def create_web_app(
             ],
             outputs=editor_line_workspace_outputs,
             queue=False,
+            trigger_mode="always_last",
             cancels=[editor_preview_event, editor_line_draft_event],
         )
 
@@ -9868,6 +10121,7 @@ def create_web_app(
                     ripple,
                     -1,
                     load_audio=str(mode) != "global",
+                    continuous_mode=str(mode) == "global",
                 )
             ),
             inputs=[
@@ -9900,6 +10154,7 @@ def create_web_app(
                     ripple,
                     1,
                     load_audio=str(mode) != "global",
+                    continuous_mode=str(mode) == "global",
                 )
             ),
             inputs=[
