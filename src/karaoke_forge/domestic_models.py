@@ -734,7 +734,7 @@ def _download_file(
             raise DomesticModelDownloadError(f"模型文件多次中断，已保留断点：{item.path}")
         headers = {
             "Accept-Encoding": "identity",
-                "User-Agent": "Karaoke-Forge/0.15.2",
+                "User-Agent": "Karaoke-Forge/0.16.0",
         }
         if current:
             headers["Range"] = f"bytes={current}-"

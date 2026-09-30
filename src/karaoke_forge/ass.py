@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -44,6 +45,45 @@ class AssStyle:
     pronunciation_font_size: int = 26
     pronunciation_color: str = "#FFFFFF"
     pronunciation_gap: int = 4
+
+
+# A single eighth note, shared by libass and the browser preview. Using a path
+# keeps the cue independent of the selected lyric font's musical glyphs.
+COUNTDOWN_NOTE_DRAWING = (
+    "m 14 1 l 17 1 b 18 5 24 6 24 13 b 24 16 23 18 21 20 "
+    "b 23 12 19 11 17 11 l 17 24 b 17 28 13 31 8 31 "
+    "b 3 31 1 28 3 25 b 5 22 10 20 14 22 l 14 1"
+)
+COUNTDOWN_NOTE_SVG_PATH = COUNTDOWN_NOTE_DRAWING.translate(str.maketrans("mlb", "MLC"))
+
+
+def _pronunciation_clearance(style: AssStyle) -> float:
+    """Keep reading and lyric outlines apart, including at larger font sizes."""
+
+    reading_outline = max(1.0, min(style.outline, 2.0))
+    return max(
+        float(style.pronunciation_gap),
+        style.font_size * 0.10,
+        style.outline + reading_outline + 2.0,
+    )
+
+
+def _karaoke_upper_margin(style: AssStyle) -> int:
+    row_gap = float(style.karaoke_row_gap)
+    if style.show_pronunciation:
+        row_gap = max(
+            row_gap,
+            style.pronunciation_font_size + _pronunciation_clearance(style) + 12.0,
+        )
+    return round(style.margin_v + style.font_size + row_gap)
+
+
+def _countdown_note_drawing(height: int) -> str:
+    return re.sub(
+        r"\d+",
+        lambda match: str(round(int(match.group()) * height / 34)),
+        COUNTDOWN_NOTE_DRAWING,
+    )
 
 
 def _ass_color(value: str, alpha: int = 0) -> str:
@@ -331,12 +371,12 @@ def _pronunciation_position(
     width, height = style.resolution
     if row == 0:
         line_left = float(style.karaoke_margin_h)
-        row_margin = style.margin_v + style.font_size + style.karaoke_row_gap
+        row_margin = _karaoke_upper_margin(style)
     else:
         line_left = width - style.karaoke_margin_h - total_width
         row_margin = style.margin_v
     x = line_left + prefix_width + (source_width / 2)
-    y = height - row_margin - style.font_size - style.pronunciation_gap
+    y = height - row_margin - style.font_size - _pronunciation_clearance(style)
     return max(10.0, min(width - 10.0, x)), max(10.0, y)
 
 
@@ -355,7 +395,7 @@ def _countdown_position(
     line_width = min(available_width, max(float(style.font_size), _text_width(line.text, style)))
     if row == 0:
         x = style.karaoke_margin_h + line_width / 2.0
-        row_margin = style.margin_v + style.font_size + style.karaoke_row_gap
+        row_margin = _karaoke_upper_margin(style)
     else:
         x = width - style.karaoke_margin_h - line_width / 2.0
         row_margin = style.margin_v
@@ -365,7 +405,7 @@ def _countdown_position(
         unit.reading.strip() for unit in pronunciation.units
     )
     if has_reading:
-        lyric_top -= style.pronunciation_gap + style.pronunciation_font_size
+        lyric_top -= _pronunciation_clearance(style) + style.pronunciation_font_size
     cue_gap = max(12, round(style.font_size * 0.22))
     y = lyric_top - cue_gap - badge_height / 2.0
 
@@ -374,26 +414,6 @@ def _countdown_position(
     x = max(half_width + 20.0, min(width - half_width - 20.0, x))
     y = max(half_height + 20.0, min(height - half_height - 20.0, y))
     return x, y
-
-
-def _countdown_backdrop_drawing(width: int, height: int) -> str:
-    """Return a rounded-left, arrow-ended ASS vector path for the cue lamps."""
-
-    radius = max(8, round(height * 0.28))
-    nose = max(22, round(height * 0.58))
-    body_end = width - nose
-    middle = height // 2
-    half_radius = max(1, radius // 2)
-    return (
-        f"m {radius} 0 "
-        f"l {body_end} 0 "
-        f"l {width} {middle} "
-        f"l {body_end} {height} "
-        f"l {radius} {height} "
-        f"b {half_radius} {height} 0 {height - half_radius} 0 {height - radius} "
-        f"l 0 {radius} "
-        f"b 0 {half_radius} {half_radius} 0 {radius} 0"
-    )
 
 
 def _pronunciation_karaoke(
@@ -435,15 +455,14 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
     outline = _ass_color(style.outline_color)
     translation = _ass_color(style.translation_color)
     pronunciation_color = _ass_color(style.pronunciation_color)
-    countdown_muted = _ass_color(style.text_color, alpha=0x88)
-    countdown_backdrop = _ass_color(style.outline_color, alpha=0x38)
-    countdown_border = _ass_color(style.highlight_color, alpha=0x18)
-    upper_margin = style.margin_v + style.font_size + style.karaoke_row_gap
+    countdown_muted = _ass_color(style.text_color, alpha=0xAA)
+    upper_margin = _karaoke_upper_margin(style)
     pronunciation_outline = max(1.0, min(style.outline, 2.0))
-    countdown_size = max(28, round(style.font_size * 0.55))
-    countdown_width = max(180, round(style.font_size * 3.6))
-    countdown_height = max(48, round(style.font_size * 0.92))
-    countdown_drawing = _countdown_backdrop_drawing(countdown_width, countdown_height)
+    countdown_height = max(34, round(style.font_size * 0.72))
+    countdown_note_width = round(countdown_height * 26 / 34)
+    countdown_spacing = max(12, round(countdown_height * 0.38))
+    countdown_width = countdown_note_width * 3 + countdown_spacing * 2
+    countdown_drawing = _countdown_note_drawing(countdown_height)
     gap_threshold = max(1.0, float(style.countdown_gap_threshold))
     lead_in = max(0.5, float(style.countdown_lead_in))
     estimated_render_ends = [
@@ -502,8 +521,8 @@ Style: KaraokeLowerInactive,{style.font},{style.font_size},{secondary},{secondar
 Style: Pronunciation,{style.font},{style.pronunciation_font_size},{primary},{pronunciation_color},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 Style: PronunciationInactive,{style.font},{style.pronunciation_font_size},{pronunciation_color},{pronunciation_color},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
 Style: Translation,{style.font},{style.translation_font_size},{translation},{translation},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{style.outline},{style.shadow},8,60,60,{style.translation_margin_v},1
-Style: Countdown,{style.font},{countdown_size},{primary},{primary},{outline},&H80000000,-1,0,0,0,100,100,0,0,1,{pronunciation_outline},{style.shadow},2,0,0,0,1
-Style: CountdownBackdrop,{style.font},1,{countdown_backdrop},{countdown_backdrop},{countdown_border},&H00000000,0,0,0,0,100,100,0,0,1,2,0,7,0,0,0,1
+Style: Countdown,{style.font},1,{primary},{primary},{outline},&H80000000,0,0,0,0,100,100,0,0,1,1.2,0,7,0,0,0,1
+Style: CountdownInactive,{style.font},1,{countdown_muted},{countdown_muted},{outline},&H80000000,0,0,0,0,100,100,0,0,1,1,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -525,11 +544,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             index,
             lead_in,
         ):
+            # The upcoming lyric stays visible while the notes disappear at
+            # the singing boundary; fading both events would flash it blank.
+            fade_out = 0 if index in break_before and display_end == line.start else 180
             events.append(
                 "Dialogue: 0,"
                 f"{ass_clock(display_start)},{ass_clock(display_end)},"
                 f"{inactive_style},,0,0,0,,"
-                f"{{\\fad(120,180)}}{_escape_ass_text(line.text)}"
+                f"{{\\fad(120,{fade_out})}}{_escape_ass_text(line.text)}"
             )
             if pronunciation is not None:
                 for unit in pronunciation.units:
@@ -540,7 +562,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         "Dialogue: 0,"
                         f"{ass_clock(display_start)},{ass_clock(display_end)},"
                         "PronunciationInactive,,0,0,0,,"
-                        f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
+                        f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,{fade_out})}}"
                         f"{_escape_ass_text(unit.reading)}"
                     )
 
@@ -560,34 +582,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 countdown_width,
                 countdown_height,
             )
-            backdrop_left = countdown_x - countdown_width / 2.0
-            backdrop_top = countdown_y - countdown_height / 2.0
-            events.append(
-                "Dialogue: 4,"
-                f"{ass_clock(cue_start)},{ass_clock(line_start)},"
-                "CountdownBackdrop,,0,0,0,,"
-                f"{{\\an7\\pos({backdrop_left:.1f},{backdrop_top:.1f})"
-                f"\\1c{countdown_backdrop}\\3c{countdown_border}"
-                "\\bord2\\shad0\\fad(100,120)\\p1}"
-                f"{countdown_drawing}"
-            )
             stage_duration = cue_duration / 3
-            for stage in range(3):
-                start = cue_start + stage * stage_duration
-                end = line_start if stage == 2 else cue_start + (stage + 1) * stage_duration
-                dots = []
-                for dot in range(3):
-                    color = primary if dot <= stage else countdown_muted
-                    dots.append(f"{{\\1c{color}}}●")
+            for note in range(3):
+                start = cue_start + note * stage_duration
+                note_left = (
+                    countdown_x
+                    - countdown_width / 2.0
+                    + note * (countdown_note_width + countdown_spacing)
+                )
+                note_top = countdown_y - countdown_height / 2.0
+                position = f"\\an7\\pos({note_left:.1f},{note_top:.1f})"
+                if note:
+                    events.append(
+                        "Dialogue: 4,"
+                        f"{ass_clock(cue_start)},{ass_clock(start)},CountdownInactive,,0,0,0,,"
+                        f"{{{position}\\p1}}{countdown_drawing}"
+                    )
+                # Each activated note stays filled until the exact singing
+                # boundary. No per-second fade/restart of the earlier notes.
                 events.append(
                     "Dialogue: 5,"
-                    f"{ass_clock(start)},{ass_clock(end)},Countdown,,0,0,0,,"
-                    f"{{\\an5\\pos({countdown_x - countdown_height * 0.10:.1f},"
-                    f"{countdown_y:.1f})"
-                    "\\fad(100,120)\\fscx92\\fscy92"
-                    "\\t(0,260,\\fscx116\\fscy116)"
-                    "\\t(260,700,\\fscx100\\fscy100)}"
-                    + r"\h\h".join(dots)
+                    f"{ass_clock(start)},{ass_clock(line_start)},Countdown,,0,0,0,,"
+                    f"{{{position}\\3c{primary}\\bord1.2\\blur0.3"
+                    "\\t(0,100,\\bord2)\\t(100,260,\\bord1.2)\\p1}"
+                    f"{countdown_drawing}"
                 )
 
     for index, line in enumerate(lines):
@@ -612,10 +630,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             lyric_text = _escape_ass_text(line.text)
         karaoke_style = "Karaoke" if index % 2 == 0 else "KaraokeLower"
+        fade_in = 0 if index in break_before else 120
         events.append(
             "Dialogue: 1,"
             f"{ass_clock(line.start)},{ass_clock(render_end)},"
-            f"{karaoke_style},,0,0,0,,{{\\fad(120,180)}}{lyric_text}"
+            f"{karaoke_style},,0,0,0,,{{\\fad({fade_in},180)}}{lyric_text}"
         )
         pronunciation = pronunciations[index]
         if pronunciation is not None:
@@ -628,7 +647,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     "Dialogue: 2,"
                     f"{ass_clock(line.start)},{ass_clock(render_end)},"
                     "Pronunciation,,0,0,0,,"
-                    f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad(120,180)}}"
+                    f"{{\\an2\\pos({x:.1f},{y:.1f})\\fad({fade_in},180)}}"
                     f"{_pronunciation_karaoke(unit, line, style)}"
                 )
     return header + "\n".join(events) + "\n"

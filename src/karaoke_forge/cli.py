@@ -317,6 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--no-browser", action="store_true", help="do not open a browser window")
     web.set_defaults(handler=_handle_web)
 
+    desktop = subparsers.add_parser("desktop", help="open the native desktop workspace")
+    desktop.add_argument("project", nargs="?", help="workspace manifest or timed lyrics to open")
+    desktop.set_defaults(handler=_handle_desktop)
+
     netease = subparsers.add_parser(
         "netease",
         help="create timed lyrics from a NetEase Music song link",
@@ -744,6 +748,12 @@ def _handle_web(args: argparse.Namespace) -> int:
         open_browser=not args.no_browser,
     )
     return 0
+
+
+def _handle_desktop(args: argparse.Namespace) -> int:
+    from .desktop import launch_desktop
+
+    return launch_desktop(args.project)
 
 
 def _handle_netease(args: argparse.Namespace) -> int:

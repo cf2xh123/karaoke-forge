@@ -127,10 +127,7 @@ def test_ass_round_trip_preserves_detected_pauses_between_words() -> None:
     output = write_ass(document, AssStyle(show_pronunciation=False))
     restored = parse_ass(output)
 
-    assert (
-        r"{\kf10}one{\k0} {\k10}{\kf20}two{\k0} {\k110}{\kf40}three"
-        in output
-    )
+    assert r"{\kf10}one{\k0} {\k10}{\kf20}two{\k0} {\k110}{\kf40}three" in output
     assert [token.text for token in restored.lines[0].tokens] == ["one ", "two ", "three"]
     assert [round(token.start, 2) for token in restored.lines[0].tokens] == [1.0, 1.2, 2.5]
     assert [round(token.end, 2) for token in restored.lines[0].tokens] == [1.1, 1.4, 2.9]
@@ -225,19 +222,19 @@ def test_long_instrumental_break_clears_lyrics_and_cues_the_next_line() -> None:
             countdown_lead_in=3.0,
         ),
     )
-    dialogue_events = [
-        (row["start"], row["end"], row["style"]) for row in _dialogue_rows(output)
-    ]
+    dialogue_events = [(row["start"], row["end"], row["style"]) for row in _dialogue_rows(output)]
 
     assert not any(start <= 10.0 < end for start, end, _style in dialogue_events)
     assert "Dialogue: 0,0:00:02.00,0:00:05.00,KaraokeLowerInactive" in output
     assert "Dialogue: 0,0:00:17.00,0:00:20.00,KaraokeLowerInactive" in output
-    assert "Dialogue: 4,0:00:17.00,0:00:20.00,CountdownBackdrop" in output
-    assert "Dialogue: 5,0:00:17.00,0:00:18.00,Countdown" in output
-    assert "Dialogue: 5,0:00:18.00,0:00:19.00,Countdown" in output
+    assert "Dialogue: 4,0:00:17.00,0:00:18.00,CountdownInactive" in output
+    assert "Dialogue: 4,0:00:17.00,0:00:19.00,CountdownInactive" in output
+    assert "Dialogue: 5,0:00:17.00,0:00:20.00,Countdown" in output
+    assert "Dialogue: 5,0:00:18.00,0:00:20.00,Countdown" in output
     assert "Dialogue: 5,0:00:19.00,0:00:20.00,Countdown" in output
     assert r"\p1}m " in output
-    assert "●" in output
+    assert "●" not in output
+    assert "CountdownBackdrop" not in output
     assert "100)}}" not in output
 
 
@@ -387,7 +384,7 @@ def test_inactive_lyrics_are_only_next_line_previews() -> None:
         assert float(row["end"]) <= line_starts[row["text"].split("}")[-1]]
 
 
-def test_countdown_arrow_tracks_the_upcoming_row_and_actual_pronunciation() -> None:
+def test_countdown_notes_track_the_upcoming_row_and_actual_pronunciation() -> None:
     lower_document = LyricsDocument(
         lines=[
             LyricLine(text="First", start=1.0, end=3.0),
@@ -418,9 +415,9 @@ def test_countdown_arrow_tracks_the_upcoming_row_and_actual_pronunciation() -> N
 
     assert upper_x < 960 < lower_x
     assert upper_y < lower_y
-    assert "CountdownBackdrop" in upper_output
+    assert "CountdownInactive" in upper_output
     assert r"\p1}m " in upper_output
-    assert "Dialogue: 4,0:00:17.00,0:00:20.00,CountdownBackdrop" in lower_output
+    assert "Dialogue: 5,0:00:17.00,0:00:20.00,Countdown" in lower_output
 
     lower_document.lines[1].pronunciation = "ローワー キュー"
     _reading_x, reading_y, _reading_output = countdown_position(
@@ -448,6 +445,64 @@ def test_countdown_requires_a_real_lyric_free_gap_across_overlapping_rows() -> N
         AssStyle(show_pronunciation=False, countdown_gap_threshold=8.0),
     )
 
-    assert "CountdownBackdrop" in output
+    assert "Style: Countdown," in output
     assert "Dialogue: 4," not in output
     assert "Dialogue: 5," not in output
+
+
+def test_countdown_fills_notes_cumulatively_until_exact_singing_boundary() -> None:
+    document = LyricsDocument(lines=[LyricLine(text="Start singing", start=12.0, end=15.0)])
+    output = write_ass(document, AssStyle(font="Arial", show_pronunciation=False))
+    notes = [row for row in _dialogue_rows(output) if row["style"] == "Countdown"]
+    dim_notes = [row for row in _dialogue_rows(output) if row["style"] == "CountdownInactive"]
+
+    assert [(row["start"], row["end"]) for row in notes] == [
+        (9.0, 12.0),
+        (10.0, 12.0),
+        (11.0, 12.0),
+    ]
+    for timestamp, expected in [(9.5, 1), (10.5, 2), (11.99, 3), (12.0, 0)]:
+        assert sum(row["start"] <= timestamp < row["end"] for row in notes) == expected
+    assert [(row["start"], row["end"]) for row in dim_notes] == [(9.0, 10.0), (9.0, 11.0)]
+    assert all(r"\p1}m " in row["text"] for row in notes + dim_notes)
+    assert all(r"\fad" not in row["text"] for row in notes)
+    positions = [re.search(r"\\pos\(([^)]+)\)", row["text"]).group(1) for row in notes]
+    assert len(set(positions)) == 3
+    assert [line.text for line in parse_ass(output).lines] == ["Start singing"]
+    lyric_events = [
+        row for row in _dialogue_rows(output) if row["style"] in {"Karaoke", "KaraokeInactive"}
+    ]
+    preview, singing = lyric_events
+    assert preview["end"] == singing["start"] == 12.0
+    assert r"\fad(120,0)" in preview["text"]
+    assert r"\fad(0,180)" in singing["text"]
+
+
+def test_large_pronunciation_reserves_room_between_both_lyric_rows() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine("Upper", 1.0, 4.0, pronunciation="アッパー"),
+            LyricLine("Lower", 2.0, 5.0, pronunciation="ローワー"),
+        ]
+    )
+    style = AssStyle(
+        font_size=88,
+        pronunciation_font_size=80,
+        pronunciation_gap=0,
+        karaoke_row_gap=8,
+        auto_pronunciation=False,
+        show_countdown=False,
+    )
+    output = write_ass(document, style)
+    upper_style = next(line for line in output.splitlines() if line.startswith("Style: Karaoke,"))
+    upper_margin = float(upper_style.split(",")[-2])
+    readings = [row for row in _dialogue_rows(output) if row["style"] == "Pronunciation"]
+    upper_reading_y, lower_reading_y = [
+        float(re.search(r"\\pos\([\d.]+,([\d.]+)\)", row["text"]).group(1)) for row in readings
+    ]
+    upper_body_bottom = style.resolution[1] - upper_margin
+    lower_body_top = style.resolution[1] - style.margin_v - style.font_size
+
+    assert upper_reading_y < upper_body_bottom - style.font_size - style.outline
+    assert lower_reading_y < lower_body_top - style.outline
+    assert lower_reading_y - style.pronunciation_font_size >= upper_body_bottom + 10
