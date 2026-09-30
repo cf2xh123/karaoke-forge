@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from karaoke_forge.projects import (
     PROJECT_FILENAME,
     list_workspace_projects,
@@ -141,3 +143,27 @@ def test_workspace_manifest_cannot_reference_files_outside_its_directory(tmp_pat
         assert "工程目录内" in str(exc)
     else:
         raise AssertionError("An escaping manifest path should have been rejected.")
+
+
+@pytest.mark.parametrize("field", ["audio", "video", "cover", "font_files"])
+def test_saving_missing_explicit_assets_keeps_the_previous_manifest(tmp_path, field):
+    lyrics = tmp_path / "song.json"
+    lyrics.write_text('{"version": 1, "lines": []}\n', encoding="utf-8")
+    saved = save_workspace_project(tmp_path / "project", name="Original", lyrics_project=lyrics)
+    before = saved.manifest.read_bytes()
+    missing = tmp_path / "missing-input"
+    assets = {field: (missing,) if field == "font_files" else missing}
+    with pytest.raises(FileNotFoundError, match="不存在"):
+        save_workspace_project(
+            saved.manifest.parent, name="Replacement", lyrics_project=lyrics, **assets
+        )
+    assert saved.manifest.read_bytes() == before
+
+
+def test_save_refuses_to_overwrite_lyrics_with_its_manifest(tmp_path):
+    lyrics = tmp_path / PROJECT_FILENAME
+    original = '{"version": 1, "lines": [{"text": "Preserve me"}]}'
+    lyrics.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match="工程索引重名"):
+        save_workspace_project(tmp_path, name="Reserved", lyrics_project=lyrics)
+    assert lyrics.read_text(encoding="utf-8") == original

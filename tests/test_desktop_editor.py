@@ -22,6 +22,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow, QTableWidgetItem
 
+from karaoke_forge.alignment_quality import annotate_alignment_review
 from karaoke_forge.desktop.editor_page import EditorPage
 from karaoke_forge.editor_history import history_stacks
 from karaoke_forge.models import (
@@ -560,3 +561,125 @@ def test_loading_a_project_does_not_mutate_original_document(page, document):
     set_cell(page.tokens_table, 0, 0, "hey ")
     page.apply_pending()
     assert document.to_dict() == original
+
+
+def test_quality_findings_remain_visible_and_navigate_to_the_affected_lines(page, document):
+    document.metadata.update({
+        "alignment_coverage": "0.15",
+        "alignment_review_lines": "1,2",
+        "alignment_review_reasons": json.dumps({"1": ["低置信词较多"], "2": ["歌词未匹配"]}),
+    })
+    page.load_document(document)
+    assert "2 句" in page.review_summary and "15%" in page.review_summary
+    assert not page.review_bar.isHidden()
+    assert "低置信词较多" in page.lines_table.item(0, 0).toolTip()
+    assert page.lines_table.item(0, 1).text() == "显示"
+    page.select_review_line(1)
+    assert page._selected == 1
+    assert "歌词未匹配" in page.status.text()
+    page.select_review_line(1)
+    assert page._selected == 0
+    page.select_review_line(-1)
+    assert page._selected == 1
+    set_cell(page.lines_table, 1, 5, "人工修正翻译仍不意味着时间准确")
+    assert page.apply_pending()
+    assert "2 句" in page.review_summary
+    page.mark_saved()
+    assert not page.is_dirty and "2 句" in page.review_summary
+
+
+def test_quality_findings_follow_insert_delete_hide_and_undo(page, document):
+    document.metadata.update({
+        "alignment_status": "low_coverage_recovery",
+        "unmatched_lyric_lines": "2",
+    })
+    page.load_document(document)
+    page.insert_line(False)
+    assert page.current_document().metadata["alignment_review_lines"] == "3"
+    assert page.current_document().metadata["unmatched_lyric_lines"] == "3"
+    page.select_review_line()
+    assert page._selected == 2 and page.current_document().lines[2].text == "next"
+    page.toggle_hidden()
+    assert page.review_summary == ""
+    page.undo()
+    assert "1 句" in page.review_summary
+    page.delete_line()
+    assert page.review_summary == ""
+    assert page.current_document().metadata["alignment_review_lines"] == ""
+    page.undo()
+    assert page.current_document().metadata["alignment_review_lines"] == "3"
+    assert page.lines_table.item(2, 0).toolTip().startswith("第 3 句需要核对")
+
+
+def test_legacy_quality_metadata_and_malformed_details_do_not_break_loading(page, document):
+    document.metadata.update({
+        "alignment_status": "low_coverage_recovery",
+        "alignment_coverage": "not-a-number",
+        "alignment_review_reasons": "[invalid JSON",
+    })
+    page.load_document(document)
+    assert page._review_indexes == [0, 1]
+    document.metadata["alignment_review_lines"] = "0,2,999,invalid"
+    page.load_document(document)
+    assert page._review_indexes == [1]
+    assert "1 句" in page.review_summary
+
+
+def test_high_coverage_quality_findings_from_pipeline_survive_hide_and_export_reload(page, tmp_path):
+    source = LyricsDocument(
+        [LyricLine("空", 1, 2, [KaraokeToken("空", 1, 1.01, .99)])],
+        metadata={"alignment_coverage": "1.0", "auto_pronunciation": "false"},
+    )
+    annotate_alignment_review(source, estimated_source=True, new_alignment=True)
+    page.load_document(source)
+    assert "100%" in page.review_summary and "1 句" in page.review_summary
+    assert "20 毫秒" in page.lines_table.item(0, 0).toolTip()
+    page.toggle_hidden()
+    assert page.review_summary == ""
+    page.toggle_hidden()
+    assert "1 句" in page.review_summary
+    output = tmp_path / "high-coverage-review"
+    page.export_to(str(output))
+    page.load_source(str(output / PROJECT_FILENAME))
+    assert not page.is_dirty
+    assert "100%" in page.review_summary and "1 句" in page.review_summary
+    assert "20 毫秒" in page.lines_table.item(0, 0).toolTip()
+
+
+def test_explicit_review_confirmation_is_undoable_and_preserves_lyrics_and_timing(page, document):
+    document.metadata.update({
+        "alignment_review_lines": "1,2", "unmatched_lyric_lines": "1,2",
+        "alignment_review_reasons": '{"1":["未匹配"],"2":["低置信"]}',
+    })
+    page.load_document(document)
+    assert page.review_confirm_button.isEnabled()
+    page.confirm_review_line()
+    confirmed = page.current_document()
+    assert confirmed.lines == document.lines
+    assert confirmed.metadata["alignment_review_lines"] == "2"
+    assert confirmed.metadata["unmatched_lyric_lines"] == "2"
+    assert page.is_dirty and not page.review_confirm_button.isEnabled()
+    page.undo()
+    assert page.current_document().to_dict() == document.to_dict()
+    assert not page.is_dirty and page.review_confirm_button.isEnabled()
+    page.redo()
+    assert page.current_document().metadata["alignment_review_lines"] == "2"
+
+
+def test_review_confirmation_survives_save_but_new_alignment_can_flag_the_line_again(page, tmp_path):
+    source = LyricsDocument(
+        [LyricLine("空", 1, 2, [KaraokeToken("空", 1, 1.01, .99)])],
+        metadata={"auto_pronunciation": "false"},
+    )
+    annotate_alignment_review(source, estimated_source=True, new_alignment=True)
+    page.load_document(source)
+    page.confirm_review_line()
+    assert page.review_summary == ""
+    output = tmp_path / "confirmed-review"
+    page.export_to(str(output))
+    page.load_source(str(output / PROJECT_FILENAME))
+    assert page.review_summary == "" and not page.is_dirty
+    revised = page.current_document()
+    annotate_alignment_review(revised, estimated_source=True, new_alignment=True)
+    page.load_document(revised)
+    assert "1 句" in page.review_summary

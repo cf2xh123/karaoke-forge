@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -55,7 +55,9 @@ from ..projects import (
     PROJECT_FILENAME,
     load_workspace_project,
     read_workspace_lyrics,
+    safe_lyrics_export_stem,
     save_workspace_project,
+    validate_project_assets,
 )
 from ..web import _default_output_root, _safe_stem
 from .common import PathPicker
@@ -64,6 +66,74 @@ from .timeline import LyricPreviewWidget, TimelineWidget, TokenTimelineWidget
 
 def _copy_document(document: LyricsDocument) -> LyricsDocument:
     return copy.deepcopy(document)
+
+
+def _review_lines(document: LyricsDocument) -> dict[int, list[str]]:
+    """Read persisted quality findings without making a low-quality edit look approved."""
+    metadata = document.metadata
+    explicit = "alignment_review_lines" in metadata
+    value = metadata.get("alignment_review_lines" if explicit else "unmatched_lyric_lines", "")
+    indexes = set()
+    for item in str(value).split(","):
+        try:
+            index = int(item.strip()) - 1
+        except ValueError:
+            continue
+        if 0 <= index < len(document.lines):
+            indexes.add(index)
+    if not explicit and not indexes and metadata.get("alignment_status") == "low_coverage_recovery":
+        indexes = set(range(len(document.lines)))
+    try:
+        reasons = json.loads(metadata.get("alignment_review_reasons", "{}"))
+    except (ValueError, TypeError):
+        reasons = {}
+    if not isinstance(reasons, dict):
+        reasons = {}
+    result = {}
+    for index in sorted(indexes):
+        values = reasons.get(str(index + 1), [])
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            values = []
+        result[index] = [str(reason) for reason in values if isinstance(reason, str) and reason.strip()]
+        if not result[index]:
+            result[index] = ["未匹配或对齐可信度不足，请结合原音频核对"]
+    return result
+
+
+def _store_review_lines(document: LyricsDocument, findings: dict[int, list[str]]) -> None:
+    document.metadata["alignment_review_lines"] = ",".join(str(item + 1) for item in sorted(findings))
+    document.metadata["alignment_review_reasons"] = json.dumps(
+        {str(item + 1): reasons for item, reasons in sorted(findings.items())}, ensure_ascii=False
+    )
+
+
+def _move_review_lines(document: LyricsDocument, index: int, *, inserted: bool) -> None:
+    """Keep findings attached to their lyric when an editor inserts or deletes a row."""
+    findings = _review_lines(document)
+    if not findings and "alignment_review_lines" not in document.metadata:
+        return
+    moved = {}
+    for original, reasons in findings.items():
+        if not inserted and original == index:
+            continue
+        target = original + int(original >= index) if inserted else original - int(original > index)
+        moved[target] = reasons
+    _store_review_lines(document, moved)
+    if "unmatched_lyric_lines" in document.metadata:
+        unmatched = []
+        for item in str(document.metadata["unmatched_lyric_lines"]).split(","):
+            try:
+                original = int(item.strip()) - 1
+            except ValueError:
+                continue
+            if not inserted and original == index:
+                continue
+            target = original + int(original >= index) if inserted else original - int(original > index)
+            if target >= 0:
+                unmatched.append(target + 1)
+        document.metadata["unmatched_lyric_lines"] = ",".join(map(str, sorted(set(unmatched))))
 
 
 def _history_document(snapshot: dict) -> LyricsDocument:
@@ -99,12 +169,6 @@ def _write_exports(
             previous = load_workspace_project(manifest)
         except (OSError, ValueError, TypeError):
             pass
-    root = Path(directory).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    document.metadata["workspace_manifest"] = str(root / PROJECT_FILENAME)
-    stem = _safe_stem(name, fallback="edited-lyrics")
-    formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.is_timed else ["json"]
-    exports = export_formats(document, root, stem, formats)
     saved_audio = audio or (previous.audio if previous else None)
     if (
         previous
@@ -115,6 +179,17 @@ def _write_exports(
         # A video can serve as the calibration audio without being copied
         # into the project twice. Its video field retains the sound track.
         saved_audio = None
+    validate_project_assets(
+        audio=saved_audio, video=previous.video if previous else None,
+        cover=previous.cover if previous else None,
+        font_files=previous.font_files if previous else (),
+    )
+    root = Path(directory).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    document.metadata["workspace_manifest"] = str(root / PROJECT_FILENAME)
+    stem = safe_lyrics_export_stem(root, _safe_stem(name, fallback="edited-lyrics"))
+    formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.is_timed else ["json"]
+    exports = export_formats(document, root, stem, formats)
     workspace = save_workspace_project(
         root,
         name=name.strip() or (previous.name if previous else "编辑后的歌词"),
@@ -149,6 +224,7 @@ class EditorPage(QWidget):
 
     handoff = Signal(object)
     changed = Signal(bool)
+    review_changed = Signal(str)
 
     def __init__(self, runner, parent=None):
         super().__init__(parent)
@@ -169,6 +245,8 @@ class EditorPage(QWidget):
         self._whole_baseline = ""
         self._loop_index = 0
         self._last_export_dir = ""
+        self._review_summary = ""
+        self._review_indexes: list[int] = []
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio_output)
@@ -258,6 +336,30 @@ class EditorPage(QWidget):
         self._button("下方插入", lambda: self.insert_line(True), insertion)
         self._button("应用表格修改", self.apply_pending, insertion)
         left_layout.addLayout(insertion)
+        self.review_bar = QWidget()
+        self.review_bar.setObjectName("alignmentReview")
+        self.review_bar.setStyleSheet(
+            "#alignmentReview { background-color: #fff3d7; border: 1px solid #ddbc70;"
+            " border-radius: 4px; }"
+            "#alignmentReview QLabel { color: #704b07; border: none; background: transparent; }"
+        )
+        review_layout = QVBoxLayout(self.review_bar)
+        review_layout.setContentsMargins(6, 6, 6, 6)
+        self.review_label = QLabel()
+        self.review_label.setWordWrap(True)
+        review_layout.addWidget(self.review_label)
+        review_actions = QHBoxLayout()
+        self._button("上一待核对句", lambda: self.select_review_line(-1), review_actions)
+        self._button("下一待核对句", lambda: self.select_review_line(1), review_actions)
+        review_actions.addStretch()
+        review_layout.addLayout(review_actions)
+        self.review_confirm_button = self._button(
+            "当前句已核对", self.confirm_review_line, review_layout
+        )
+        self.review_confirm_button.setToolTip(
+            "确认已试听核对当前句，保留歌词和时间；可以通过撤销恢复待核对标记。"
+        )
+        left_layout.addWidget(self.review_bar)
         self.lines_table = self._table(["序号", "状态", "开始秒", "结束秒", "原文", "翻译"])
         for column, width in enumerate((44, 54, 72, 72)):
             self.lines_table.setColumnWidth(column, width)
@@ -456,6 +558,7 @@ class EditorPage(QWidget):
     def _render(self) -> None:
         self._rendering = True
         self._fill(self.lines_table, document_to_editor_rows(self._document), readonly_id=True)
+        self._update_review_status()
         self._line_baseline = self._values(self.lines_table)
         if self._document.lines:
             self._selected = min(max(0, self._selected), len(self._document.lines) - 1)
@@ -482,6 +585,7 @@ class EditorPage(QWidget):
         self._whole_baseline = self.whole_pronunciation.text()
         self.token_timeline.set_line(line)
         self.preview.set_current_line(self._selected)
+        self.review_confirm_button.setEnabled(self._selected in self._review_indexes)
         self._rendering = previous_rendering
 
     def _has_pending(self) -> bool:
@@ -491,6 +595,76 @@ class EditorPage(QWidget):
             or self._values(self.pronunciation_table) != self._pronunciation_baseline
             or self.whole_pronunciation.text() != self._whole_baseline
         )
+
+    @property
+    def review_summary(self) -> str:
+        return self._review_summary
+
+    @property
+    def review_count(self) -> int:
+        return len(self._review_indexes)
+
+    def _update_review_status(self) -> None:
+        findings = {
+            index: reasons for index, reasons in _review_lines(self._document).items()
+            if not self._document.lines[index].hidden and self._document.lines[index].text.strip()
+        }
+        self._review_indexes = list(findings)
+        coverage = ""
+        try:
+            value = float(self._document.metadata.get("alignment_coverage", ""))
+            if math.isfinite(value) and 0 <= value <= 1:
+                coverage = f" · 匹配覆盖率 {value:.0%}"
+        except (TypeError, ValueError):
+            pass
+        summary = (
+            f"待核对：{len(findings)} 句{coverage}；请试听确认后再导出。"
+            if findings else ""
+        )
+        self.review_label.setText(summary)
+        self.review_bar.setVisible(bool(findings))
+        for index, reasons in findings.items():
+            detail = f"第 {index + 1} 句需要核对：" + "；".join(reasons)
+            for column in (0, 1):
+                item = self.lines_table.item(index, column)
+                if item is not None:
+                    item.setBackground(QColor("#594319"))
+                    item.setForeground(QColor("#ffdf90"))
+                    item.setToolTip(detail)
+        if summary != self._review_summary:
+            self._review_summary = summary
+            self.review_changed.emit(summary)
+
+    def select_review_line(self, direction: int = 1) -> None:
+        if not self._review_indexes:
+            return
+        if direction < 0:
+            earlier = [index for index in self._review_indexes if index < self._selected]
+            target = earlier[-1] if earlier else self._review_indexes[-1]
+        else:
+            later = [index for index in self._review_indexes if index > self._selected]
+            target = later[0] if later else self._review_indexes[0]
+        self.select_line(target)
+        self.lines_table.scrollToItem(self.lines_table.item(self._selected, 0))
+        if self._selected == target:
+            self._report(self.lines_table.item(target, 0).toolTip())
+
+    def confirm_review_line(self) -> None:
+        def confirm(document):
+            findings = _review_lines(document)
+            if self._selected not in findings:
+                return document
+            findings.pop(self._selected)
+            _store_review_lines(document, findings)
+            # Keep the legacy fallback consistent with the explicit review list.
+            if "unmatched_lyric_lines" in document.metadata:
+                document.metadata["unmatched_lyric_lines"] = ",".join(
+                    value for value in str(document.metadata["unmatched_lyric_lines"]).split(",")
+                    if value.strip() != str(self._selected + 1)
+                )
+            return document
+
+        self._mutate(confirm)
 
     @property
     def is_dirty(self) -> bool:
@@ -841,6 +1015,7 @@ class EditorPage(QWidget):
         def delete(document):
             if len(document.lines) <= 1:
                 raise ValueError("至少保留一行歌词；可使用隐藏功能。")
+            _move_review_lines(document, self._selected, inserted=False)
             document.lines.pop(self._selected)
             return document
 
@@ -863,6 +1038,7 @@ class EditorPage(QWidget):
                 start = max(0.0, previous or end - 2.0)
                 if end <= start:
                     start, end = max(0.0, end - 0.5), max(0.5, end)
+            _move_review_lines(document, selected, inserted=True)
             document.lines.insert(selected, LyricLine("新歌词", start, end))
             return document
 

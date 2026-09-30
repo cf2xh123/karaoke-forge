@@ -24,7 +24,12 @@ from karaoke_forge.desktop.app import MainWindow
 from karaoke_forge.desktop.workspace import save_workspace_revision
 from karaoke_forge.formats import read_lyrics, write_json
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument, PronunciationSpan
-from karaoke_forge.projects import PROJECT_FILENAME, load_workspace_project, save_workspace_project
+from karaoke_forge.projects import (
+    PROJECT_FILENAME,
+    load_workspace_project,
+    read_workspace_lyrics,
+    save_workspace_project,
+)
 from karaoke_forge.web import UiEditorPreparationResult, UiJobResult
 
 
@@ -146,6 +151,94 @@ def test_preparation_fills_the_existing_editor_without_navigation_or_resetting_s
     assert window.editor.preview._style["font_size"] == 76
     assert window.workspace.input_bar.isEnabled() and window.editor.isEnabled()
     assert not window.workspace.is_dirty
+
+
+def test_low_quality_preparation_warning_survives_progress_save_and_reopen(window, tmp_path):
+    source = document()
+    source.metadata.update({
+        "alignment_status": "low_coverage_recovery",
+        "alignment_coverage": "0.1",
+        "alignment_review_lines": "1",
+        "alignment_review_reasons": '{"1": ["日语歌词未可靠匹配"]}',
+    })
+    result = preparation(source)
+    window.make._prepared_result(result)
+    assert "1 句" in window.workspace.activity.text()
+    assert "10%" in window.editor.review_summary
+    assert "已就绪" in window.workspace.document_status.text()
+    assert not window.editor.review_bar.isHidden()
+    window.runner.message.emit("输出文件：lyrics.json")
+    assert "1 句" in window.editor.review_summary
+    window.editor.lines_table.item(0, 5).setText("待保存的人工修改")
+    assert "未保存修改" in window.workspace.document_status.text()
+    saved_document, saved, _ = save_workspace_revision(
+        window.editor.current_document(), window.make.get_settings(), str(tmp_path / "quality")
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    assert not window.workspace.is_dirty
+    assert "已就绪" in window.workspace.document_status.text()
+    assert "10%" in window.editor.review_summary
+    assert "日语歌词未可靠匹配" in window.editor.lines_table.item(0, 0).toolTip()
+
+
+@pytest.mark.parametrize("name", ["karaoke-forge-project", "KARAOKE-FORGE-PROJECT.json"])
+def test_reserved_project_name_exports_recoverable_lyrics_and_preserves_existing_files(
+    tmp_path, name
+):
+    existing = tmp_path / f"{Path(name).stem}-lyrics.json"
+    existing.write_text("Unrelated user file", encoding="utf-8")
+    original = document()
+    _saved_document, saved, files = save_workspace_revision(
+        original, {"output_name": name}, str(tmp_path)
+    )
+    assert saved.lyrics_project != saved.manifest
+    assert saved.lyrics_project != existing
+    assert str(saved.lyrics_project) in files
+    assert existing.read_text(encoding="utf-8") == "Unrelated user file"
+    restored = read_workspace_lyrics(saved)
+    assert restored.lines == original.lines
+    assert saved.name == name
+
+
+def test_missing_selected_material_fails_before_overwriting_saved_lyrics(tmp_path):
+    original = document()
+    _document, saved, _files = save_workspace_revision(
+        original, {"output_name": "Song"}, str(tmp_path)
+    )
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+    original.lines[0].translation = "This revision must stay unsaved"
+    with pytest.raises(FileNotFoundError, match="所选音频文件不存在"):
+        save_workspace_revision(
+            original,
+            {"output_name": "Song", "audio_file": str(tmp_path / "missing.wav")},
+            str(tmp_path),
+        )
+    assert saved.lyrics_project.name == "Song.json"
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == before
+
+
+def test_failed_missing_material_save_does_not_adopt_the_pending_revision(window, tmp_path, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.workspace.song_picker.set_value(str(tmp_path / "missing.wav"))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(tmp_path / "save"))
+    assert window.workspace.is_dirty
+    assert window.workspace.save_project()
+    with pytest.raises(FileNotFoundError, match="不存在"):
+        window.runner.finish()
+    assert window.workspace.is_dirty
+    assert not (tmp_path / "save" / PROJECT_FILENAME).exists()
+
+
+def test_project_save_preserves_remote_source_refs_without_treating_them_as_local_assets(tmp_path):
+    _document, saved, _files = save_workspace_revision(
+        document(),
+        {"output_name": "Local project", "cover_url": "https://example.com/cover.jpg",
+         "source_refs": {"qqmusic": "https://example.com/song"}},
+        str(tmp_path),
+    )
+    assert saved.cover is None
+    assert saved.settings["cover_url"] == "https://example.com/cover.jpg"
+    assert saved.settings["source_refs"] == {"qqmusic": "https://example.com/song"}
 
 
 def test_generated_online_assets_are_adopted_without_overwriting_current_style(window, tmp_path):

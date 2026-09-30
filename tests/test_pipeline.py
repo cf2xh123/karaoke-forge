@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from karaoke_forge.align import AlignmentError, RecognizedWord
@@ -259,6 +261,9 @@ def test_auto_refinement_keeps_timed_lyrics_when_whisper_is_unavailable(
     )
 
     assert result is None
+    assert document.lines[0].start == 1.0
+    assert document.metadata["alignment_review_lines"] == "1"
+    assert "自动精修未完成" in document.metadata["alignment_review_reasons"]
     assert any("已保留原时间轴并继续" in message for message in messages)
 
 
@@ -356,3 +361,62 @@ def test_pipeline_marks_low_coverage_recovery_for_editor_use(tmp_path, monkeypat
     assert result.document.is_timed
     assert result.document.metadata["alignment_status"] == "low_coverage_recovery"
     assert result.document.metadata["unmatched_lyric_lines"] == "1,2"
+
+
+def test_high_coverage_still_flags_interpolated_lines(tmp_path, monkeypatch) -> None:
+    lyrics = tmp_path / "lyrics.txt"
+    lyrics.write_text("one two three four\nmissing\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.transcribe_with_faster_whisper",
+        lambda *_args, **_kwargs: TranscriptionResult(
+            words=[RecognizedWord(text, index + 1, index + 1.5, 0.95)
+                   for index, text in enumerate(("one", "two", "three", "four"))],
+            detected_language="en", language_probability=0.99,
+        ),
+    )
+    result = align_audio_and_lyrics(tmp_path / "song.wav", lyrics)
+    assert not result.recovered
+    assert result.report.coverage == 0.8
+    assert result.document.metadata["alignment_review_lines"] == "2"
+    assert "插值" in json.loads(result.document.metadata["alignment_review_reasons"])["2"][0]
+
+
+def test_refinement_review_maps_visible_and_hidden_lines_back_to_project(tmp_path, monkeypatch):
+    document = parse_lrc("[00:01.00]Hidden\n[00:03.00]hello\n[00:06.00]missing\n")
+    document.lines[0].hidden = True
+    document.metadata["alignment_review_reasons"] = json.dumps({"1": ["之前待复核"]})
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.transcribe_with_faster_whisper",
+        lambda *_args, **_kwargs: TranscriptionResult(
+            words=[RecognizedWord("hello", 3.0, 4.0, 0.95)],
+            detected_language="en", language_probability=0.99,
+        ),
+    )
+    result = refine_audio_word_timing(tmp_path / "song.wav", document)
+    assert result.document.metadata["audio_refined_line_indices"] == "2"
+    assert result.document.metadata["alignment_review_lines"] == "1,3"
+    assert result.report.unmatched_line_indexes == (2,)
+    reasons = json.loads(result.document.metadata["alignment_review_reasons"])
+    assert reasons["1"] == ["之前待复核"]
+    assert "估算" in reasons["3"][0]
+
+
+def test_trusted_source_without_asr_confidence_is_not_marked_estimated(tmp_path, monkeypatch):
+    document = parse_yrc("[1000,500](1000,500,0)Hello\n")
+    # Previous forced run diagnostics must not be reported as the current run.
+    document.metadata["forced_alignment_accepted_line_indices"] = "1"
+    document.metadata["forced_alignment_warning"] = "previous failure"
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.transcribe_with_faster_whisper",
+        lambda *_args, **_kwargs: TranscriptionResult(
+            words=[RecognizedWord("different", 1.0, 1.5, 0.95)],
+            detected_language="en", language_probability=0.99,
+        ),
+    )
+    result = refine_audio_word_timing(
+        tmp_path / "song.wav", document, protect_existing_word_timing=True,
+    )
+    assert result.document.lines[0].tokens[0].confidence is None
+    assert result.document.metadata["alignment_review_lines"] == ""
+    assert "forced_alignment_accepted_line_indices" not in result.document.metadata
+    assert "forced_alignment_warning" not in result.document.metadata

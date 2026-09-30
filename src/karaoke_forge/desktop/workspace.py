@@ -29,7 +29,9 @@ from ..projects import (
     WorkspaceProject,
     load_workspace_project,
     read_workspace_lyrics,
+    safe_lyrics_export_stem,
     save_workspace_project,
+    validate_project_assets,
 )
 from ..web import UiJobResult, _default_output_root, _safe_stem
 from .common import PathPicker
@@ -48,6 +50,10 @@ def save_workspace_revision(document: LyricsDocument, settings: dict, directory:
         except (OSError, TypeError, ValueError):
             pass
     settings = {**previous_settings, **settings, "lyrics_timebase": "audio"}
+    validate_project_assets(
+        audio=settings.get("audio_file"), video=settings.get("video_file"),
+        cover=settings.get("cover_file"), font_files=tuple(settings.get("font_files") or ()),
+    )
     root = Path(directory).resolve()
     root.mkdir(parents=True, exist_ok=True)
     name = str(settings.get("output_name") or document.metadata.get("ti") or "歌词工程")
@@ -55,7 +61,8 @@ def save_workspace_revision(document: LyricsDocument, settings: dict, directory:
     formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.is_timed else ["json"]
     style_fields = {field.name for field in fields(AssStyle)}
     style = AssStyle(**{key: value for key, value in settings.items() if key in style_fields})
-    exports = export_formats(document, root, _safe_stem(name), formats, ass_style=style)
+    stem = safe_lyrics_export_stem(root, _safe_stem(name))
+    exports = export_formats(document, root, stem, formats, ass_style=style)
     workspace = save_workspace_project(
         root,
         name=name,
@@ -368,7 +375,11 @@ class WorkspacePage(QWidget):
             self._syncing = False
         self._settings_changed(self.make.get_settings())
         self.prepare_button.setText("重新载入 / 生成时间轴")
-        self.activity.setText("时间轴已生成 · 在当前工作台直接试听和调整，满意后导出视频。")
+        self.activity.setText(
+            f"时间轴已生成 · 有 {self.editor.review_count} 句待核对，可用待核对句按钮定位。"
+            if self.editor.review_count
+            else "时间轴已生成 · 在当前工作台直接试听和调整，满意后导出视频。"
+        )
 
     def load_project(self, document, workspace: WorkspaceProject | None, source: str) -> None:
         # Validate before replacing any part of the currently open project.

@@ -1888,7 +1888,7 @@ def prepare_make_editor_job(
             if aligned.recovered:
                 timing_summary = _low_coverage_summary(
                     aligned,
-                    source,
+                    aligned.document,
                     model=model,
                     separate_vocals=separate_vocals,
                 )

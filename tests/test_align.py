@@ -1,5 +1,7 @@
 from itertools import pairwise
 
+import pytest
+
 from karaoke_forge.align import (
     RecognizedWord,
     align_document,
@@ -7,7 +9,203 @@ from karaoke_forge.align import (
     refine_timed_document,
 )
 from karaoke_forge.formats import parse_lrc, parse_plain, parse_yrc
-from karaoke_forge.models import LyricLine, LyricsDocument
+from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
+
+
+def test_initial_alignment_preserves_real_word_ends_and_intra_line_pauses():
+    lyrics = parse_plain("君と hello world")
+    recognized = [
+        RecognizedWord("君と", 1, 1.4, 0.99),
+        RecognizedWord("hello", 3, 3.5, 0.99),
+        RecognizedWord("world", 4, 4.4, 0.99),
+    ]
+    result, _ = align_document(lyrics, recognized)
+    tokens = result.lines[0].tokens
+    assert [(word.start, word.end) for word in tokens] == pytest.approx(
+        [(1, 1.2), (1.2, 1.4), (3, 3.5), (4, 4.4)]
+    )
+
+
+def test_missing_words_use_the_gap_between_trusted_spans_not_their_sung_duration():
+    result, _ = align_document(parse_plain("alpha beta gamma"), [
+        RecognizedWord("alpha", 1, 2.8, 0.99),
+        RecognizedWord("gamma", 3, 3.5, 0.99),
+    ])
+    tokens = result.lines[0].tokens
+    assert (tokens[0].start, tokens[0].end) == (1, 2.8)
+    assert 2.8 <= tokens[1].start < tokens[1].end <= 3
+    assert (tokens[2].start, tokens[2].end) == (3, 3.5)
+
+
+def test_unmatched_prefix_at_zero_remains_monotonic_with_minimal_anchor_displacement():
+    result, _ = align_document(parse_plain("missing lost early target"), [
+        RecognizedWord("target", 0, 0.5, 0.99),
+    ])
+    tokens = result.lines[0].tokens
+    assert all(right.start >= left.end for left, right in pairwise(tokens))
+    assert tokens[-1].start <= 0.03 + 1e-9
+    assert tokens[-1].end == 0.5
+
+
+def test_unmatched_long_asr_outlier_cannot_shift_later_trusted_words():
+    result, report = align_document(parse_plain("hello world"), [
+        RecognizedWord("noise", 0, 15, 0.05),
+        RecognizedWord("hello", 1, 1.4, 0.99),
+        RecognizedWord("world", 2, 2.5, 0.99),
+    ])
+    assert report.trusted_timing_units == 2
+    assert [(word.start, word.end) for word in result.lines[0].tokens] == [(1, 1.4), (2, 2.5)]
+
+
+def test_partial_asr_chorus_keeps_each_repeat_near_its_own_source_start():
+    lyrics = parse_lrc("".join(
+        f"[{time // 60:02}:{time % 60:02}.00]same words\n" for time in [10, 20, 30, 40, 50, 60]
+    ))
+    recognized = [
+        RecognizedWord(word, time + index * .5, time + index * .5 + .3, .95)
+        for time in [10, 20, 30] for index, word in enumerate(["same", "words"])
+    ]
+    result, _ = refine_timed_document(lyrics, recognized)
+    for line_index in range(3):
+        start = 10 * (line_index + 1)
+        assert [(word.start, word.end) for word in result.lines[line_index].tokens] == pytest.approx(
+            [(start, start + .3), (start + .5, start + .8)]
+        )
+    assert result.lines[3:] == lyrics.lines[3:]
+
+
+@pytest.mark.parametrize("start,end", [(9.45, 9.95), (12.05, 12.6), (9.6, 10.01)])
+def test_forced_alignment_rejects_words_outside_or_almost_entirely_clipped(start, end):
+    lyrics = LyricsDocument([LyricLine("hello", 10, 12, [KaraokeToken("hello", 10, 12)])])
+    result, accepted = apply_forced_line_alignments(lyrics, {
+        0: [RecognizedWord("hello", start, end, .95)],
+    })
+    assert accepted == 0
+    assert result.lines == lyrics.lines
+
+
+def test_forced_alignment_allows_small_boundary_corrections():
+    lyrics = LyricsDocument([LyricLine("hello", 10, 12)])
+    result, accepted = apply_forced_line_alignments(lyrics, {
+        0: [RecognizedWord("hello", 9.97, 10.5, .95)],
+    })
+    assert accepted == 1
+    assert [(word.start, word.end) for word in result.lines[0].tokens] == [(10, 10.5)]
+
+
+def test_local_start_prior_preserves_large_legitimate_global_offset_recovery():
+    lyrics = parse_lrc(
+        "[00:10.00]alpha beta\n[00:20.00]gamma delta\n"
+        "[00:30.00]epsilon zeta\n[00:40.00]omega final\n"
+    )
+    recognized = [
+        RecognizedWord(word, 40 + line_index * 10 + word_index * .5,
+                       40 + line_index * 10 + word_index * .5 + .3, .99)
+        for line_index, words in enumerate([
+            ["alpha", "beta"], ["gamma", "delta"], ["epsilon", "zeta"], ["omega", "final"],
+        ])
+        for word_index, word in enumerate(words)
+    ]
+    result, report = refine_timed_document(lyrics, recognized)
+    assert report.timing_anchor_lines == 4
+    assert report.timing_median_shift == 30
+    assert [line.start for line in result.lines] == [40, 50, 60, 70]
+    assert result.metadata["audio_refined_line_indices"] == "1,2,3,4"
+
+
+def test_refinement_provenance_replaces_stale_indices_when_no_candidate_is_accepted():
+    lyrics = parse_lrc("[00:10.00]hello world\n")
+    lyrics.metadata["audio_refined_line_indices"] = "1,2,3"
+    result, _ = refine_timed_document(lyrics, [
+        RecognizedWord("hello", 10, 10.2, .1), RecognizedWord("world", 11, 11.2, .1),
+    ])
+    assert result.metadata["audio_refined_line_indices"] == ""
+    result.metadata["forced_alignment_accepted_line_indices"] = "1,2,3"
+    forced, accepted = apply_forced_line_alignments(result, {})
+    assert accepted == 0
+    assert forced.metadata["forced_alignment_accepted_line_indices"] == ""
+
+
+def test_unmatched_line_indices_refer_to_returned_document_after_empty_rows_are_filtered():
+    lyrics = LyricsDocument([LyricLine("!!!"), LyricLine("missing lyric"), LyricLine("hello")])
+    result, report = align_document(lyrics, [RecognizedWord("hello", 2, 3, .99)])
+    assert [line.text for line in result.lines] == ["missing lyric", "hello"]
+    assert report.unmatched_line_indexes == (0,)
+
+
+def test_initial_alignment_preserves_hidden_rows_without_matching_or_timing_them():
+    hidden = LyricLine("deleted line with many words that are not sung", hidden=True)
+    lyrics = LyricsDocument([
+        hidden, LyricLine("hello"), LyricLine("old section", 100, 200, hidden=True), LyricLine("world"),
+    ])
+    result, report = align_document(lyrics, [
+        RecognizedWord("hello", 1, 1.5, .99), RecognizedWord("world", 3, 3.5, .99),
+    ])
+    assert report.coverage == 1
+    assert report.target_units == 2
+    assert result.lines[0] == hidden
+    assert result.lines[2] == lyrics.lines[2]
+    assert result.lines[1].start == 1
+    assert result.lines[3].start == 3
+    assert result.is_timed
+    assert lyrics.lines[1].start is None
+
+
+def test_refinement_warps_only_visible_lines_and_reports_indices_with_hidden_placeholders():
+    visible = parse_lrc(
+        "[00:10.00]alpha beta\n[00:20.00]gamma delta\n"
+        "[00:30.00]epsilon zeta\n[00:40.00]omega final\n"
+    )
+    lyrics = LyricsDocument([
+        LyricLine("not sung", hidden=True), visible.lines[0],
+        LyricLine("old timed part", 1, 2, [KaraokeToken("old timed part", 1, 2)], hidden=True),
+        *visible.lines[1:],
+    ], metadata=visible.metadata)
+    recognized = [
+        RecognizedWord(word, 40 + line_index * 10 + word_index * .5,
+                       40 + line_index * 10 + word_index * .5 + .3, .99)
+        for line_index, words in enumerate([
+            ["alpha", "beta"], ["gamma", "delta"], ["epsilon", "zeta"], ["omega", "final"],
+        ])
+        for word_index, word in enumerate(words)
+    ]
+    result, report = refine_timed_document(lyrics, recognized)
+    assert report.coverage == 1
+    assert result.lines[0] == lyrics.lines[0]
+    assert result.lines[2] == lyrics.lines[2]
+    assert [line.start for line in result.visible_lines] == [40, 50, 60, 70]
+    assert result.metadata["audio_refined_line_indices"] == "2,4,5,6"
+
+
+def test_unmatched_indices_account_for_preserved_hidden_rows_and_removed_punctuation():
+    lyrics = LyricsDocument([
+        LyricLine("hidden", hidden=True), LyricLine("!!!"), LyricLine("missing lyric"), LyricLine("hello"),
+    ])
+    result, report = align_document(lyrics, [RecognizedWord("hello", 2, 3, .99)])
+    assert [line.text for line in result.lines] == ["hidden", "missing lyric", "hello"]
+    assert report.unmatched_line_indexes == (1,)
+
+
+def test_large_overlap_repairs_are_marked_as_estimated_instead_of_trusted_timing():
+    result, _ = align_document(parse_plain("one two"), [
+        RecognizedWord("one", 1, 3, .99), RecognizedWord("two", 2, 4, .99),
+    ])
+    assert result.lines[0].tokens[0].confidence == .99
+    assert result.lines[0].tokens[1].start == 3
+    assert result.lines[0].tokens[1].confidence is None
+
+
+def test_new_alignment_does_not_carry_old_refinement_and_drift_claims():
+    lyrics = parse_plain("hello")
+    lyrics.metadata.update({
+        "audio_refined_line_indices": "1,2", "audio_refined_lines": "2",
+        "timeline_correction": "piecewise-audio-drift", "timeline_max_shift": "30",
+    })
+    result, _ = align_document(lyrics, [RecognizedWord("hello", 1, 2, .99)])
+    assert "audio_refined_line_indices" not in result.metadata
+    assert "audio_refined_lines" not in result.metadata
+    assert "timeline_correction" not in result.metadata
+    assert "timeline_max_shift" not in result.metadata
 
 
 def test_alignment_keeps_user_lyrics_and_builds_timeline() -> None:
