@@ -7,14 +7,38 @@ transactional: dragging paints a provisional value; only release emits a change.
 from __future__ import annotations
 
 import math
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTextLayout,
+    QTextOption,
+    QTransform,
+)
 from PySide6.QtWidgets import QScrollBar, QWidget
 
+from ..ass import (
+    AssStyle,
+    _countdown_position,
+    _estimated_display_end,
+    _inactive_display_windows,
+    _karaoke_upper_margin,
+    _line_pronunciation,
+    _pronunciation_clearance,
+    _pronunciation_source_timing,
+    document_auto_pronunciation,
+)
 from ..models import LyricLine, LyricsDocument
+from ..text import split_edge_whitespace
 
 MIN_TOKEN = 0.01
 
@@ -498,7 +522,7 @@ class TokenTimelineWidget(_ScrollableTimeline):
 
 
 class LyricPreviewWidget(QWidget):
-    """Two native karaoke rows, including character-aligned ruby readings."""
+    """Paint the ASS rows and display windows in a scaled video coordinate space."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -506,44 +530,193 @@ class LyricPreviewWidget(QWidget):
         self._current = 0
         self._position = 0.0
         self._style: dict[str, Any] = {}
+        self._ass_style = AssStyle()
         self._background = QPixmap()
-        self.setMinimumSize(200, 250)
-        self.setAccessibleName("卡拉 OK 双行字幕预览")
+        self._manual_selection = True
+        self._indices: list[int] = []
+        self._render_ends: dict[int, float] = {}
+        self._waiting: dict[int, list[tuple[float, float]]] = {}
+        self._cues: dict[int, tuple[float, float]] = {}
+        self._pronunciations: dict[int, Any] = {}
+        self._pronunciation_cache: dict[tuple, Any] = {}
+        self.setMinimumSize(200, 170)
+        self.setAccessibleName("卡拉 OK 成片字幕预览")
 
     def set_document(self, doc: LyricsDocument) -> None:
         self._document = doc
         self._current = max(0, min(self._current, len(doc.lines) - 1))
+        self._manual_selection = True
+        self._rebuild_display()
         self.update()
 
     def set_current_line(self, index: int) -> None:
         self._current = max(0, min(int(index), len(self._document.lines) - 1))
+        self._manual_selection = True
         self.update()
 
     def set_position(self, sec: float) -> None:
         self._position = max(0.0, _finite(sec))
-        timed = [
-            (i, line)
-            for i, line in enumerate(self._document.lines)
-            if line.is_timed and not line.hidden
-        ]
+        self._manual_selection = False
         active = [
-            i for i, line in timed if _finite(line.start) <= self._position < _finite(line.end)
+            index
+            for index in self._indices
+            if self._document.lines[index].is_timed
+            and _finite(self._document.lines[index].start)
+            <= self._position
+            < self._render_ends[index]
         ]
-        if active:
-            if self._current not in active:
-                self._current = active[0]
-        elif timed:
-            preceding = [i for i, line in timed if _finite(line.start) <= self._position]
-            self._current = preceding[-1] if preceding else timed[0][0]
+        if active and self._current not in active:
+            self._current = active[0]
         self.update()
 
     def set_style(self, style: dict[str, Any]) -> None:
         self._style = dict(style)
+        values = {
+            field.name: style[field.name] for field in fields(AssStyle) if field.name in style
+        }
+        for key, alias in (("highlight_color", "primary_color"), ("text_color", "secondary_color")):
+            if key not in values and alias in style:
+                values[key] = style[alias]
+        resolution = values.get("resolution", (1920, 1080))
+        if not isinstance(resolution, (tuple, list)) or len(resolution) != 2:
+            resolution = (1920, 1080)
+        values["resolution"] = tuple(
+            max(1, round(_finite(value, fallback)))
+            for value, fallback in zip(resolution, (1920, 1080))
+        )
+        resolved = AssStyle(**values)
+        if resolved != self._ass_style:
+            self._ass_style = resolved
+            self._rebuild_display()
         self.update()
+
+    def _rebuild_display(self) -> None:
+        style = self._ass_style
+        # Blank interlude markers and hidden rows never consume a KTV row in ASS.
+        self._indices = [
+            index
+            for index, line in enumerate(self._document.lines)
+            if not line.hidden and line.text.strip()
+        ]
+        timed_indices = [index for index in self._indices if self._document.lines[index].is_timed]
+        lines = [self._document.lines[index] for index in timed_indices]
+        gap = max(1.0, float(style.countdown_gap_threshold))
+        lead_in = max(0.5, float(style.countdown_lead_in))
+        ends = [
+            _estimated_display_end(line, lines[index + 1] if index + 1 < len(lines) else None, gap)
+            for index, line in enumerate(lines)
+        ]
+        for index, line in enumerate(lines):
+            if index + 2 < len(lines):
+                ends[index] = max(
+                    float(line.start), min(ends[index], float(lines[index + 2].start))
+                )
+        breaks = {}
+        preceding_end = 0.0
+        for index, line in enumerate(lines):
+            if float(line.start) - preceding_end >= gap:
+                breaks[index] = (preceding_end, float(line.start))
+            preceding_end = max(preceding_end, ends[index])
+        self._render_ends = dict(zip(timed_indices, ends))
+        self._waiting = {
+            original: _inactive_display_windows(lines, ends, breaks, index, lead_in)
+            for index, original in enumerate(timed_indices)
+        }
+        self._cues = {
+            timed_indices[index]: (max(gap_start, start - lead_in), start)
+            for index, (gap_start, start) in breaks.items()
+        }
+        generated = document_auto_pronunciation(self._document, style.auto_pronunciation)
+        cache = {}
+        self._pronunciations = {}
+        for index in self._indices:
+            line = self._document.lines[index]
+            key = (
+                line.text,
+                line.pronunciation,
+                tuple(
+                    (unit.source, unit.reading, unit.start, unit.end)
+                    for unit in line.pronunciation_units
+                ),
+                generated,
+                style.auto_english_pronunciation,
+                style.show_pronunciation,
+            )
+            if key in self._pronunciation_cache:
+                reading = self._pronunciation_cache[key]
+            else:
+                reading = (
+                    _line_pronunciation(
+                        line,
+                        auto_pronunciation=generated,
+                        auto_english_pronunciation=style.auto_english_pronunciation,
+                    )
+                    if style.show_pronunciation
+                    else None
+                )
+            cache[key] = self._pronunciations[index] = reading
+        # Keep only this revision, so repeated edits do not accumulate old lyric text.
+        self._pronunciation_cache = cache
 
     def set_background(self, path: str | Path | None) -> None:
         self._background = QPixmap(str(path)) if path else QPixmap()
         self.update()
+
+    def preview_rect(self) -> QRectF:
+        """Return the letterboxed video viewport, keeping all ASS coordinates proportional."""
+        width, height = self._ass_style.resolution
+        scale = min(self.width() / width, self.height() / height)
+        return QRectF(
+            (self.width() - width * scale) / 2,
+            (self.height() - height * scale) / 2,
+            width * scale,
+            height * scale,
+        )
+
+    def preview_rows(self) -> list[tuple[int, int]]:
+        """Return (ASS row, original document index) for active and upcoming lyrics."""
+        if self._manual_selection:
+            if self._current not in self._indices:
+                return []
+            ordinal = self._indices.index(self._current)
+            return [
+                (position % 2, self._indices[position])
+                for position in range(ordinal, min(ordinal + 2, len(self._indices)))
+            ]
+        rows = []
+        for ordinal, index in enumerate(self._indices):
+            line = self._document.lines[index]
+            active = (
+                line.is_timed and float(line.start) <= self._position < self._render_ends[index]
+            )
+            waiting = any(
+                start <= self._position < end for start, end in self._waiting.get(index, [])
+            )
+            if active or waiting:
+                rows.append((ordinal % 2, index))
+        return rows
+
+    def countdown_state(self) -> tuple[int, int, int] | None:
+        """Return the upcoming row/index and 1–3 filled notes, absent at the singing boundary."""
+        if self._manual_selection or not self._ass_style.show_countdown:
+            return None
+        for index, (start, end) in self._cues.items():
+            if end - start >= 0.03 and start <= self._position < end:
+                filled = min(3, 1 + int((self._position - start) / ((end - start) / 3)))
+                return self._indices.index(index) % 2, index, filled
+        return None
+
+    def _sung_position(self, index: int) -> float:
+        # ASS compresses token timing only when trimming an estimated instrumental gap
+        # or when the next line on the same row must replace an overlapping lyric.
+        line = self._document.lines[index]
+        end = self._render_ends.get(index, line.end)
+        if line.is_timed and end is not None and end < float(line.end) - 0.01:
+            scale = max(0.01, end - float(line.start)) / max(
+                0.01, float(line.end) - float(line.start)
+            )
+            return float(line.start) + (self._position - float(line.start)) / scale
+        return self._position
 
     def highlight_fractions(self, line_index: int | None = None) -> list[float]:
         index = self._current if line_index is None else line_index
@@ -551,115 +724,85 @@ class LyricPreviewWidget(QWidget):
             return []
         line = self._document.lines[index]
         if line.tokens:
-            return [_progress(token.start, token.end, self._position) for token in line.tokens]
+            position = self._sung_position(index)
+            return [_progress(token.start, token.end, position) for token in line.tokens]
         if line.is_timed:
-            return [_progress(_finite(line.start), _finite(line.end), self._position)]
+            # Without karaoke tags ASS paints active plain text in the sung color.
+            return [float(self._position >= float(line.start))]
         return []
-
-    def preview_rows(self) -> list[tuple[int, int]]:
-        """Return (visual row, document index), preserving hidden-line indices."""
-        visible = [i for i, line in enumerate(self._document.lines) if not line.hidden]
-        if not visible:
-            return []
-        index = visible.index(self._current) if self._current in visible else 0
-        rows = [(index % 2, visible[index])]
-        if index + 1 < len(visible):
-            rows.append(((index + 1) % 2, visible[index + 1]))
-        return rows
-
-    def _color(self, key: str, fallback: str, alias: str = "") -> QColor:
-        color = QColor(str(self._style.get(key, self._style.get(alias, fallback))))
-        return color if color.isValid() else QColor(fallback)
-
-    def _font(self, pixels: float) -> QFont:
-        font = QFont(str(self._style.get("font", "Microsoft YaHei")))
-        font.setPixelSize(max(9, round(pixels)))
-        font.setWeight(QFont.Weight.DemiBold)
-        return font
 
     def _character_progress(self, line: LyricLine, index: int) -> list[float]:
         values = [0.0] * len(line.text)
         fractions = self.highlight_fractions(index)
         if not line.tokens:
-            fraction = fractions[0] if fractions else 0
-            return [_clamp(fraction * len(line.text) - i, 0, 1) for i in range(len(line.text))]
+            return [fractions[0] if fractions else 0.0] * len(line.text)
         cursor = 0
         for token, fraction in zip(line.tokens, fractions):
             offset = line.text.find(token.text, cursor)
             if offset < 0:
                 continue
-            end = min(len(line.text), offset + len(token.text))
-            for char in range(offset, end):
-                values[char] = _clamp(fraction * (end - offset) - (char - offset), 0, 1)
-            cursor = end
+            leading, core, _trailing = split_edge_whitespace(token.text)
+            start = offset + len(leading)
+            end = min(len(line.text), start + len(core))
+            for char in range(start, end):
+                values[char] = _clamp(fraction * (end - start) - (char - start), 0, 1)
+            cursor = offset + len(token.text)
         return values
 
-    def _draw_outlined(self, painter: QPainter, path: QPainterPath, color: QColor) -> None:
-        # Paint the fill last: drawPath strokes over the fill, which can cover
-        # thin strokes of small CJK glyphs and turn an entire preview dark.
-        pen = QPen(
-            self._color("outline_color", "#101820"),
-            2.5,
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin,
-        )
-        painter.strokePath(path, pen)
+    def _color(self, key: str, fallback: str) -> QColor:
+        color = QColor(str(getattr(self._ass_style, key, fallback)))
+        return color if color.isValid() else QColor(fallback)
+
+    def _font(self, size: float) -> QFont:
+        font = QFont(self._ass_style.font)
+        # Match the ASS font measurement convention used by ass._text_width.
+        font.setPixelSize(max(1, round(size * 0.75)))
+        font.setWeight(QFont.Weight.Bold)
+        return font
+
+    def _draw_outlined(
+        self, painter: QPainter, path: QPainterPath, color: QColor, *, reading=False
+    ) -> None:
+        style = self._ass_style
+        if style.shadow:
+            shadow = QTransform().translate(style.shadow, style.shadow).map(path)
+            painter.fillPath(shadow, QColor(0, 0, 0, 128))
+        outline = min(style.outline, 2.0) if reading else style.outline
+        if outline > 0:
+            painter.strokePath(
+                path,
+                QPen(
+                    self._color("outline_color", "#111111"),
+                    outline * 2,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                ),
+            )
         painter.fillPath(path, color)
 
-    def _draw_line(
-        self, painter: QPainter, line: LyricLine, index: int, area: QRectF, align_right: bool
-    ) -> None:
-        resolution = self._style.get("resolution", (1920, 1080))
-        source_width = (
-            _finite(resolution[0], 1920) if isinstance(resolution, (list, tuple)) else 1920
-        )
-        size = _clamp(
-            _finite(self._style.get("font_size", 58), 58) * self.width() / max(1, source_width),
-            17,
-            44,
-        )
-        font = self._font(size)
+    def _draw_line(self, painter: QPainter, index: int, row: int) -> None:
+        line = self._document.lines[index]
+        style = self._ass_style
+        width, height = style.resolution
+        font = self._font(style.font_size)
         metrics = QFontMetricsF(font)
-        reading_size = max(
-            10,
-            size
-            * _finite(self._style.get("pronunciation_font_size", 26), 26)
-            / max(1, _finite(self._style.get("font_size", 58), 58)),
-        )
-        reading_font = self._font(reading_size)
-        reading_metrics = QFontMetricsF(reading_font)
         advances = [metrics.horizontalAdvance(char) for char in line.text]
-        units = []
-        if self._style.get("show_pronunciation", True):
-            units = [
-                (unit.start, min(len(line.text), unit.end), unit.reading)
-                for unit in line.pronunciation_units
-                if unit.reading and 0 <= unit.start < unit.end <= len(line.text)
-            ]
-            if not units and line.pronunciation and line.text:
-                units = [(0, len(line.text), line.pronunciation)]
-        for start, end, reading in units:
-            required = reading_metrics.horizontalAdvance(reading) + 8
-            extra = max(0.0, required - sum(advances[start:end])) / (end - start)
-            for char in range(start, end):
-                advances[char] += extra
         positions = [0.0]
         for advance in advances:
             positions.append(positions[-1] + advance)
-        width = positions[-1]
-        scale = min(1.0, area.width() / max(1, width))
-        x = area.right() - width * scale if align_right else area.left()
-        y = area.top() + 25
-        painter.save()
-        painter.translate(x, y)
-        painter.scale(scale, scale)
-        baseline = reading_metrics.height() + metrics.ascent() + 5
+        x = (
+            float(style.karaoke_margin_h)
+            if row == 0
+            else width - style.karaoke_margin_h - positions[-1]
+        )
+        margin = _karaoke_upper_margin(style) if row == 0 else style.margin_v
+        baseline = height - margin - metrics.descent()
         fractions = self._character_progress(line, index)
-        waiting = self._color("text_color", "#ffffff", "secondary_color")
-        sung = self._color("highlight_color", "#ffd54a", "primary_color")
+        waiting = self._color("text_color", "#ffffff")
+        sung = self._color("highlight_color", "#ffd54a")
         for char, text in enumerate(line.text):
-            glyph_x = positions[char] + (advances[char] - metrics.horizontalAdvance(text)) / 2
+            glyph_x = x + positions[char]
             path = QPainterPath()
             path.addText(QPointF(glyph_x, baseline), font, text)
             self._draw_outlined(painter, path, waiting)
@@ -667,75 +810,174 @@ class LyricPreviewWidget(QWidget):
                 painter.save()
                 painter.setClipRect(
                     QRectF(
-                        glyph_x - 1,
-                        baseline - metrics.ascent() - 2,
-                        (metrics.horizontalAdvance(text) + 2) * fractions[char],
-                        metrics.height() + 4,
-                    )
+                        glyph_x - style.outline,
+                        baseline - metrics.ascent() - style.outline,
+                        (advances[char] + 2 * style.outline) * fractions[char],
+                        metrics.height() + 2 * style.outline,
+                    ),
+                    Qt.ClipOperation.IntersectClip,
                 )
                 self._draw_outlined(painter, path, sung)
                 painter.restore()
-        for start, end, reading in units:
-            reading_width = reading_metrics.horizontalAdvance(reading)
-            reading_x = (positions[start] + positions[end] - reading_width) / 2
+        pronunciation = self._pronunciations.get(index)
+        if pronunciation is None:
+            return
+        reading_font = self._font(style.pronunciation_font_size)
+        reading_metrics = QFontMetricsF(reading_font)
+        reading_bottom = height - margin - style.font_size - _pronunciation_clearance(style)
+        for unit in pronunciation.units:
+            start, end = unit.start, unit.end
+            if not 0 <= start < end <= len(line.text):
+                continue
+            reading_width = reading_metrics.horizontalAdvance(unit.reading)
+            reading_x = x + (positions[start] + positions[end] - reading_width) / 2
+            reading_y = reading_bottom - reading_metrics.descent()
             path = QPainterPath()
-            path.addText(QPointF(reading_x, reading_metrics.ascent()), reading_font, reading)
-            self._draw_outlined(painter, path, self._color("pronunciation_color", "#ffffff"))
-            progress = sum(fractions[start:end]) / (end - start)
+            path.addText(QPointF(reading_x, reading_y), reading_font, unit.reading)
+            self._draw_outlined(
+                painter, path, self._color("pronunciation_color", "#ffffff"), reading=True
+            )
+            timing = _pronunciation_source_timing(unit, line)
+            progress = (
+                _progress(*timing, self._position)
+                if timing
+                else sum(fractions[start:end]) / (end - start)
+            )
             if progress:
                 painter.save()
                 painter.setClipRect(
                     QRectF(
-                        reading_x - 1,
-                        -2,
-                        (reading_width + 2) * progress,
-                        reading_metrics.height() + 4,
-                    )
+                        reading_x - style.outline,
+                        reading_y - reading_metrics.ascent() - style.outline,
+                        (reading_width + style.outline * 2) * progress,
+                        reading_metrics.height() + 2 * style.outline,
+                    ),
+                    Qt.ClipOperation.IntersectClip,
                 )
-                self._draw_outlined(painter, path, sung)
+                self._draw_outlined(painter, path, sung, reading=True)
                 painter.restore()
-        painter.restore()
-        if self._style.get("show_translation", True) and line.translation:
-            translation_font = self._font(max(11, size * 0.65))
-            painter.setFont(translation_font)
-            painter.setPen(self._color("translation_color", "#eaf4ff"))
-            translation_y = y + (baseline + metrics.descent() + 8) * scale
-            translation_rect = QRectF(
-                area.left(), translation_y, area.width(), max(20, area.bottom() - translation_y)
+
+    def _draw_translation(self, painter: QPainter) -> None:
+        style = self._ass_style
+        if not style.show_translation:
+            return
+        for ordinal, index in enumerate(self._indices):
+            line = self._document.lines[index]
+            if not line.translation:
+                continue
+            visible = self._manual_selection and index == self._current
+            if not self._manual_selection and line.is_timed:
+                end = self._render_ends[index]
+                if ordinal + 1 < len(self._indices):
+                    following = self._document.lines[self._indices[ordinal + 1]]
+                    if following.start is not None:
+                        end = min(end, following.start)
+                visible = float(line.start) <= self._position < end
+            if not visible:
+                continue
+            width, _height = style.resolution
+            font = self._font(style.translation_font_size)
+            metrics = QFontMetricsF(font)
+            top = float(style.translation_margin_v)
+            for paragraph in line.translation.splitlines():
+                utf16 = paragraph.encode("utf-16-le")
+                layout = QTextLayout(paragraph, font)
+                option = QTextOption()
+                option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+                layout.setTextOption(option)
+                layout.beginLayout()
+                while True:
+                    text_line = layout.createLine()
+                    if not text_line.isValid():
+                        break
+                    text_line.setLineWidth(max(1, width - 120))
+                    start = text_line.textStart() * 2
+                    end = start + text_line.textLength() * 2
+                    text = utf16[start:end].decode("utf-16-le").rstrip()
+                    path = QPainterPath()
+                    path.addText(
+                        QPointF(
+                            (width - metrics.horizontalAdvance(text)) / 2, top + metrics.ascent()
+                        ),
+                        font,
+                        text,
+                    )
+                    self._draw_outlined(painter, path, self._color("translation_color", "#eaf4ff"))
+                    top += text_line.height()
+                layout.endLayout()
+
+    def _draw_countdown(self, painter: QPainter) -> None:
+        state = self.countdown_state()
+        if state is None:
+            return
+        row, index, filled = state
+        style = self._ass_style
+        height = max(34, round(style.font_size * 0.72))
+        note_width = round(height * 26 / 34)
+        spacing = max(12, round(height * 0.38))
+        width = note_width * 3 + spacing * 2
+        x, y = _countdown_position(
+            self._document.lines[index], self._pronunciations.get(index), row, style, width, height
+        )
+        note = QPainterPath()
+        note.moveTo(14, 1)
+        note.lineTo(17, 1)
+        note.cubicTo(18, 5, 24, 6, 24, 13)
+        note.cubicTo(24, 16, 23, 18, 21, 20)
+        note.cubicTo(23, 12, 19, 11, 17, 11)
+        note.lineTo(17, 24)
+        note.cubicTo(17, 28, 13, 31, 8, 31)
+        note.cubicTo(3, 31, 1, 28, 3, 25)
+        note.cubicTo(5, 22, 10, 20, 14, 22)
+        note.lineTo(14, 1)
+        for index in range(3):
+            painter.save()
+            painter.translate(x - width / 2 + index * (note_width + spacing), y - height / 2)
+            painter.scale(height / 34, height / 34)
+            color = (
+                self._color("highlight_color", "#ffd54a")
+                if index < filled
+                else self._color("text_color", "#ffffff")
             )
-            alignment = Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft
-            painter.drawText(
-                translation_rect, alignment | Qt.TextFlag.TextWordWrap, line.translation
-            )
+            if index >= filled:
+                color.setAlpha(85)
+            painter.fillPath(note, color)
+            painter.restore()
 
     def paintEvent(self, event: Any) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#142438"))
+        painter.fillRect(self.rect(), QColor("#0c1522"))
+        viewport = self.preview_rect()
+        width, height = self._ass_style.resolution
+        painter.save()
+        painter.setClipRect(viewport)
+        painter.translate(viewport.topLeft())
+        painter.scale(viewport.width() / width, viewport.height() / height)
+        painter.fillRect(QRectF(0, 0, width, height), QColor("#142438"))
         if not self._background.isNull():
-            scaled = self._background.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
+            scale = max(width / self._background.width(), height / self._background.height())
+            target = QRectF(
+                (width - self._background.width() * scale) / 2,
+                (height - self._background.height() * scale) / 2,
+                self._background.width() * scale,
+                self._background.height() * scale,
             )
-            painter.drawPixmap(
-                (self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled
-            )
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-        painter.setPen(QColor("#9fb5c8"))
-        painter.setFont(self._font(11))
-        painter.drawText(QRectF(16, 10, self.width() - 32, 20), "字幕预览")
-        rows = self.preview_rows()
-        if not rows:
+            painter.drawPixmap(target, self._background, QRectF(self._background.rect()))
+            painter.fillRect(QRectF(0, 0, width, height), QColor(0, 0, 0, 100))
+        for row, index in self.preview_rows():
+            self._draw_line(painter, index, row)
+        self._draw_translation(painter)
+        self._draw_countdown(painter)
+        painter.restore()
+        if not self._indices:
             painter.setPen(QColor("#b5c5d4"))
+            font = QFont(self.font())
+            font.setPointSizeF(10)
+            painter.setFont(font)
             painter.drawText(
-                self.rect().adjusted(20, 35, -20, -20),
+                self.rect().adjusted(20, 20, -20, -20),
                 Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                 "载入歌词后，在这里预览逐字高亮、翻译和读音",
             )
-        else:
-            row_height = (self.height() - 36) / 2
-            for row, index in rows:
-                area = QRectF(22, 22 + row * row_height, self.width() - 44, row_height)
-                self._draw_line(painter, self._document.lines[index], index, area, row == 1)
         painter.end()

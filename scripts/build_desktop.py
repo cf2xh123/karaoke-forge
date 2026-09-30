@@ -27,19 +27,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COLLECT_ALL = (
     "faster_whisper", "ctranslate2", "onnxruntime", "av", "tokenizers",
     "huggingface_hub", "yt_dlp", "pykakasi", "alkana", "websocket", "certifi",
+    "demucs", "julius", "sphn", "lameenc", "einops", "safetensors",
 )
 HIDDEN_IMPORTS = (
     "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
     "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
     "karaoke_forge.model_worker", "karaoke_forge.cli", "numpy",
+    "torch", "torchaudio", "soundfile", "demucs.separate", "demucs.htdemucs",
 )
 REQUIRED_DISTRIBUTIONS = (
     "PyInstaller", "pyinstaller-hooks-contrib", "PySide6", "faster-whisper",
     "ctranslate2", "onnxruntime", "av", "tokenizers", "huggingface-hub",
     "yt-dlp", "pykakasi", "alkana", "websocket-client", "certifi",
+    "torch", "torchaudio", "demucs", "sphn", "soundfile",
 )
+PINNED_CPU_RUNTIME = {"torch": "2.8.0+cpu", "torchaudio": "2.8.0+cpu", "demucs": "4.1.0"}
 EXCLUDED_MODULES = (
-    "gradio", "gradio_client", "torch", "torchaudio", "torchvision", "demucs",
+    "gradio", "gradio_client", "torchvision",
     "PyQt5", "PyQt6", "PySide2", "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "tkinter",
     "pytest", "IPython", "jupyter", "notebook", "matplotlib", "tensorboard",
@@ -92,6 +96,10 @@ def validate_environment(ffmpeg_root: Path) -> None:
             missing.append(distribution)
     if missing:
         raise RuntimeError("Missing build dependencies: " + ", ".join(missing))
+    for name, expected in PINNED_CPU_RUNTIME.items():
+        actual = importlib.metadata.version(name)
+        if actual != expected:
+            raise RuntimeError(f"Portable CPU build requires {name}=={expected}, found {actual}")
     for name in ("bin/ffmpeg.exe", "bin/ffprobe.exe", "LICENSE", "README.txt"):
         if not (ffmpeg_root / name).is_file():
             raise FileNotFoundError(f"Private FFmpeg distribution is incomplete: {ffmpeg_root / name}")
@@ -106,6 +114,9 @@ def pyinstaller_command(root: Path, dist: Path, work: Path, ffmpeg_root: Path) -
         "--collect-data", "karaoke_forge", "--copy-metadata", "karaoke-forge",
         "--recursive-copy-metadata", "faster-whisper",
         "--recursive-copy-metadata", "PySide6",
+        "--recursive-copy-metadata", "demucs",
+        "--recursive-copy-metadata", "torchaudio",
+        "--copy-metadata", "soundfile",
         "--add-data", f"{root / 'src/karaoke_forge/desktop/theme.qss'}:karaoke_forge/desktop",
         "--add-data", f"{root / 'src/karaoke_forge/assets'}:karaoke_forge/assets",
     ]
@@ -150,7 +161,7 @@ def _download_license(url: str, destination: Path) -> None:
 
 def collect_licenses(destination: Path, cache: Path) -> list[dict]:
     destination.mkdir(parents=True, exist_ok=True)
-    excluded = {"gradio", "gradio-client", "torch", "torchaudio", "torchvision", "demucs"}
+    excluded = {"gradio", "gradio-client", "torchvision"}
     inventory = []
     for distribution in sorted(importlib.metadata.distributions(),
                                key=lambda item: item.metadata.get("Name", "").lower()):
@@ -204,10 +215,13 @@ def stage_distribution(root: Path, bundle: Path, work: Path, ffmpeg_root: Path) 
     shutil.copy2(root / "LICENSE", bundle / "LICENSE")
     source = bundle / "source"
     source.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(root / "src/karaoke_forge", source / "karaoke_forge", dirs_exist_ok=True,
+    shutil.copytree(root / "src/karaoke_forge", source / "src/karaoke_forge", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for name in ("pyproject.toml", "LICENSE"):
+    for name in ("pyproject.toml", "LICENSE", "README.md", "README_EN.md", "CHANGELOG.md"):
         shutil.copy2(root / name, source / name)
+    shutil.copytree(root / "scripts", source / "scripts", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(root / "docs", source / "docs", dirs_exist_ok=True)
     shutil.copy2(root / "docs/windows-build.md", bundle / "BUILDING.md")
     notice = """# Third-party components
 
@@ -233,9 +247,12 @@ included unchanged at _internal/ffmpeg/. Upstream build/source information:
 https://www.gyan.dev/ffmpeg/builds/ and https://github.com/GyanD/codexffmpeg
 Consult those bundled notices for FFmpeg's enabled components and license terms.
 
-Whisper models are downloaded separately on demand and are not included here.
-Gradio, PyTorch and Demucs are not part of this portable build. The source
-installation remains available for workflows requiring Demucs.
+CPU PyTorch, Torchaudio and Demucs are included for vocal/accompaniment separation.
+Their unmodified native libraries and package licenses remain in this distribution.
+Upstream sources: https://github.com/pytorch/pytorch (v2.8.0),
+https://github.com/pytorch/audio (v2.8.0), https://github.com/adefossez/demucs (v4.1.0).
+Whisper and pretrained Demucs model weights are downloaded separately on demand.
+Gradio and WebEngine are not part of this native portable build.
 """
     (bundle / "THIRD_PARTY_NOTICES.md").write_text(notice, encoding="utf-8")
     instructions = """Karaoke Forge · Windows x64 便携版
@@ -246,8 +263,9 @@ installation remains available for workflows requiring Demucs.
 
 个人设置、模型、缓存和默认输出保存在：
 %LOCALAPPDATA%\\KaraokeForge
-可在导出时选择其他输出目录。首次自动对齐需要联网下载模型。
-本包支持原声视频与已有伴奏素材；Demucs 人声分离使用源码安装入口。
+可在导出时选择其他输出目录。首次自动对齐或人声分离需要联网下载对应模型。
+本包已包含 CPU 人声分离运行库，可直接导出原声版和无人声伴奏版。
+无需安装 Python 环境；模型下载完成后可复用本地缓存。
 
 排查启动问题：查看 %LOCALAPPDATA%\\KaraokeForge\\logs\\desktop.log。
 自检命令：KaraokeForge.exe --self-test C:\\Temp\\karaoke-self-test.json

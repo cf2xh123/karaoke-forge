@@ -51,7 +51,12 @@ from ..editor_history import history_stacks, record_history, travel_history
 from ..formats import export_formats, read_lyrics
 from ..models import KaraokeToken, LyricLine, LyricsDocument, PronunciationSpan
 from ..preferences import load_preferences, save_preferences
-from ..projects import PROJECT_FILENAME, load_workspace_project, save_workspace_project
+from ..projects import (
+    PROJECT_FILENAME,
+    load_workspace_project,
+    read_workspace_lyrics,
+    save_workspace_project,
+)
 from ..web import _default_output_root, _safe_stem
 from .common import PathPicker
 from .timeline import LyricPreviewWidget, TimelineWidget, TokenTimelineWidget
@@ -487,7 +492,8 @@ class EditorPage(QWidget):
 
     @property
     def is_dirty(self) -> bool:
-        self._flush_active_cell()
+        # Status notifications must never commit or steal focus from a live
+        # delegate editor. Transfer operations explicitly flush their drafts.
         return self._dirty
 
     def _flush_active_cell(self) -> None:
@@ -523,7 +529,7 @@ class EditorPage(QWidget):
             "● 未保存修改" if dirty else "已保存" if self._document.lines else "尚未载入工程"
         )
         past, future = history_stacks(self._history)
-        self.undo_button.setEnabled(bool(past) or self._has_pending())
+        self.undo_button.setEnabled(bool(past) or self._cell_draft or self._has_pending())
         self.redo_button.setEnabled(bool(future))
         if dirty != self._dirty:
             self._dirty = dirty
@@ -709,11 +715,26 @@ class EditorPage(QWidget):
             source = Path(path)
             workspace = None
             if source.suffix.lower() == ".json":
-                candidate = json.loads(source.read_text(encoding="utf-8"))
-                if candidate.get("schema_version") == 1 and candidate.get("lyrics_project"):
+                candidate = json.loads(source.read_text(encoding="utf-8-sig"))
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("schema_version") == 1
+                    and candidate.get("lyrics_project")
+                ):
                     workspace = load_workspace_project(source)
                     source = workspace.lyrics_project
-            document = read_lyrics(source)
+            document = read_workspace_lyrics(workspace) if workspace else read_lyrics(source)
+            if workspace is None and (manifest := document.metadata.get("workspace_manifest")):
+                manifest_path = Path(manifest)
+                if not manifest_path.is_absolute():
+                    manifest_path = source.parent / manifest_path
+                try:
+                    workspace = load_workspace_project(manifest_path)
+                except (OSError, TypeError, ValueError):
+                    pass
+                else:
+                    if source.resolve() == workspace.lyrics_project.resolve():
+                        document = read_workspace_lyrics(workspace)
             audio = self.audio_picker.value()
             name = source.stem
             if workspace:
@@ -722,6 +743,8 @@ class EditorPage(QWidget):
                 name = workspace.name
             self.load_document(document, audio or None, name)
             self.source_picker.set_value(path)
+            if warning := document.metadata.get("legacy_timing_warning"):
+                self._report(warning)
 
         self._guard(load)
 
@@ -769,6 +792,7 @@ class EditorPage(QWidget):
             self.select_line(row)
 
     def undo(self) -> None:
+        self._flush_active_cell()
         if self._has_pending():
             try:
                 self._commit_pending()

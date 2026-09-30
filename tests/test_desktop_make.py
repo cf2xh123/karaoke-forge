@@ -524,7 +524,7 @@ def test_embedded_preparation_and_render_leave_controller_settings_in_place(
         lambda **_: UiJobResult("Rendered", None, [], "", None),
     )
     widget.show()
-    assert widget.tabs.count() == 4
+    assert widget.tabs.count() == 5
     assert widget.tabs.isVisible()
     assert not widget.preview.isVisible()
     assert not widget.prepare_button.isVisible()
@@ -618,3 +618,99 @@ def test_native_jobs_keep_current_media_choices_without_old_workspace_fallback(
         workspace.manifest
     )
     assert widget.controls["lyrics_file"].value() == str(source)
+
+
+@pytest.mark.parametrize("provider,key,link,source_id", [
+    ("netease", "netease_link", "https://music.163.com/song?id=12345", "12345"),
+    ("qqmusic", "qqmusic_link", "https://y.qq.com/n/ryqq/songDetail/ABC123", "ABC123"),
+    ("utaten", "utaten_link", "https://utaten.com/lyric/abc123/", "abc123"),
+])
+def test_online_link_finds_saved_project_and_requests_open_without_replacing_inputs(
+    page, tmp_path, provider, key, link, source_id,
+):
+    widget, runner = page
+    source = tmp_path / "song.json"
+    source.write_text(write_json(document()), encoding="utf-8")
+    workspace = save_workspace_project(
+        tmp_path / "outputs" / "saved-song", name="Saved song", lyrics_project=source,
+        settings={"source_refs": {provider: {"id": source_id}}},
+        recent_root=tmp_path / "outputs",
+    )
+    widget.controls["audio_file"].set_value("current-audio.wav")
+    widget.controls[key].setText(link)
+    requested = []
+    widget.workspace_requested.connect(requested.append)
+    widget._match_online_project()
+    runner.finish()
+    assert widget.open_match_button.isEnabled()
+    assert "Saved song" in widget.match_status.text()
+    assert widget.controls["audio_file"].value() == "current-audio.wav"
+    assert requested == []
+    widget.open_match_button.click()
+    assert requested == [str(workspace.manifest)]
+
+
+def test_stale_online_match_does_not_offer_the_previous_link_project(page, monkeypatch):
+    widget, runner = page
+    monkeypatch.setattr("karaoke_forge.desktop.make_page._matching_workspace_manifest", lambda *_: None)
+    widget.controls["netease_link"].setText("https://music.163.com/song?id=1")
+    widget._match_online_project()
+    widget.controls["netease_link"].setText("https://music.163.com/song?id=2")
+    runner.finish()
+    assert not widget.open_match_button.isEnabled()
+    assert widget._matched_manifest is None
+
+
+def test_rendered_edited_project_keeps_its_online_reference_for_latest_matching(page, tmp_path, monkeypatch):
+    from karaoke_forge.web import _matching_workspace_manifest
+
+    widget, runner = page
+    source = tmp_path / "song.json"
+    current = document()
+    source.write_text(write_json(current), encoding="utf-8")
+    original = save_workspace_project(
+        tmp_path / "outputs" / "prepared", name="Prepared song", lyrics_project=source,
+        settings={"source_refs": {"netease": {"id": "12345"}}},
+        recent_root=tmp_path / "outputs",
+    )
+    current.metadata["workspace_manifest"] = str(original.manifest)
+    widget.stage_editor_document(current)
+    destination = tmp_path / "outputs" / "rendered"
+
+    def render(**arguments):
+        saved = save_workspace_project(
+            destination, name="Rendered song", lyrics_project=arguments["lyrics_file"],
+            recent_root=tmp_path / "outputs",
+        )
+        return UiJobResult("Rendered", None, [str(saved.manifest)], "", str(destination))
+
+    monkeypatch.setattr("karaoke_forge.desktop.make_page.run_make_job", render)
+    widget.render_video()
+    runner.finish()
+    saved = load_workspace_project(destination / "karaoke-forge-project.json")
+    assert saved.settings["source_refs"] == {"netease": {"id": "12345"}}
+    assert _matching_workspace_manifest("https://music.163.com/song?id=12345", "", "") == str(saved.manifest)
+    widget.stage_editor_document(document())
+    assert widget._editor_source_settings == {}
+
+
+@pytest.mark.parametrize("page", [True], indirect=True)
+def test_editable_sample_preview_is_visible_and_does_not_change_project(page):
+    widget, _runner = page
+    actual = document()
+    widget.stage_editor_document(actual)
+    before = widget.get_settings()
+    tab = next(index for index in range(widget.tabs.count())
+               if widget.tabs.tabText(index) == "示例预览")
+    widget.tabs.setCurrentIndex(tab)
+    widget.show()
+    assert widget.preview.isVisible()
+    widget.sample_text.setPlainText("Long example lyric\nSecond sample")
+    widget.sample_translation.setPlainText("Example translation\nSecond translation")
+    widget.sample_row.setValue(2)
+    widget.sample_progress.setValue(50)
+    assert widget.preview._document.lines[0].text == "Long example lyric"
+    assert widget.preview._document.lines[1].translation == "Second translation"
+    assert widget.preview._position == 7
+    assert widget.get_settings() == before
+    assert widget._editor_document.to_dict() == actual.to_dict()

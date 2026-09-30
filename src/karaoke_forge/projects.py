@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -9,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .models import LyricsDocument
 
 PROJECT_FILENAME = "karaoke-forge-project.json"
 RECENT_FILENAME = ".karaoke-forge-last-project.json"
@@ -186,7 +189,7 @@ def save_workspace_project(
     manifest = root / PROJECT_FILENAME
     data = {
         "schema_version": 1,
-        "app_version": "0.16.0",
+        "app_version": "1.0.0",
         "name": name,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "lyrics_project": _relative_or_absolute(lyrics, root),
@@ -240,6 +243,70 @@ def load_workspace_project(manifest_path: str | Path) -> WorkspaceProject:
         settings=settings if isinstance(settings, dict) else {},
         updated_at=_parse_updated_at(data.get("updated_at"), manifest),
     )
+
+
+def read_workspace_lyrics(workspace: WorkspaceProject) -> LyricsDocument:
+    """Read editable lyrics on the source audio clock, including old render jobs.
+
+    Old render jobs saved their video-clock JSON under ``*.assets``. Native
+    0.16 also persisted the sync controls, so those projects can be recovered
+    without rewriting any original files. Earlier projects lack enough data to
+    infer their applied offset: keep them intact and attach an explicit warning.
+    Call this in a worker because old automatic sync may need audio fingerprinting.
+    """
+    from .formats import read_lyrics
+    from .media import detect_audio_sync, probe_media_has_audio
+
+    document = read_lyrics(workspace.lyrics_project)
+    settings = workspace.settings or {}
+    if settings.get("lyrics_timebase") == "audio":
+        return document
+    try:
+        relative = workspace.lyrics_project.relative_to(workspace.manifest.parent)
+    except ValueError:
+        return document
+    if len(relative.parts) != 2 or not relative.parts[0].endswith(".assets"):
+        return document
+
+    def uncertain(detail: str) -> LyricsDocument:
+        document.metadata["legacy_timing_warning"] = (
+            "此旧版成片工程保存的是视频时间轴，无法可靠恢复歌曲原时间："
+            f"{detail}。原文件未改动，请核对音频与时间轴后再导出。"
+        )
+        return document
+
+    if "audio_offset" not in settings or "auto_sync" not in settings:
+        return uncertain("旧版未保存完整偏移设置")
+    try:
+        applied_offset = float(settings["audio_offset"])
+        if not math.isfinite(applied_offset):
+            return uncertain("保存的偏移量无效")
+        audio, video = workspace.audio, workspace.video
+        if settings["auto_sync"] and video is not None:
+            if audio is None or not audio.is_file() or not video.is_file():
+                return uncertain("原音频或 MV 已丢失")
+            if audio.resolve() != video.resolve():
+                audio_state = probe_media_has_audio(video)
+                if audio_state is None:
+                    return uncertain("无法检测 MV 音轨")
+                if audio_state:
+                    sync = detect_audio_sync(audio, video)
+                    if not sync.reliable:
+                        return uncertain("原音频与 MV 无法可靠匹配")
+                    applied_offset += sync.offset
+        if not math.isfinite(applied_offset):
+            return uncertain("同步偏移量无效")
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        return uncertain(str(exc))
+    if applied_offset < 0 and any(
+        time == 0
+        for line in document.lines
+        for time in (line.start, *(token.start for token in line.tokens))
+    ):
+        return uncertain("负偏移已裁掉开头的部分时间，无法反推出原始位置")
+    if applied_offset:
+        document = document.shifted(-applied_offset)
+    return document
 
 
 def load_recent_workspace(recent_root: str | Path) -> WorkspaceProject | None:

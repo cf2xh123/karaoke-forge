@@ -1,9 +1,9 @@
 # Karaoke Forge
 
-> The current release is `0.16.0` (Alpha). Windows setup and later launches can now
-> provision private Python and FFmpeg runtimes. ModelScope is the recommended default
-> for anonymous direct model downloads in mainland China, with no administrator access,
-> system `PATH` changes, or proxy configuration required.
+> The current release is `1.0.0`. Windows users can extract the portable ZIP and run the
+> native workspace directly. Python, Qt, FFmpeg, and CPU vocal-separation runtimes are
+> included; recognition and separation models download on first use. Recognition models
+> default to anonymous ModelScope downloads, without administrator access or system `PATH` changes.
 
 Create word-highlighted karaoke videos from a song, its official lyrics, and an MV. Processing runs locally; media is not uploaded to a third-party service.
 
@@ -15,7 +15,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 Download the **Windows x64 portable ZIP** from
 [GitHub Releases](https://github.com/cf2xh123/karaoke-forge/releases), extract the whole
 archive, and run **`KaraokeForge.exe`**. Python, Qt, and FFmpeg are included. Recognition
-models download on demand; keep the resource folders beside the executable.
+and Demucs separation models download on demand. The CPU separation runtime is included;
+keep the resource folders beside the executable.
 
 For a source checkout, complete first-time setup and double-click **`启动桌面版.bat`**. The launcher
 checks both private FFmpeg and ffprobe executables and repairs missing or unusable media
@@ -48,13 +49,19 @@ karaoke-forge desktop
 karaoke-forge desktop /path/to/karaoke-forge-project.json
 ```
 
-Demucs is optional and is not included in the portable package or that command. For vocal
-separation or an instrumental export, use the source checkout and run
-`安装人声分离（Demucs）.bat` on Windows, or install
-`python -m pip install -e ".[separate]"` on other platforms.
+The portable package includes Demucs and its CPU runtime for vocal separation and
+instrumental exports. A source checkout still uses an optional dependency: run
+`安装人声分离（Demucs）.bat` on Windows, or install `python -m pip install -e ".[separate]"`
+on other platforms.
+
+Online links offer matching saved projects without replacing current edits automatically.
+Editable preview samples are available in Materials and Style before loading formal lyrics.
+Lyric utilities display their result, errors, and file links on the current tool page, with
+an action to continue editing in the song workspace.
 
 Use **File → Open** for existing projects and **Ctrl+S** to save the project and subtitles.
-The preview is a native layout/timing reference; final ASS/FFmpeg output is authoritative.
+The native preview shares layout, pronunciation, and long-gap rules with ASS. Font rasterization
+and video effects should still be checked in the final ASS/FFmpeg output.
 This is a Qt Widgets/QPainter/Qt Multimedia interface, without WebView or WebEngine.
 See [Windows build instructions](docs/windows-build.md) and
 [workflow design comparison](docs/workflow-design.md).
@@ -125,7 +132,7 @@ See [Windows build instructions](docs/windows-build.md) and
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.16.0` alpha. Check the generated timeline before a final render.
+Check automatically generated timing against the song before a final render.
 
 ## Install
 

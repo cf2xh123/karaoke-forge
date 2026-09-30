@@ -5,9 +5,9 @@
 [English](README_EN.md) · [更新记录](CHANGELOG.md) · [待办事项](TODO.md) · [贡献指南](CONTRIBUTING.md) ·
 [问题反馈](https://github.com/cf2xh123/karaoke-forge/issues)
 
-> 当前发布版本：`0.16.0`（Alpha）。Windows 首次安装和后续启动都能在项目内自动补齐
-> Python 与 FFmpeg；国内用户默认从 ModelScope 魔搭匿名直连下载识别模型，无需管理员
-> 权限、系统 PATH 或代理配置。
+> 当前发布版本：`1.0.0`。Windows 用户推荐下载完整便携 ZIP，解压后直接运行原生工作台。
+> 包内包含 Python、Qt、FFmpeg 和 CPU 人声分离运行库；识别与分离模型首次使用时下载。
+> 识别模型默认从 ModelScope 魔搭匿名直连获取，无需管理员权限或修改系统 PATH。
 
 ## 能做什么
 
@@ -90,7 +90,8 @@ flowchart LR
 
 Whisper 只负责找出“唱到什么位置”；最终画面仍使用你提供的歌词。对齐算法的说明见 [docs/algorithm.md](docs/algorithm.md)。
 
-推荐使用“一次上传、两阶段制作”：在“制作卡拉 OK MV”页上传 MV，或上传歌曲音频与
+原生桌面版推荐“导入 → 原位校准 → 导出”，详见下方工作台说明。兼容网页版保留
+“一次上传、两阶段制作”：在“制作卡拉 OK MV”页上传 MV，或上传歌曲音频与
 专辑图片来制作无 MV 版本，再选择 Vmoe ASS、UtaTen/QQ 音乐/网易云链接或自己的歌词；
 如果 MV 已含完整音轨，可以不再单独上传音频。先点
 “生成可校准 KTV 工程”，
@@ -113,13 +114,15 @@ Whisper 只负责找出“唱到什么位置”；最终画面仍使用你提供
   FFmpeg Essentials，不需要预装 Python、Conda 或 FFmpeg，也不会申请管理员权限或修改
   全局 PATH；
 - 生成时间轴需要 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)；
-- 可选的人声分离使用 [Demucs](https://github.com/facebookresearch/demucs)。上游项目目前只做有限维护，因此它不是默认依赖。
+- 人声分离使用 [Demucs](https://github.com/facebookresearch/demucs)。Windows 便携包已包含 CPU
+  运行库；源码安装仍将它作为可选依赖。
 
 ## 原生桌面版：在一个工作台完成一首歌
 
 Windows 用户可在 [GitHub Releases](https://github.com/cf2xh123/karaoke-forge/releases)
 下载 **Windows x64 便携 ZIP**，完整解压后双击 **`KaraokeForge.exe`**。无需安装 Python、
-Qt 或 FFmpeg；识别模型首次使用时按需下载。请保留 EXE 旁的资源目录，不要只复制 EXE。
+Qt 或 FFmpeg；识别与 Demucs 分离模型首次使用时按需下载。人声分离的 CPU 运行库已包含
+在便携包内。请保留 EXE 旁的资源目录，不要只复制 EXE。
 
 从源码运行时，双击 **`启动桌面版.bat`**。首次使用先完成 `首次安装.bat`；
 桌面启动器会检查项目私有的 FFmpeg、ffprobe 是否可运行，并按需修复它们及 PySide6、
@@ -135,9 +138,14 @@ Qt 或 FFmpeg；识别模型首次使用时按需下载。请保留 EXE 旁的�
 
 素材、字幕样式、识别与输出选项按需展开；独立歌词工具与环境设置保留辅助入口。
 
+在线来源会查找已保存的同一首歌，并提供明确的恢复入口，载入前仍检查当前修改。
+“素材与样式”内可以编辑预览样例，无需先创建正式歌词工程。歌词工具的结果、错误和
+文件入口直接显示在工具页，也可一键进入工作台继续编辑。
+
 使用“文件 → 打开工程或歌词”载入旧工程；修改后可按 `Ctrl+S` 保存当前工程和字幕文件。
 切换工程或关闭窗口时会提示未导出的修改。识别和渲染在后台线程执行，任务完成前不会关闭
-进程；可以最小化窗口继续处理。原生字幕预览用于校准与排版参考，最终 ASS/FFmpeg 成片为准。
+进程；可以最小化窗口继续处理。原生字幕预览与 ASS 共用布局、注音和长间奏规则，
+但字体栅格化与视频画面效果仍以最终 ASS/FFmpeg 成片为准。
 
 打开另一工程时恢复它自己的素材与设置；同一工程继续修改并渲染时保留当前素材与样式，
 不会重新加载磁盘中的旧设置。编辑后的歌词渲染时关闭重复时间精修，保留手动校准结果。
@@ -154,8 +162,9 @@ karaoke-forge desktop
 karaoke-forge desktop "D:\KaraokeForgeOutputs\song\karaoke-forge-project.json"
 ```
 
-便携包与以上安装命令不包含可选的 Demucs。需要人声分离或无人声伴奏时，源码版可运行
-`安装人声分离（Demucs）.bat`；其他平台可安装 `python -m pip install -e ".[separate]"`。
+便携包已包含 Demucs CPU 运行库，首次分离时按需下载模型。以上源码安装命令未包含
+Demucs；源码版需要分离人声或导出无人声伴奏时，可运行 `安装人声分离（Demucs）.bat`，
+其他平台可安装 `python -m pip install -e ".[separate]"`。
 
 桌面入口使用 Qt Widgets / QPainter / Qt Multimedia，没有使用 WebView 或 WebEngine。
 便携构建方法见 [Windows 构建说明](docs/windows-build.md)，流程调整依据见
@@ -249,10 +258,10 @@ pip install -e ".[align]"
 
 如需人声分离：
 
-Windows 推荐直接双击根目录的 **“安装人声分离（Demucs）.bat”**。脚本会让你选择 CPU
+Windows 源码版推荐直接双击根目录的 **“安装人声分离（Demucs）.bat”**。脚本会让你选择 CPU
 版（推荐，Torch 约 120 MB）或 NVIDIA 版（另需约 1.9 GB）。CPU 版在测试机器上分离一首
-218 秒歌曲约用 57 秒，通常已经够用。因此 Demucs 没有塞进“首次安装”：多数带可靠
-YRC/增强 LRC 的歌曲用不到它，而显卡运行库明显更大。
+218 秒歌曲约用 57 秒，通常已经够用。源码版的“首次安装”仍按需安装分离依赖；
+Windows 便携包则已包含 CPU 运行库，可直接使用分离和伴奏导出。
 
 也可以手动安装：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import html
 import importlib.util
@@ -27,7 +28,7 @@ from uuid import uuid4
 
 from . import __version__
 from .artwork import ArtworkError, download_public_cover
-from .ass import COUNTDOWN_NOTE_SVG_PATH, AssStyle
+from .ass import COUNTDOWN_NOTE_SVG_PATH, AssStyle, document_auto_pronunciation
 from .editor import (
     LINE_STATUS_DELETED,
     _table_rows,
@@ -101,6 +102,7 @@ from .projects import (
     list_workspace_projects,
     load_recent_workspace,
     load_workspace_project,
+    read_workspace_lyrics,
     save_workspace_project,
 )
 from .pronunciation import generate_pronunciation
@@ -1085,6 +1087,23 @@ def _prepare_lyrics(
 ) -> Path:
     source = _file_path(lyrics_file)
     if source is not None and source.is_file():
+        workspace = _workspace_for_lyrics_project(source)
+        if (
+            workspace is not None
+            and source.resolve() == workspace.lyrics_project.resolve()
+            and workspace.settings.get("lyrics_timebase") != "audio"
+            and source.parent.name.endswith(".assets")
+            and source.parent.resolve().parent == workspace.manifest.parent.resolve()
+        ):
+            document = read_workspace_lyrics(workspace)
+            if warning := document.metadata.get("legacy_timing_warning"):
+                raise ValueError(f"{warning} 请先打开编辑器核对并保存时间轴。")
+            # Only migrate the actual saved project; a separate editor snapshot
+            # may carry the same manifest but contains newer unsaved changes.
+            document.metadata["workspace_manifest"] = str(workspace.manifest)
+            target = job_dir / "workspace-source.json"
+            target.write_text(write_format(document, "json"), encoding="utf-8")
+            return target
         return source
     if pasted_lyrics and pasted_lyrics.strip():
         target = job_dir / "lyrics.txt"
@@ -1879,7 +1898,9 @@ def prepare_make_editor_job(
                     f"已按上传音频生成时间轴，匹配覆盖率 **{aligned.report.coverage:.1%}**。"
                 )
 
-        auto_pronunciation = not (utaten_pronunciation_only and utaten_info is not None)
+        auto_pronunciation = document_auto_pronunciation(
+            document, not (utaten_pronunciation_only and utaten_info is not None)
+        )
         generated_count = _materialize_auto_pronunciation(
             document,
             enabled=auto_pronunciation,
@@ -1924,6 +1945,7 @@ def prepare_make_editor_job(
             cover=cover,
             font_files=fonts,
             settings={
+                "lyrics_timebase": "audio",
                 "alignment_language": language,
                 "alignment_model": model,
                 "alignment_device": device,
@@ -2343,9 +2365,15 @@ def run_make_job(
             progress=report,
         )
         manifest_path = job_dir / PROJECT_FILENAME
-        project_document = getattr(result, "document", None) or read_lyrics(lyrics)
+        project_document = copy.deepcopy(
+            getattr(result, "source_document", None)
+            or getattr(result, "document", None)
+            or read_lyrics(lyrics)
+        )
         project_document.metadata["workspace_manifest"] = str(manifest_path)
-        project_json = result.exports.get("json") or (job_dir / f"{stem}.json")
+        # Keep the editable audio-clock document separate from the video-clock
+        # subtitle exports. Reopening a project must not apply its offset twice.
+        project_json = job_dir / f"{stem}.project.json"
         project_json.write_text(write_format(project_document, "json"), encoding="utf-8")
         workspace = save_workspace_project(
             job_dir,
@@ -2356,6 +2384,9 @@ def run_make_job(
             cover=cover,
             font_files=fonts,
             settings={
+                "lyrics_timebase": "audio",
+                "audio_offset": float(audio_offset),
+                "auto_sync": bool(auto_sync),
                 "alignment_language": language,
                 "alignment_model": model,
                 "alignment_device": device,
@@ -2384,7 +2415,7 @@ def run_make_job(
         files = [
             *(str(path) for path in result_videos.values()),
             *(str(path) for path in result.exports.values()),
-            *([] if "json" in result.exports else [str(project_json)]),
+            str(project_json),
             str(workspace.manifest),
         ]
         timing_warning = getattr(result, "timing_refinement_warning", None)
@@ -2750,7 +2781,11 @@ def load_editor_project(
         ):
             workspace = load_workspace_project(source)
             source = workspace.lyrics_project
-    document = read_lyrics(source)
+        else:
+            linked = _workspace_for_lyrics_project(source)
+            if linked is not None and source.resolve() == linked.lyrics_project.resolve():
+                workspace = linked
+    document = read_workspace_lyrics(workspace) if workspace is not None else read_lyrics(source)
     if workspace is not None:
         document.metadata["workspace_manifest"] = str(workspace.manifest)
     document.require_timed()
@@ -2764,7 +2799,12 @@ def load_editor_project(
             if workspace is not None
             else f"### ✅ 已载入 {source.name}\n"
         )
-        + f"共 {len(document.lines)} 行，可编辑后导出。",
+        + f"共 {len(document.lines)} 行，可编辑后导出。"
+        + (
+            f"\n\n⚠️ {document.metadata['legacy_timing_warning']}"
+            if document.metadata.get("legacy_timing_warning")
+            else ""
+        ),
         line_number,
         line.pronunciation or "",
         document_pronunciation_to_editor_rows(document, line),

@@ -22,6 +22,8 @@ SELF_TEST_IMPORTS = (
     "faster_whisper", "faster_whisper.vad", "ctranslate2", "onnxruntime",
     "av", "numpy", "tokenizers", "huggingface_hub", "certifi",
     "yt_dlp", "yt_dlp.extractor.neteasemusic", "websocket", "pykakasi", "alkana",
+    "torch", "torchaudio", "soundfile", "demucs.separate", "demucs.htdemucs",
+    "sphn", "julius", "lameenc", "safetensors",
     "karaoke_forge.model_worker", "karaoke_forge.desktop.app",
 )
 _stream_handles: list[io.IOBase] = []
@@ -37,6 +39,10 @@ def configure_frozen_environment() -> dict[str, Path]:
     user_root = local / "KaraokeForge"
     os.environ["KARAOKE_FORGE_ROOT"] = str(root)
     os.environ["KARAOKE_FORGE_FFMPEG_DIR"] = str(contents / "ffmpeg" / "bin")
+    # Demucs invokes ffmpeg/ffprobe by name. This affects only this process and
+    # its children; it never changes the user's or system's PATH.
+    private_media = str(contents / "ffmpeg" / "bin")
+    os.environ["PATH"] = private_media + os.pathsep + os.environ.get("PATH", "")
     defaults = {
         "KARAOKE_FORGE_SETTINGS_DIR": user_root,
         "KARAOKE_FORGE_CACHE_DIR": user_root / "cache",
@@ -86,7 +92,13 @@ def _inherited_windows_stream(standard_handle: int) -> io.TextIOWrapper | None:
 
 def ensure_standard_streams(log_directory: Path | None = None) -> None:
     for name, handle in (("stdout", -11), ("stderr", -12)):
-        if getattr(sys, name) is not None:
+        existing = getattr(sys, name)
+        if existing is not None:
+            # Redirected streams may already exist with the Windows ANSI code
+            # page. PYTHONUTF8 is ignored by PyInstaller's embedded interpreter;
+            # normalize the actual streams before any worker emits a path.
+            if getattr(sys, "frozen", False) and hasattr(existing, "reconfigure"):
+                existing.reconfigure(encoding="utf-8", errors="backslashreplace", write_through=True)
             continue
         stream = _inherited_windows_stream(handle)
         if stream is None:
@@ -121,7 +133,7 @@ def _hide_child_consoles() -> None:
 
 
 def dispatch_worker(arguments: list[str]) -> int | None:
-    """Preserve the two existing `sys.executable -m ...` model-worker protocols."""
+    """Preserve the known `sys.executable -m ...` download/separation protocols."""
     if not arguments or arguments[0] != "-m":
         return None
     if len(arguments) < 2:
@@ -135,7 +147,93 @@ def dispatch_worker(arguments: list[str]) -> int | None:
         from karaoke_forge.cli import main
 
         return main(rest)
+    if module == "demucs":
+        from demucs.separate import main
+
+        return int(main(rest) or 0)
     raise ValueError(f"Unsupported internal worker module: {module}")
+
+
+def _worker_command(*arguments: str) -> list[str]:
+    entry = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        entry.extend(("-m", "karaoke_forge.desktop.launcher"))
+    return [*entry, *arguments]
+
+
+def _check_unicode_worker_protocol(root: Path) -> dict[str, str]:
+    """Exercise a successful worker's real path protocol without downloading weights."""
+    from karaoke_forge.network import (
+        ModelDownloadSettings,
+        model_cache_directory,
+        save_model_download_settings,
+    )
+    from karaoke_forge.transcribe import PINNED_MODEL_REVISIONS
+
+    data = root / "中文缓存_🎵"
+    settings = ModelDownloadSettings(mode="offline")
+    save_model_download_settings(settings, settings_dir=data)
+    cache = model_cache_directory(settings, settings_dir=data) / "hub"
+    snapshot = (cache / "models--Systran--faster-whisper-small" / "snapshots"
+                / PINNED_MODEL_REVISIONS["small"])
+    # The Hub's offline path lookup accepts an existing snapshot directory
+    # without a cached tree. This is a protocol fixture, never a usable model.
+    snapshot.mkdir(parents=True)
+    environment = os.environ.copy()
+    environment.update({
+        "KARAOKE_FORGE_SETTINGS_DIR": str(data),
+        "KARAOKE_FORGE_CACHE_DIR": str(root / "cache"),
+        "KARAOKE_FORGE_OUTPUT_DIR": str(root / "outputs"),
+        "LOCALAPPDATA": str(root / "profile"),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "HF_HUB_OFFLINE": "1",
+    })
+    result = subprocess.run(_worker_command("-m", "karaoke_forge.model_worker", "small"),
+                            capture_output=True, text=True, encoding="utf-8", errors="strict",
+                            env=environment, timeout=45, check=True)
+    returned = Path(result.stdout.strip().splitlines()[-1]).resolve()
+    if returned != snapshot.resolve() or not returned.is_dir():
+        raise RuntimeError("The isolated worker corrupted a non-ASCII cache path")
+    return {"round_trip": "中文缓存_🎵", "worker": "successful offline snapshot path"}
+
+
+def _check_demucs_separation(root: Path) -> dict[str, object]:
+    """Run Demucs' tiny random test network through its real child-process CLI."""
+    import math
+    from array import array
+
+    directory = root / "伴奏测试_🎵"
+    directory.mkdir()
+    source = directory / "歌曲.wav"
+    frames = array("h", (int(4000 * math.sin(2 * math.pi * 220 * index / 44100))
+                         for index in range(44100)))
+    with wave.open(str(source), "wb") as output:
+        output.setparams((1, 2, 44100, 0, "NONE", "not compressed"))
+        output.writeframes(frames.tobytes())
+    environment = os.environ.copy()
+    environment.update({"HF_HUB_OFFLINE": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+                        "TORCH_HOME": str(root / "torch"), "OMP_NUM_THREADS": "2"})
+    from karaoke_forge.runtime import find_runtime_executable
+
+    ffmpeg = find_runtime_executable("ffmpeg")
+    if ffmpeg:
+        environment["PATH"] = str(Path(ffmpeg).parent) + os.pathsep + environment.get("PATH", "")
+    result = subprocess.run(
+        _worker_command("-m", "demucs", "-n", "demucs_unittest", "-d", "cpu", "--shifts", "0",
+                        "--segment", "1", "--overlap", "0", "--two-stems", "vocals",
+                        "-o", str(directory / "out"), str(source)),
+        capture_output=True, text=True, encoding="utf-8", errors="strict", env=environment,
+        timeout=90, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Demucs child failed: {(result.stderr or result.stdout)[-2000:]}")
+    stems = directory / "out" / "demucs_unittest" / source.stem
+    for name in ("vocals.wav", "no_vocals.wav"):
+        with wave.open(str(stems / name), "rb") as audio:
+            if audio.getnframes() != 44100 or audio.getnchannels() != 2:
+                raise RuntimeError(f"Demucs produced an invalid test stem: {name}")
+    return {"device": "cpu", "samples": 44100, "stems": 2, "pretrained_weights": False}
 
 
 def run_self_test(report_path: Path) -> bool:
@@ -259,16 +357,22 @@ def run_self_test(report_path: Path) -> bool:
 
         check("private-media-tools", media_tools)
         check("whisper-audio-and-vad", audio_backend)
+        def cpu_audio():
+            import soundfile
+            import torch
+            import torchaudio
 
-    def child_protocol():
-        result = subprocess.run([sys.executable, "-m", "karaoke_forge.model_worker", "--help"],
-                                capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=30, check=True)
-        if not result.stdout.strip():
-            raise RuntimeError("The isolated worker stdout pipe is unavailable")
-        return "model worker launches and returns UTF-8 stdout"
+            samples, rate = soundfile.read(str(audio))
+            tensor = torch.from_numpy(samples).to(dtype=torch.float32)
+            resampled = torchaudio.functional.resample(tensor, rate, 8000)
+            if resampled.numel() != 1600 or not torch.isfinite(resampled).all():
+                raise RuntimeError("CPU Torch/Torchaudio processing failed")
+            return {"torch": torch.__version__, "torchaudio": torchaudio.__version__,
+                    "device": str(resampled.device), "samples": resampled.numel()}
 
-    check("isolated-worker-protocol", child_protocol)
+        check("cpu-torch-audio", cpu_audio)
+        check("isolated-worker-unicode-protocol", lambda: _check_unicode_worker_protocol(root))
+        check("demucs-cpu-separation", lambda: _check_demucs_separation(root))
     report["ok"] = all(item["ok"] for item in checks.values())
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -32,7 +32,12 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..formats import read_lyrics
-from ..projects import PROJECT_FILENAME, list_workspace_projects, load_workspace_project
+from ..projects import (
+    PROJECT_FILENAME,
+    list_workspace_projects,
+    load_workspace_project,
+    read_workspace_lyrics,
+)
 from ..web import UiJobResult, _default_output_root
 from .common import JobRunner
 from .editor_page import EditorPage
@@ -184,7 +189,9 @@ class MainWindow(QMainWindow):
         self.runner.failed.connect(lambda text: QMessageBox.warning(self, "任务未完成", text))
         self.make.prepared.connect(self._prepared)
         self.make.rendered.connect(self._result)
-        self.tools.completed.connect(self._result)
+        self.make.workspace_requested.connect(self.open_project)
+        self.tools.completed.connect(self._tool_result)
+        self.tools.open_requested.connect(self.open_project)
         self.workspace.open_requested.connect(self.open_project_dialog)
         self.workspace.changed.connect(self.setWindowModified)
         self.setWindowTitle(self.windowTitle() + "[*]")
@@ -270,7 +277,7 @@ class MainWindow(QMainWindow):
             self,
             "打开工程或时间轴歌词",
             "",
-            "工程与歌词 (*.json *.lrc *.yrc *.srt *.vtt *.ass);;所有文件 (*)",
+            "工程与歌词 (*.json *.txt *.lrc *.elrc *.yrc *.srt *.vtt *.ass);;所有文件 (*)",
         )
         if path:
             self.open_project(path)
@@ -283,7 +290,7 @@ class MainWindow(QMainWindow):
             source = Path(path)
             is_workspace = source.name == PROJECT_FILENAME
             if source.suffix.lower() == ".json" and not is_workspace:
-                payload = json.loads(source.read_text(encoding="utf-8"))
+                payload = json.loads(source.read_text(encoding="utf-8-sig"))
                 is_workspace = (
                     isinstance(payload, dict)
                     and payload.get("schema_version") == 1
@@ -291,10 +298,23 @@ class MainWindow(QMainWindow):
                 )
             if is_workspace:
                 workspace = load_workspace_project(source)
-                document = read_lyrics(workspace.lyrics_project)
+                document = read_workspace_lyrics(workspace)
                 document.metadata["workspace_manifest"] = str(workspace.manifest)
                 return workspace, document
-            return None, read_lyrics(source)
+            document = read_lyrics(source)
+            manifest = document.metadata.get("workspace_manifest")
+            if manifest:
+                try:
+                    manifest = Path(manifest)
+                    if not manifest.is_absolute():
+                        manifest = source.parent / manifest
+                    workspace = load_workspace_project(manifest)
+                except (OSError, TypeError, ValueError):
+                    pass
+                else:
+                    if source.resolve() == workspace.lyrics_project.resolve():
+                        return workspace, read_workspace_lyrics(workspace)
+            return None, document
 
         def finish(result):
             workspace, document = result
@@ -314,6 +334,11 @@ class MainWindow(QMainWindow):
 
     def _result(self, result) -> None:
         self.workspace.show_result(result)
+
+    def _tool_result(self, result) -> None:
+        # Utilities own their result view, so completing a conversion does not
+        # hide its outcome or replace the current song's output files.
+        self.statusBar().showMessage(self.tools.result_status.toPlainText())
 
     def closeEvent(self, event) -> None:
         if self.runner.is_busy:

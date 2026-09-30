@@ -1098,6 +1098,15 @@ def separate_audio_stems(
         progress(f"正在用 Demucs {model} 分离人声（{target}）")
         progress("首次使用该模型会联网下载；下载完成后会保存在本机，后续无需重复下载")
     process_environment = os.environ.copy()
+    # Demucs invokes media tools by name even when our own pipeline uses their
+    # absolute paths. Restrict the additional PATH entry to its child process.
+    ffmpeg_executable = find_runtime_executable("ffmpeg")
+    if ffmpeg_executable:
+        process_environment["PATH"] = (
+            str(Path(ffmpeg_executable).parent) + os.pathsep + process_environment.get("PATH", "")
+        )
+    process_environment["PYTHONUTF8"] = "1"
+    process_environment["PYTHONIOENCODING"] = "utf-8"
     cache_root = process_environment.get("KARAOKE_FORGE_CACHE_DIR") or process_environment.get(
         "GRADIO_TEMP_DIR"
     )

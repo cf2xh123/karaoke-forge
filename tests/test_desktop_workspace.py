@@ -17,7 +17,8 @@ import karaoke_forge.desktop  # prepare Windows ICU before Qt
 # isort: split
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
 from karaoke_forge.desktop.app import MainWindow
 from karaoke_forge.desktop.workspace import save_workspace_revision
@@ -193,6 +194,72 @@ def test_linked_lyric_json_restores_its_audio_without_a_false_dirty_state(window
     assert window.editor.name_edit.text() == "Linked project"
     assert window.editor.preview._style["font_size"] == 72
     assert not window.workspace.is_dirty
+
+
+def test_opening_legacy_linked_json_recovers_source_clock(window, tmp_path):
+    root = tmp_path / "old-render"
+    assets = root / "Song.assets"
+    assets.mkdir(parents=True)
+    source = document().shifted(2)
+    source.metadata["workspace_manifest"] = str(root / PROJECT_FILENAME)
+    lyrics = assets / "Song.json"
+    lyrics.write_text(write_json(source), encoding="utf-8")
+    saved = save_workspace_project(
+        root,
+        name="Song",
+        lyrics_project=lyrics,
+        settings={"audio_offset": 2, "auto_sync": False},
+        recent_root=tmp_path / "recent",
+    )
+    window.open_project(str(saved.lyrics_project))
+    window.runner.finish()
+    assert window.editor.current_document().lines == document().lines
+    assert window.make.get_settings()["audio_offset"] == 2
+
+
+def test_save_as_retains_source_identity_and_current_controls(window, tmp_path):
+    source = document()
+    lyrics = tmp_path / "song.json"
+    lyrics.write_text(write_json(source), encoding="utf-8")
+    previous = save_workspace_project(
+        tmp_path / "original",
+        name="Song",
+        lyrics_project=lyrics,
+        settings={"source_refs": {"netease": "123456"}, "font_size": 38},
+        recent_root=tmp_path / "recent",
+    )
+    source.metadata["workspace_manifest"] = str(previous.manifest)
+    settings = window.make.get_settings()
+    settings["font_size"] = 80
+    _document, saved, _files = save_workspace_revision(source, settings, str(tmp_path / "copy"))
+    assert saved.settings["source_refs"] == {"netease": "123456"}
+    assert saved.settings["font_size"] == 80
+    assert saved.settings["lyrics_timebase"] == "audio"
+
+
+@pytest.mark.parametrize("bad_value", ["not a number", float("nan"), None])
+def test_corrupt_project_settings_preserve_current_materials_lyrics_and_history(
+    window, tmp_path, bad_value
+):
+    window._prepared(preparation())
+    window.make.controls["audio_file"].set_value("previous.wav")
+    window.make.controls["output_name"].setText("Previous song")
+    window.editor.nudge("start", 0.1)
+    before = window.editor.current_document().to_dict()
+    settings = window.make.get_settings()
+    history = window.editor._history.copy()
+    incoming = document()
+    lyrics = tmp_path / "incoming.json"
+    lyrics.write_text(write_json(incoming), encoding="utf-8")
+    saved = save_workspace_project(
+        tmp_path / "broken", name="Broken song", lyrics_project=lyrics,
+        settings={"font_size": bad_value}, recent_root=tmp_path / "recent",
+    )
+    with pytest.raises(ValueError, match="当前工程未更改"):
+        window.workspace.load_project(incoming, saved, str(saved.manifest))
+    assert window.make.get_settings() == settings
+    assert window.editor.current_document().to_dict() == before
+    assert window.editor._history == history
 
 
 def test_export_uses_pending_manual_edits_and_current_assets_without_handoff(
@@ -404,3 +471,162 @@ def test_workspace_inputs_fit_the_supported_minimum_window(window, qt_app):
     assert window.workspace.input_bar.minimumSizeHint().width() <= window.workspace.width()
     assert window.workspace.render_button.isVisible()
     assert window.editor.preview.isVisible()
+
+
+def test_typing_in_integrated_workspace_retains_focus_and_saves_complete_draft(
+    window, qt_app, monkeypatch, tmp_path
+):
+    window._prepared(preparation())
+    window.show()
+    qt_app.processEvents()
+    item = window.editor.lines_table.item(0, 5)
+    window.editor.lines_table.editItem(item)
+    qt_app.processEvents()
+    cell = QApplication.focusWidget()
+    assert isinstance(cell, QLineEdit)
+    cell.selectAll()
+    QTest.keyClicks(cell, "first complete sentence")
+    assert QApplication.focusWidget() is cell
+    assert cell.text() == "first complete sentence"
+    assert window.workspace.is_dirty
+    assert QApplication.focusWidget() is cell
+    # The save boundary, rather than a status query, commits the active editor.
+    destination = tmp_path / "live-save"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
+    assert window.workspace.save_project()
+    window.runner.finish()
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    assert read_lyrics(saved.lyrics_project).lines[0].translation == "first complete sentence"
+    assert not window.workspace.is_dirty
+
+
+def test_failed_empty_project_import_preserves_current_lyrics_materials_and_history(window):
+    window._prepared(preparation())
+    window.make.controls["audio_file"].set_value("current.wav")
+    window.make.controls["output_name"].setText("Current song")
+    window.editor.lines_table.item(0, 5).setText("keep this correction")
+    window.editor.apply_pending()
+    before_settings = window.make.get_settings()
+    before_document = window.editor.current_document().to_dict()
+    with pytest.raises(ValueError, match="当前工程未更改"):
+        window.workspace.load_project(LyricsDocument([]), None, "empty.json")
+    assert window.make.get_settings() == before_settings
+    assert window.editor.current_document().to_dict() == before_document
+    window.editor.undo()
+    assert window.editor.current_document().lines[0].translation == "spring"
+
+
+def test_saving_project_replaces_stale_result_files_and_directory(window, monkeypatch, tmp_path):
+    window._prepared(preparation())
+    earlier = tmp_path / "earlier"
+    window.workspace.show_result(
+        UiJobResult("Earlier", None, [str(earlier / "old.ass")], "", str(earlier))
+    )
+    destination = tmp_path / "saved-now"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
+    assert window.workspace.save_project()
+    window.runner.finish()
+    assert Path(window.outputs.directory) == destination
+    names = [window.outputs.files.item(i).text() for i in range(window.outputs.files.count())]
+    assert "old.ass" not in names
+    assert PROJECT_FILENAME in names
+    assert len(names) == 7
+    assert window.workspace.results_button.isChecked()
+
+
+@pytest.mark.parametrize("valid_source", [True, False])
+def test_tools_show_success_or_failure_on_the_current_page_without_overwriting_song_results(
+    window, qt_app, tmp_path, valid_source
+):
+    source = tmp_path / "convert.json"
+    if valid_source:
+        source.write_text(write_json(document()), encoding="utf-8")
+    window.outputs.directory = "unchanged-song-output"
+    window.show()
+    window.navigation.setCurrentRow(1)
+    window.tools.convert_source.set_value(str(source))
+    window.tools.convert()
+    window.runner.finish()
+    qt_app.processEvents()
+    assert window.navigation.currentRow() == 1
+    assert window.tools.result_status.isVisible()
+    assert "开始：" not in window.statusBar().currentMessage()
+    assert window.tools.result_files.count() == (1 if valid_source else 0)
+    assert window.tools.continue_button.isEnabled() == valid_source
+    assert window.outputs.directory == "unchanged-song-output"
+    if valid_source:
+        requests = []
+        window.tools.open_requested.disconnect()
+        window.tools.open_requested.connect(requests.append)
+        window.tools.continue_button.click()
+        assert len(requests) == 1 and Path(requests[0]).is_file()
+
+
+def test_corrupt_model_settings_do_not_block_startup_and_can_be_repaired(
+    qt_app, monkeypatch, tmp_path
+):
+    from karaoke_forge.network import load_model_download_settings, settings_file_path
+
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path / "broken-settings"))
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr("karaoke_forge.desktop.app.JobRunner", DeferredRunner)
+    config = settings_file_path()
+    config.parent.mkdir(parents=True)
+    config.write_text("{broken", encoding="utf-8")
+    widget = MainWindow()
+    try:
+        assert "设置文件无效" in widget.environment.report.toPlainText()
+        assert widget.environment.mode.currentData() == "modelscope"
+        widget.environment.mode.setCurrentIndex(widget.environment.mode.findData("offline"))
+        widget.environment.save()
+        widget.runner.finish()
+        assert load_model_download_settings().mode == "offline"
+        assert "设置文件无效" not in widget.environment.report.toPlainText()
+    finally:
+        widget.close()
+        widget.deleteLater()
+        qt_app.processEvents()
+
+
+def test_tools_continue_prefers_lossless_json_and_retains_word_timing_and_annotations(
+    window, tmp_path
+):
+    from karaoke_forge.formats import export_formats
+
+    source = document()
+    source.lines[0].tokens = [KaraokeToken("春", 0.15, 0.85, confidence=0.92)]
+    source.metadata["auto_pronunciation"] = "false"
+    outputs = export_formats(
+        source, tmp_path / "tool-output", "song", ["lrc", "elrc", "srt", "vtt", "ass", "json"]
+    )
+    window.tools._show_result(
+        UiJobResult(
+            "Completed",
+            None,
+            [str(path) for path in outputs.values()],
+            "",
+            str(tmp_path / "tool-output"),
+        )
+    )
+    assert window.tools._result_project == str(outputs["json"])
+    window.tools.continue_button.click()
+    window.runner.finish()
+    restored = window.editor.current_document()
+    assert restored.to_dict() == source.to_dict()
+    assert restored.lines[0].translation == "spring"
+    assert restored.lines[0].tokens[0].confidence == 0.92
+    assert restored.lines[0].pronunciation_units == source.lines[0].pronunciation_units
+    assert restored.lines[1].hidden
+
+
+def test_tools_continue_prioritizes_complete_manifest_regardless_of_result_order(window):
+    for paths in (
+        ["song.lrc", "song.enhanced.lrc", "song.json", PROJECT_FILENAME],
+        [PROJECT_FILENAME, "song.json", "song.lrc"],
+    ):
+        window.tools._show_result(UiJobResult("Completed", None, paths, "", ""))
+        assert window.tools._result_project == PROJECT_FILENAME
+    window.tools._show_result(
+        UiJobResult("Completed", None, ["song.lrc", "song.enhanced.lrc"], "", "")
+    )
+    assert window.tools._result_project == "song.enhanced.lrc"
