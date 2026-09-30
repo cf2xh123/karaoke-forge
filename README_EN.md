@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `0.15.2` (Alpha). Windows setup and later launches can now
+> The current release is `0.16.0` (Alpha). Windows setup and later launches can now
 > provision private Python and FFmpeg runtimes. ModelScope is the recommended default
 > for anonymous direct model downloads in mainland China, with no administrator access,
 > system `PATH` changes, or proxy configuration required.
@@ -9,6 +9,55 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 
 [中文说明](README.md) · [Changelog](CHANGELOG.md) · [Roadmap](TODO.md) · [Contributing](CONTRIBUTING.md) ·
 [Issues](https://github.com/cf2xh123/karaoke-forge/issues)
+
+## Native desktop: one workspace for the whole song
+
+Download the **Windows x64 portable ZIP** from
+[GitHub Releases](https://github.com/cf2xh123/karaoke-forge/releases), extract the whole
+archive, and run **`KaraokeForge.exe`**. Python, Qt, and FFmpeg are included. Recognition
+models download on demand; keep the resource folders beside the executable.
+
+For a source checkout, complete first-time setup and double-click **`启动桌面版.bat`**. The launcher
+checks both private FFmpeg and ffprobe executables and repairs missing or unusable media
+tools and desktop, alignment, online-source, and pronunciation dependencies as needed.
+It opens a native window without a browser or local HTTP server. The existing web launcher remains available; both UIs
+use the same project JSON and processing pipeline.
+
+Import a song/MV and lyrics, prepare timing, then edit, preview and export in the same
+workspace. There is no manual handoff between a production page and a lyric editor.
+Material, style and advanced options expand when needed, while task results stay inline.
+Lyric tools and environment settings remain available as auxiliary functions.
+Native tables and draggable timelines support
+word timings, pronunciation, hiding/inserting/deleting lines, ripple editing, 100-step
+undo/redo, audio playback with looping and speed control, and subtitle export. Processing
+runs in background threads. Unsaved lyric edits are checked before replacing a project
+or closing; running jobs finish before the app exits.
+
+Opening another project restores its own assets and settings. Rendering the current
+project reads the latest lyrics and preserves current materials and style choices instead
+of restoring stale settings from disk. Rendering edited lyrics disables repeat
+timing refinement to preserve manual adjustments.
+
+NetEase authentication runs only after clicking **Connect account** or **Log in again**;
+it may open a dedicated Edge window for the official login page. Starting the desktop
+workspace does not trigger login, and credentials are not saved in lyric projects or outputs.
+
+```sh
+python -m pip install -e ".[desktop,align,netease,pronunciation]"
+karaoke-forge desktop
+karaoke-forge desktop /path/to/karaoke-forge-project.json
+```
+
+Demucs is optional and is not included in the portable package or that command. For vocal
+separation or an instrumental export, use the source checkout and run
+`安装人声分离（Demucs）.bat` on Windows, or install
+`python -m pip install -e ".[separate]"` on other platforms.
+
+Use **File → Open** for existing projects and **Ctrl+S** to save the project and subtitles.
+The preview is a native layout/timing reference; final ASS/FFmpeg output is authoritative.
+This is a Qt Widgets/QPainter/Qt Multimedia interface, without WebView or WebEngine.
+See [Windows build instructions](docs/windows-build.md) and
+[workflow design comparison](docs/workflow-design.md).
 
 ## Features
 
@@ -39,8 +88,8 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   even when the account exposes Hi-Res or master formats, avoiding unnecessarily large
   downloads while retaining authenticated song access;
 - Render translation at an adjustable distance from the top and paired original lyrics in a split KTV layout;
-- Clear lyrics across long instrumental gaps, then cue the next line with a distinct arrow
-  capsule above its actual KTV row, whose three lamps light in sequence before singing resumes;
+- Clear lyrics across long instrumental gaps, then display three vector music notes above the
+  upcoming KTV row: one more note stays lit each second, and all disappear when singing starts;
 - Add Japanese furigana and optional English katakana above the lyric row; disabling
   English readings also filters readings already stored in older/imported projects;
 - Bundle uploaded TTF/OTF/TTC fonts with a project without installing them system-wide;
@@ -52,7 +101,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
 - Edit source text, translation, timing, visibility, and line/word pronunciation in the web UI;
 - Hide recoverable lines or permanently delete unwanted credits, speech, and duplicate lyrics;
 - Preserve timed blank LRC interludes, and explicitly delete a cleared lyric row with project-wide
-  undo that restores and focuses the actual edited row even after playback has moved elsewhere;
+  undo/redo for up to 100 steps, restoring the actual edited row even after playback moves elsewhere;
 - Keep interior word timings fixed when nudging a line edge; when an extended line reaches
   the next lyric, optional Ripple mode shifts only the affected following lines while preserving
   their durations and token spacing;
@@ -60,6 +109,10 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   song once: click any lyric block to edit its individual tokens below; the red playhead follows
   playback in real time and can also seek continuously; drag either bright block edge to change
   only that line boundary while preserving interior word timing and optional Ripple behavior;
+- Snap global line edges to nearby boundaries with a guide and time hint; hold `Alt` to bypass
+  snapping, retain zoom and viewport after edits, and toggle playback following as needed;
+- Remember each user's editing mode, Ripple, snapping, following, zoom, playback rate, and lyric,
+  pronunciation, translation, and countdown styling across projects and web launches;
 - Keep timed blank interlude rows out of KTV row alternation, cap same-row events before the next
   same-row lyric begins, and prevent libass collision avoidance from creating a third or duplicate row;
 - Choose `off`, `auto`, or `force` word-timing refinement consistently in web and CLI flows;
@@ -72,7 +125,7 @@ Create word-highlighted karaoke videos from a song, its official lyrics, and an 
   direct ModelScope access and retain official Hugging Face, a local proxy, an explicitly
   selected third-party mirror, and a predownloaded offline cache as alternatives.
 
-This is a usable `0.15.2` alpha. Check the generated timeline before a final render.
+This is a usable `0.16.0` alpha. Check the generated timeline before a final render.
 
 ## Install
 
@@ -199,6 +252,25 @@ to load its per-token editor below, drag its left or right edge to change the li
 retiming interior words, or drag the real-time red playhead for continuous seeking while the KTV
 preview follows the active line and word timing. Ripple remains available for a dragged line end,
 and global shift can still correct a whole-song offset in one operation.
+
+Enable **Snap** to align a dragged line edge with a nearby boundary; a guide shows the exact
+target time, and holding `Alt` temporarily disables snapping. Grabbing an edge keeps its current
+position, interior word markers stay aligned during the drag, and the new boundary remains in
+place while saving. Save, undo, and redo preserve the global timeline's zoom and viewport.
+Manual scrolling or zooming pauses automatic following; **Follow playback** or **Return to
+playhead** resumes it. The KTV preview responds immediately, and rapid line selections settle
+on the most recently selected line.
+
+Separate **Undo** and **Redo** buttons retain up to 100 project-wide steps; one drag counts as
+one step. Pending text, timing, and pronunciation drafts can also be undone and restored with
+redo. Outside text fields, use `Ctrl + Z` to undo and `Ctrl + Y` or `Ctrl + Shift + Z` to redo.
+A new edit after undo clears the previous redo branch. Line changes save pending drafts first.
+
+Preferences are stored per user and reused across projects: editing mode, Ripple, snapping,
+following, zoom for each editor area, playback rate, font, lyric/reading/translation sizes and
+colors, subtitle positions, English readings, and countdown settings. Enlarging the KTV preview
+also expands reading clearance and row height. The style preview demonstrates the cumulative
+three-note cue, and exported notes use vector shapes independent of the selected lyric font.
 
 The NetEase tab accepts single-song links and uses anonymous public access by default.
 When authenticated audio is needed on Windows, click **One-click NetEase login**. The

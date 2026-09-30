@@ -130,8 +130,7 @@ def apply_editor_rows(
         source_is_blank = source is not None and not source.text.strip()
         if not text and not source_is_blank:
             raise ValueError(
-                f"第 {position} 行原文已清空；请选中该行并点击“🗑 删除”，"
-                "或撤销文字修改。"
+                f"第 {position} 行原文已清空；请选中该行并点击“🗑 删除”，或撤销文字修改。"
             )
         translation = str(padded[5] or "").strip() or None
         start = _optional_float(padded[2])
@@ -345,23 +344,24 @@ def apply_token_timing(
     if not isinstance(entries, list) or not entries:
         raise ValueError("当前行没有可保存的逐词时间。")
 
+    source_tokens = line.tokens
+    if not source_tokens and line.start is not None and line.end is not None:
+        source_tokens = _synthetic_tokens(line.text, line.start, line.end)
+
+    def same_timing(submitted: KaraokeToken, source: KaraokeToken) -> bool:
+        return (
+            abs(submitted.start - source.start) <= 1e-9 and abs(submitted.end - source.end) <= 1e-9
+        )
+
     source_pairs = [
-        (left, right)
-        for left, right in pairwise(line.tokens)
-        if right.start < left.end - 0.001
+        (left, right) for left, right in pairwise(source_tokens) if right.start < left.end - 0.001
     ]
+
     def was_existing_overlap(left: KaraokeToken, right: KaraokeToken) -> bool:
         """Allow an untouched source overlap while still rejecting a new one."""
 
-        def same(submitted: KaraokeToken, source: KaraokeToken) -> bool:
-            return (
-                submitted.text == source.text
-                and abs(submitted.start - source.start) <= 1e-9
-                and abs(submitted.end - source.end) <= 1e-9
-            )
-
         return any(
-            same(left, source_left) and same(right, source_right)
+            same_timing(left, source_left) and same_timing(right, source_right)
             for source_left, source_right in source_pairs
         )
 
@@ -390,11 +390,17 @@ def apply_token_timing(
 
     old_text = line.text
     new_text = "".join(token.text for token in tokens)
+    timing_unchanged = len(tokens) == len(source_tokens) and all(
+        same_timing(token, source) for token, source in zip(tokens, source_tokens)
+    )
     _remap_pronunciation_after_text_edit(line, old_text, new_text)
     line.tokens = tokens
     line.text = new_text
-    line.start = tokens[0].start
-    line.end = tokens[-1].end
+    # Text edits must keep intentional leading/trailing space in the line's
+    # interval. Only a changed token timeline should redefine its boundaries.
+    if not timing_unchanged:
+        line.start = tokens[0].start
+        line.end = tokens[-1].end
     result.metadata["word_timing"] = "manual"
     return result
 
@@ -588,8 +594,9 @@ def _line_ruby_html(
         start, end = int(start_value), int(end_value)
         parts.append(html.escape(line.text[cursor:start]))
         parts.append(
-            '<ruby style="color:inherit !important;text-decoration-color:inherit !important;">'
-            '<span style="color:inherit !important;">'
+            '<ruby class="kf-lyric-ruby" '
+            'style="color:inherit !important;text-decoration-color:inherit !important;">'
+            '<span class="kf-lyric-source" style="color:inherit !important;">'
             f"{html.escape(line.text[start:end])}</span>"
             '<rt style="color:inherit !important;opacity:.88;">'
             f"{html.escape(str(reading))}</rt></ruby>"
@@ -701,6 +708,27 @@ def editor_global_timeline_html(
     duration = max(1.0, lyric_end + 1.0, probed_media_duration)
     playback_duration = probed_media_duration if probed_media_duration > 0 else duration
     minimum_width = max(1400, min(12000, round(duration * 14)))
+    preview_lines = [
+        {
+            "number": index,
+            "start": line.start,
+            "end": line.end,
+            "translation": line.translation or "",
+            "ruby": _line_ruby_html(
+                line,
+                auto_pronunciation=_metadata_boolean(document, "auto_pronunciation", default=True),
+                auto_english_pronunciation=_metadata_boolean(
+                    document, "auto_english_pronunciation", default=True
+                ),
+            ),
+            "tokens": [
+                {"text": token.text, "start": token.start, "end": token.end}
+                for token in line.tokens or _synthetic_tokens(line.text, line.start, line.end)
+            ],
+        }
+        for index, line in timed
+    ]
+    preview_data = html.escape(json.dumps(preview_lines, ensure_ascii=False), quote=True)
     blocks: list[str] = []
     edges: list[str] = []
     for index, line in timed:
@@ -714,7 +742,9 @@ def editor_global_timeline_html(
             f'data-start="{token.start:.9f}" data-end="{token.end:.9f}" '
             f'style="left:{max(0.0, (token.start - line.start) / max(0.01, line.end - line.start) * 100):.4f}%;'
             f'width:{max(0.5, (token.end - token.start) / max(0.01, line.end - line.start) * 100):.4f}%"></i>'
-            for token_index, token in enumerate(line.tokens)
+            for token_index, token in enumerate(
+                line.tokens or _synthetic_tokens(line.text, line.start, line.end)
+            )
         )
         selected = " is-selected" if index == int(line_number) else ""
         blocks.append(
@@ -724,7 +754,7 @@ def editor_global_timeline_html(
             f'data-end="{line.end:.6f}" data-text="{html.escape(line.text, quote=True)}" '
             f'style="left:{left:.6f}%;width:{width:.6f}%;" '
             f'title="第 {index} 行 · {line.start:.2f}s–{line.end:.2f}s · 点击跳转并逐字微调">'
-            f'<span>{index}. {html.escape(line.text)}</span>{token_marks}</button>'
+            f"<span>{index}. {html.escape(line.text)}</span>{token_marks}</button>"
         )
         lane = (index - 1) % 3
         edge_common = (
@@ -759,6 +789,8 @@ def editor_global_timeline_html(
     )
     return (
         '<div class="kf-global-timeline" '
+        f'data-project-key="{html.escape(str(document.metadata.get("workspace_manifest") or document.metadata.get("ti") or timed[0][1].text), quote=True)}" '
+        f'data-preview-lines="{preview_data}" '
         f'data-duration="{duration:.6f}" data-media-duration="{playback_duration:.6f}" '
         f'data-line-count="{len(document.lines)}">'
         '<div class="kf-global-toolbar"><div><b>全曲时间轴：</b>'
@@ -766,6 +798,9 @@ def editor_global_timeline_html(
         "红线会跟随播放，也可在全曲拖动。"
         "总览中的开始/结束秒仍可批量修改。"
         '</div><div class="kf-global-actions">'
+        '<button type="button" class="kf-global-snap" aria-pressed="true">吸附：开</button>'
+        '<button type="button" class="kf-global-follow" aria-pressed="true">跟随播放：开</button>'
+        '<button type="button" class="kf-global-return">回到播放头</button>'
         '<button type="button" class="kf-global-zoom-out">− 缩小</button>'
         '<button type="button" class="kf-global-zoom-fit">适应全曲</button>'
         '<button type="button" class="kf-global-zoom-in">＋ 放大</button>'
@@ -774,10 +809,12 @@ def editor_global_timeline_html(
         f'data-base-width="{minimum_width}" style="min-width:{minimum_width}px">'
         f'<div class="kf-global-ruler">{ticks}</div>'
         '<div class="kf-global-track">'
+        '<div class="kf-global-snap-guide" hidden><span></span></div>'
         '<div class="kf-global-playhead" role="slider" aria-label="全曲播放位置" '
         f'aria-valuemin="0" aria-valuemax="{duration:.3f}" aria-valuenow="0" '
         'tabindex="0" style="left:0%"></div>'
-        f"{''.join(blocks)}{''.join(edges)}</div></div></div></div>"
+        f"{''.join(blocks)}{''.join(edges)}</div></div></div>"
+        '<div class="kf-global-feedback" role="status" aria-live="polite"></div></div>'
     )
 
 
@@ -868,7 +905,7 @@ def editor_preview_html(document: LyricsDocument, line_number: int) -> str:
         f'data-line-start="{line.start or 0.0:.3f}" '
         f'data-line-end="{line.end or 0.01:.3f}" '
         f'data-line-number="{line_number}" data-line-count="{len(document.lines)}" '
-        'style="--kf-preview-font-size:28px">'
+        'style="font-size:var(--kf-preview-font-size,28px)">'
         '<div class="kf-editor-preview-info">'
         f"第 {line_number} 行 · {state} · 当前句黄色 / 下一句白色</div>"
         f"{translation}"

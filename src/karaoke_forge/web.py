@@ -27,7 +27,7 @@ from uuid import uuid4
 
 from . import __version__
 from .artwork import ArtworkError, download_public_cover
-from .ass import AssStyle
+from .ass import COUNTDOWN_NOTE_SVG_PATH, AssStyle
 from .editor import (
     LINE_STATUS_DELETED,
     _table_rows,
@@ -45,6 +45,8 @@ from .editor import (
     shift_editor_timeline,
     token_timing_to_json,
 )
+from .editor_history import record_history as _editor_record_history
+from .editor_history import travel_history
 from .formats import (
     attach_reference_translation,
     export_formats,
@@ -92,6 +94,7 @@ from .pipeline import (
     resolve_align_options,
     should_refine_timing,
 )
+from .preferences import load_preferences, save_preferences
 from .projects import (
     PROJECT_FILENAME,
     WorkspaceProject,
@@ -217,2689 +220,9 @@ _ALIGNMENT_MODEL_INFO = (
     "任一步骤不可用时都会安全回退；首次使用新模型时下载可能较久。"
 )
 
-WEB_CSS = """
-:root {
-  --kf-ink: #162033;
-  --kf-muted: #697386;
-  --kf-paper: #f7f3ea;
-  --kf-card: rgba(255, 255, 255, 0.92);
-  --kf-line: #e3ded2;
-  --kf-orange: #ffad1f;
-  --kf-orange-dark: #d87800;
-  --kf-teal: #0b6671;
-  --kf-teal-soft: #dceff0;
-}
+WEB_CSS = (Path(__file__).parent / "assets" / "workspace.css").read_text(encoding="utf-8")
 
-.gradio-container {
-  background:
-    radial-gradient(circle at 8% 3%, rgba(255, 173, 31, 0.16), transparent 22rem),
-    radial-gradient(circle at 92% 10%, rgba(11, 102, 113, 0.12), transparent 26rem),
-    var(--kf-paper) !important;
-  color: var(--kf-ink) !important;
-  min-height: 100vh;
-}
-
-.kf-shell {
-  max-width: 1240px;
-  margin: 0 auto;
-}
-
-.kf-hero {
-  position: relative;
-  overflow: hidden;
-  padding: 34px 38px;
-  border-radius: 30px;
-  background: var(--kf-ink);
-  color: #fff;
-  box-shadow: 0 22px 60px rgba(22, 32, 51, 0.18);
-  margin: 10px 0 22px;
-}
-
-.kf-hero::after {
-  content: "";
-  position: absolute;
-  right: -45px;
-  top: -62px;
-  width: 230px;
-  height: 230px;
-  border-radius: 50%;
-  border: 42px solid rgba(255, 173, 31, 0.88);
-  box-shadow: 0 0 0 18px rgba(255, 255, 255, 0.08);
-}
-
-.kf-kicker {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  color: #ffd27a;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: .18em;
-  text-transform: uppercase;
-  margin-bottom: 10px;
-}
-
-.kf-version {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 2px 9px;
-  border: 1px solid rgba(255, 210, 122, .42);
-  border-radius: 999px;
-  background: rgba(255, 210, 122, .12);
-  color: #ffe6ad;
-  font-size: 11px;
-  letter-spacing: .04em;
-  line-height: 1;
-}
-
-.kf-title {
-  font-size: clamp(28px, 4vw, 52px);
-  line-height: 1.05;
-  font-weight: 900;
-  letter-spacing: -.04em;
-  margin: 0;
-  max-width: 760px;
-}
-
-.kf-subtitle {
-  color: rgba(255,255,255,.72);
-  font-size: 16px;
-  margin: 14px 0 0;
-  max-width: 690px;
-}
-
-.kf-steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 22px;
-}
-
-.kf-step {
-  padding: 8px 12px;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 999px;
-  color: rgba(255,255,255,.82);
-  font-size: 13px;
-  background: rgba(255,255,255,.06);
-}
-
-.kf-step b {
-  color: #ffd27a;
-  margin-right: 5px;
-}
-
-.kf-card {
-  background: var(--kf-card) !important;
-  border: 1px solid var(--kf-line) !important;
-  border-radius: 22px !important;
-  box-shadow: 0 8px 30px rgba(22, 32, 51, .06) !important;
-  padding: 18px !important;
-}
-
-.kf-card h2, .kf-card h3 {
-  color: var(--kf-ink);
-  letter-spacing: -.02em;
-}
-
-.kf-resume-card {
-  max-width: 1240px;
-  margin: 0 auto 22px !important;
-  border-color: rgba(11, 102, 113, .34) !important;
-  background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(220,239,240,.88)) !important;
-  box-shadow: 0 18px 44px rgba(11, 102, 113, .14) !important;
-}
-
-.kf-section-label {
-  color: var(--kf-teal);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  margin-bottom: 3px;
-}
-
-.kf-tip {
-  border-left: 4px solid var(--kf-orange);
-  background: #fff8e9;
-  padding: 12px 14px;
-  border-radius: 4px 12px 12px 4px;
-  color: #6f5525;
-  font-size: 13px;
-}
-
-.kf-primary button {
-  min-height: 52px !important;
-  border: 0 !important;
-  border-radius: 14px !important;
-  color: #172033 !important;
-  font-size: 16px !important;
-  font-weight: 850 !important;
-  background: linear-gradient(135deg, #ffc44f, #ff9e12) !important;
-  box-shadow: 0 10px 24px rgba(216, 120, 0, .22) !important;
-}
-
-.kf-primary button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 13px 28px rgba(216, 120, 0, .28) !important;
-}
-
-.kf-status {
-  border-radius: 16px;
-  min-height: 54px;
-}
-
-.kf-subtitle-preview {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(10,18,30,.08), rgba(5,10,18,.5)),
-    radial-gradient(circle at 72% 32%, rgba(255,190,92,.55), transparent 18%),
-    linear-gradient(135deg, #537f91 0%, #28495d 42%, #101d2b 100%);
-  box-shadow: inset 0 0 70px rgba(0,0,0,.32);
-}
-
-.kf-preview-background {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.kf-preview-vignette {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse at 50% 40%, transparent 28%, rgba(0,0,0,.42) 100%),
-    linear-gradient(155deg, transparent 45%, rgba(255,255,255,.08) 46%, transparent 48%);
-}
-
-.kf-preview-badge {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  padding: 5px 9px;
-  border-radius: 999px;
-  color: rgba(255,255,255,.8);
-  background: rgba(5,10,18,.38);
-  border: 1px solid rgba(255,255,255,.16);
-  font-size: 11px;
-}
-
-.kf-token-editor {
-  padding: 14px;
-  border: 1px solid #cfd8e6;
-  border-radius: 16px;
-  background: #eef3f9;
-  color: #172238;
-}
-
-.kf-token-help {
-  color: #42526b;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.kf-token-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.kf-token-actions {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.kf-token-actions button {
-  padding: 5px 9px;
-  border: 1px solid #b9c5d6;
-  border-radius: 8px;
-  background: #fff;
-  color: #26364e;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.kf-token-actions button:hover {
-  border-color: #d87800;
-  color: #a65d00;
-}
-
-.kf-token-scroll {
-  overflow-x: auto;
-  padding: 2px 2px 9px;
-  cursor: grab;
-  touch-action: pan-y;
-}
-
-.kf-token-scroll.is-panning {
-  cursor: grabbing;
-  user-select: none;
-}
-
-.kf-token-canvas {
-  position: relative;
-  width: 100%;
-}
-
-.kf-token-ruler {
-  display: flex;
-  justify-content: space-between;
-  color: #65758c;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  padding: 0 2px 5px;
-}
-
-.kf-token-track {
-  position: relative;
-  height: 102px;
-  border-radius: 12px;
-  background:
-    repeating-linear-gradient(
-      90deg,
-      rgba(255,255,255,.08) 0,
-      rgba(255,255,255,.08) 1px,
-      transparent 1px,
-      transparent 5%
-    ),
-    #17243b;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
-}
-
-.kf-token-block {
-  position: absolute;
-  top: 20px;
-  height: 62px;
-  overflow: hidden;
-  padding: 7px 4px;
-  border: 1px solid #7dd3fc;
-  border-radius: 8px;
-  background: linear-gradient(180deg, #155e75, #164e63);
-  color: #fff;
-  cursor: pointer;
-  z-index: 2;
-  box-sizing: border-box;
-}
-
-.kf-token-block:hover,
-.kf-token-block:focus-visible,
-.kf-token-block.is-playing {
-  background: linear-gradient(180deg, #0e7490, #155e75);
-  outline: 2px solid #fbbf24;
-  outline-offset: -2px;
-}
-
-.kf-token-time {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.kf-token-text {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  padding: 1px 3px;
-  border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.42);
-  border-radius: 3px;
-  outline: 0;
-  background: rgba(3, 25, 39, .2);
-  color: #fff;
-  text-align: center;
-  font-size: 14px;
-  font-weight: 800;
-}
-
-.kf-token-text:focus {
-  border-bottom-color: #fbbf24;
-  background: rgba(3, 25, 39, .58);
-}
-
-.kf-token-text::placeholder {
-  color: #fecaca;
-  opacity: .9;
-}
-
-.kf-token-block.is-empty {
-  border-color: #fca5a5;
-  background: linear-gradient(180deg, #7f1d1d, #641b1b);
-}
-
-.kf-token-time {
-  margin-top: 4px;
-  color: #bae6fd;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.kf-token-boundary {
-  position: absolute;
-  inset: 0;
-  z-index: 4;
-  width: 100%;
-  height: 102px;
-  margin: 0;
-  appearance: none;
-  pointer-events: none;
-  background: transparent;
-}
-
-.kf-token-boundary::-webkit-slider-runnable-track {
-  height: 100%;
-  background: transparent;
-}
-
-.kf-token-boundary::-webkit-slider-thumb {
-  width: 7px;
-  height: 102px;
-  margin-top: 0;
-  appearance: none;
-  pointer-events: auto;
-  cursor: ew-resize;
-  border: 0;
-  border-radius: 4px;
-  background: rgba(251, 191, 36, .86);
-  box-shadow: 0 0 0 1px rgba(17,24,39,.35);
-}
-
-.kf-token-boundary::-moz-range-track {
-  height: 100%;
-  background: transparent;
-}
-
-.kf-token-boundary::-moz-range-thumb {
-  width: 7px;
-  height: 102px;
-  pointer-events: auto;
-  cursor: ew-resize;
-  border: 0;
-  border-radius: 4px;
-  background: rgba(251, 191, 36, .86);
-}
-
-.kf-token-playhead {
-  position: absolute;
-  top: -8px;
-  bottom: -8px;
-  z-index: 7;
-  width: 11px;
-  pointer-events: auto;
-  cursor: ew-resize;
-  touch-action: none;
-  background: transparent;
-  transform: translateX(-5px);
-}
-
-.kf-token-playhead::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 4px;
-  width: 3px;
-  background: #fb3b3b;
-  box-shadow: 0 0 0 1px rgba(255,255,255,.65), 0 0 8px rgba(251,59,59,.75);
-}
-
-.kf-token-playhead::after {
-  content: "";
-  position: absolute;
-  top: -1px;
-  left: -1px;
-  width: 0;
-  height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 8px solid #fb3b3b;
-}
-
-.kf-token-playtime {
-  color: #d12626;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-#kf-token-json {
-  display: none !important;
-}
-
-#kf-line-context-action,
-#kf-line-context-apply,
-#kf-global-line-request,
-#kf-global-select-line,
-#kf-global-edge-request,
-#kf-global-edge-apply {
-  display: none !important;
-}
-
-#kf-line-context-menu,
-#kf-token-context-menu {
-  position: fixed;
-  z-index: 4000;
-  display: none;
-  min-width: 210px;
-  padding: 6px;
-  border: 1px solid #cfd8e6;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 16px 42px rgba(22, 32, 51, .28);
-}
-
-#kf-line-context-menu.is-open,
-#kf-token-context-menu.is-open {
-  display: grid;
-  gap: 3px;
-}
-
-#kf-line-context-menu button,
-#kf-token-context-menu button {
-  width: 100%;
-  padding: 9px 11px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: #26364e;
-  text-align: left;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-#kf-line-context-menu button:hover,
-#kf-token-context-menu button:hover {
-  background: #edf3f8;
-}
-
-#kf-line-context-menu button[data-action="delete"],
-#kf-token-context-menu button[data-action="delete"] {
-  color: #c62828;
-}
-
-#editor-workspace {
-  position: relative;
-  display: flex !important;
-  flex-direction: column;
-  gap: 8px;
-  width: 100% !important;
-  min-width: 0 !important;
-  max-width: none !important;
-  padding: 8px 0;
-}
-
-#editor-main-grid {
-  align-items: stretch;
-  min-height: 0;
-  overflow: visible;
-  flex-wrap: nowrap;
-}
-
-#editor-topbar {
-  position: sticky;
-  top: 4px;
-  z-index: 50;
-  flex: 0 0 auto;
-  min-width: 0;
-  align-items: center;
-  flex-wrap: nowrap;
-  padding: 8px;
-  border: 1px solid var(--kf-line);
-  border-radius: 14px;
-  background: rgba(247, 243, 234, .98);
-  box-shadow: 0 6px 18px rgba(22, 32, 51, .1);
-}
-
-#editor-topbar > * {
-  min-width: 0;
-}
-
-#editor-overview-toggle,
-#editor-exit-workspace {
-  flex: 0 0 auto !important;
-}
-
-#editor-zoom-help {
-  flex: 0 1 auto !important;
-  color: var(--kf-muted);
-  font-size: 12px;
-}
-
-#editor-status {
-  flex: 1 1 auto !important;
-  max-height: 48px;
-  overflow: auto;
-  font-size: 12px;
-}
-
-#editor-status h3,
-#editor-status p {
-  margin: 0;
-  font-size: 13px;
-}
-
-#editor-timing-panel,
-#editor-side-panel {
-  height: auto;
-  min-height: 0;
-  overflow: visible;
-}
-
-#editor-timing-card,
-#editor-side-card {
-  display: flex !important;
-  flex-direction: column;
-  gap: 6px;
-  height: auto;
-  min-height: 0;
-  overflow: visible;
-  padding: 10px !important;
-}
-
-#editor-preview {
-  flex: 0 0 auto;
-  min-width: 0;
-  min-height: 220px;
-  overflow: hidden;
-}
-
-#editor-preview.kf-sticky-preview {
-  position: relative !important;
-  top: auto;
-  z-index: 1;
-  height: auto;
-  padding: 0;
-  box-shadow: none;
-  backdrop-filter: none;
-}
-
-.kf-editor-preview-stage {
-  position: relative;
-  width: 100%;
-  min-height: 220px;
-  overflow: hidden;
-  border-radius: 16px;
-  background: linear-gradient(150deg, #142038, #263b58);
-  color: #fff;
-  font-size: var(--kf-preview-font-size, 28px);
-  line-height: 1.3;
-}
-
-.kf-editor-preview-info {
-  position: absolute;
-  top: 8px;
-  left: 14px;
-  color: #ffd27a;
-  font-size: 12px;
-}
-
-.kf-editor-preview-translation {
-  position: absolute;
-  top: 29px;
-  left: 8%;
-  right: 8%;
-  overflow: hidden;
-  color: #d9efff;
-  font-size: calc(var(--kf-preview-font-size, 28px) * .58);
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.kf-editor-preview-row {
-  position: absolute;
-  overflow: hidden;
-  padding-top: .72em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.kf-editor-preview-row ruby {
-  ruby-position: over;
-  ruby-align: center;
-}
-
-.kf-editor-preview-row rt {
-  font-size: .5em;
-  line-height: 1;
-}
-
-.kf-editor-preview-upper {
-  top: 66px;
-  left: 7%;
-  right: 16%;
-  text-align: left;
-}
-
-.kf-editor-preview-lower {
-  right: 7%;
-  bottom: 20px;
-  left: 16%;
-  text-align: right;
-}
-
-#editor-line-controls {
-  flex: 0 0 auto;
-  min-width: 0;
-  padding: 4px;
-  border-radius: 14px;
-  background: #f3f6fa;
-}
-
-#editor-line-controls h3 {
-  margin: 0;
-  font-size: 15px;
-}
-
-#editor-audio-panel {
-  flex: 0 0 auto;
-  min-width: 0;
-  min-height: 0;
-  overflow: visible;
-}
-
-#editor-line-audio {
-  min-height: 0 !important;
-}
-
-#editor-timing-status {
-  max-height: 34px;
-  overflow: auto;
-  font-size: 12px;
-}
-
-#editor-timing-status p {
-  margin: 0;
-}
-
-#editor-token-timeline {
-  flex: 0 0 auto;
-  min-width: 0;
-  min-height: 0;
-  overflow: visible;
-}
-
-#editor-timing-actions {
-  flex: 0 0 auto;
-  min-width: 0;
-  flex-wrap: nowrap;
-}
-
-#editor-timing-actions button {
-  min-width: 0;
-  padding-inline: 8px;
-}
-
-#editor-pronunciation-panel {
-  flex: 0 0 auto;
-  display: flex !important;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: visible;
-  padding: 6px;
-  border-radius: 14px;
-  background: #f3f6fa;
-}
-
-#editor-pronunciation-units {
-  flex: 0 0 auto;
-  min-height: 0;
-  overflow: visible;
-}
-
-#editor-lines table,
-#editor-lines input,
-#editor-lines textarea {
-  font-size: var(--kf-overview-font-size, 13px) !important;
-}
-
-#editor-overview-panel {
-  position: fixed;
-  top: 12px;
-  bottom: 12px;
-  left: 12px;
-  z-index: 2001;
-  width: min(760px, calc(100vw - 24px)) !important;
-  min-width: 0 !important;
-  max-width: 760px !important;
-  overflow-y: auto;
-  padding: 8px;
-  border: 1px solid rgba(216, 222, 232, .9);
-  border-radius: 20px;
-  background: #f7f3ea;
-  box-shadow: 0 24px 70px rgba(22, 32, 51, .32);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(calc(-100% - 32px));
-  transition: transform .2s ease, opacity .2s ease;
-  backdrop-filter: none;
-}
-
-#editor-overview-panel.is-open {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateX(0);
-}
-
-#kf-editor-drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 2000;
-  display: none;
-  background: rgba(15, 23, 42, .2);
-  backdrop-filter: none;
-}
-
-#kf-editor-drawer-backdrop.is-open {
-  display: block;
-}
-
-#editor-overview-toggle button {
-  border-color: #d87800 !important;
-  background: #fff8e8 !important;
-  color: #9a5700 !important;
-  font-weight: 800 !important;
-}
-
-#editor-overview-close button {
-  min-width: 110px;
-}
-
-.kf-sticky-preview {
-  position: sticky !important;
-  top: 8px;
-  z-index: 20;
-  padding: 6px;
-  border-radius: 18px;
-  background: rgba(247, 243, 234, .96);
-  box-shadow: 0 10px 26px rgba(22, 32, 51, .16);
-  backdrop-filter: blur(8px);
-}
-
-.kf-footer {
-  color: var(--kf-muted);
-  text-align: center;
-  padding: 22px 0 8px;
-  font-size: 12px;
-}
-
-#editor-mode-bar {
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border: 1px solid rgba(15, 23, 42, .08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, .78);
-}
-#editor-global-mode-panel { min-width: 0; }
-#editor-global-audio { position: sticky; top: 8px; z-index: 19; }
-#editor-token-tuning-panel {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid rgba(15, 23, 42, .1);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, .62);
-}
-#editor-token-tuning-panel h3 { margin-top: 0; }
-.kf-global-timeline {
-  --kf-global-zoom: 1;
-  overflow: hidden;
-  border: 1px solid rgba(15, 23, 42, .12);
-  border-radius: 16px;
-  background: #0f172a;
-  color: #e2e8f0;
-}
-.kf-global-toolbar {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 12px;
-  background: rgba(30, 41, 59, .96);
-  font-size: 13px;
-}
-.kf-global-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.kf-global-actions button {
-  border: 1px solid rgba(226, 232, 240, .2);
-  border-radius: 8px;
-  background: #334155;
-  color: #f8fafc;
-  padding: 4px 9px;
-  cursor: pointer;
-}
-.kf-global-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
-.kf-global-canvas {
-  position: relative;
-  width: calc(var(--kf-global-zoom) * 100%);
-  transition: width .12s ease;
-}
-.kf-global-ruler {
-  position: relative;
-  height: 30px;
-  border-bottom: 1px solid rgba(148, 163, 184, .25);
-  background: #111827;
-}
-.kf-global-tick {
-  position: absolute;
-  bottom: 4px;
-  transform: translateX(-50%);
-  color: #94a3b8;
-  font-size: 11px;
-}
-.kf-global-track {
-  position: relative;
-  height: 164px;
-  cursor: crosshair;
-  background:
-    linear-gradient(to bottom, transparent 33%, rgba(148,163,184,.09) 33%, rgba(148,163,184,.09) 34%, transparent 34%, transparent 66%, rgba(148,163,184,.09) 66%, rgba(148,163,184,.09) 67%, transparent 67%),
-    repeating-linear-gradient(to right, rgba(148,163,184,.06) 0 1px, transparent 1px 5%);
-}
-.kf-global-line-block {
-  position: absolute;
-  height: 42px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.22);
-  border-radius: 8px;
-  background: #2563eb;
-  color: white;
-  cursor: pointer;
-  text-align: left;
-  padding: 5px 7px;
-  font-size: 12px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.kf-global-line-block.lane-0 { top: 8px; }
-.kf-global-line-block.lane-1 { top: 59px; background: #7c3aed; }
-.kf-global-line-block.lane-2 { top: 110px; background: #0f766e; }
-.kf-global-line-block:hover,
-.kf-global-line-block.is-selected {
-  outline: 3px solid #facc15;
-  outline-offset: 1px;
-  z-index: 4;
-}
-.kf-global-line-block.is-playing { filter: brightness(1.3); }
-.kf-global-line-edge {
-  position: absolute;
-  z-index: 9;
-  width: 12px;
-  height: 42px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  cursor: ew-resize;
-  touch-action: none;
-}
-.kf-global-line-edge.lane-0 { top: 8px; }
-.kf-global-line-edge.lane-1 { top: 59px; }
-.kf-global-line-edge.lane-2 { top: 110px; }
-.kf-global-line-edge.is-start { transform: translateX(-100%); }
-.kf-global-line-edge.is-start.is-flipped { transform: none; }
-.kf-global-line-edge.is-end.is-flipped { transform: translateX(-100%); }
-.kf-global-line-edge::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  width: 2px;
-  border-radius: 999px;
-  background: rgba(255, 244, 138, .92);
-  box-shadow: 0 0 0 1px rgba(17,24,39,.5), 0 0 7px rgba(250,204,21,.8);
-}
-.kf-global-line-edge.is-start::after { right: 0; }
-.kf-global-line-edge.is-end::after { left: 0; }
-.kf-global-line-edge.is-start.is-flipped::after { left: 0; right: auto; }
-.kf-global-line-edge.is-end.is-flipped::after { left: auto; right: 0; }
-.kf-global-line-edge:hover::after,
-.kf-global-line-edge:focus-visible::after,
-.kf-global-line-edge.is-dragging::after {
-  width: 4px;
-  background: #fef08a;
-  box-shadow: 0 0 0 1px #111827, 0 0 12px rgba(250,204,21,.95);
-}
-.kf-global-timeline[data-edge-saving="true"] .kf-global-line-edge {
-  cursor: wait;
-  opacity: .55;
-}
-.kf-editor-preview-stage.is-global-gap .kf-editor-preview-translation,
-.kf-editor-preview-stage.is-global-gap .kf-editor-preview-row {
-  opacity: 0;
-}
-.kf-global-token {
-  position: absolute;
-  left: 0;
-  bottom: 1px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255,255,255,.78);
-  pointer-events: none;
-}
-.kf-global-playhead {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  z-index: 8;
-  background: #ef4444;
-  box-shadow: 0 0 0 1px rgba(255,255,255,.55), 0 0 12px rgba(239,68,68,.85);
-  cursor: ew-resize;
-  pointer-events: auto;
-}
-.kf-global-playhead::before {
-  content: "";
-  position: absolute;
-  top: -4px;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 6px solid transparent;
-  border-top-color: #ef4444;
-}
-
-@media (max-width: 720px) {
-  .kf-hero { padding: 26px 22px; border-radius: 22px; }
-  .kf-hero::after { opacity: .32; right: -105px; }
-  .kf-card { padding: 12px !important; border-radius: 17px !important; }
-}
-"""
-
-TOKEN_TIMELINE_JS = r"""
-() => {
-  if (window.__karaokeForgeTokenTimelineInstalled) {
-    return [];
-  }
-  window.__karaokeForgeTokenTimelineInstalled = true;
-
-  const setTokenJson = (payload) => {
-    const input = document.querySelector("#kf-token-json textarea, #kf-token-json input");
-    if (!input) return;
-    const prototype = input instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (setter) setter.call(input, JSON.stringify(payload));
-    else input.value = JSON.stringify(payload);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  };
-
-  const setHiddenInput = (selector, value) => {
-    const input = document.querySelector(`${selector} textarea, ${selector} input`);
-    if (!input) return false;
-    const prototype = input instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (setter) setter.call(input, value);
-    else input.value = value;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    return true;
-  };
-
-  const timelineHandles = (timeline) =>
-    Array.from(timeline.querySelectorAll(".kf-token-boundary"))
-      .sort((left, right) =>
-        Number(left.dataset.boundaryIndex) - Number(right.dataset.boundaryIndex)
-      );
-
-  const boundarySnapshot = (timeline) =>
-    timelineHandles(timeline).map((handle) => Number(handle.value));
-
-  const refreshTimeline = (timeline) => {
-    const clipStart = Number(timeline.dataset.clipStart);
-    const clipEnd = Number(timeline.dataset.clipEnd);
-    const duration = Math.max(0.01, clipEnd - clipStart);
-    const handles = timelineHandles(timeline);
-    const blocks = Array.from(timeline.querySelectorAll(".kf-token-block"))
-      .sort((left, right) =>
-        Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex)
-      );
-    const payload = blocks.map((block) => {
-      const tokenIndex = Number(block.dataset.tokenIndex);
-      const startHandle = handles.find((handle) =>
-        Number(handle.dataset.tokenIndex) === tokenIndex &&
-        handle.dataset.edge === "start"
-      );
-      const endHandle = handles.find((handle) =>
-        Number(handle.dataset.tokenIndex) === tokenIndex &&
-        handle.dataset.edge === "end"
-      );
-      const start = Number(startHandle?.value ?? block.dataset.start);
-      const end = Number(endHandle?.value ?? block.dataset.end);
-      block.style.left = `${((start - clipStart) / duration) * 100}%`;
-      block.style.width = `${Math.max(0.35, ((end - start) / duration) * 100)}%`;
-      block.dataset.start = String(start);
-      block.dataset.end = String(end);
-      const textInput = block.querySelector(".kf-token-text");
-      const tokenText = textInput?.value ?? block.dataset.token ?? "";
-      block.dataset.token = tokenText;
-      block.classList.toggle("is-empty", tokenText.length === 0);
-      const time = block.querySelector(".kf-token-time");
-      if (time) time.textContent = `${start.toFixed(2)}–${end.toFixed(2)}s`;
-      return {
-        text: tokenText,
-        start: Number(start.toFixed(3)),
-        end: Number(end.toFixed(3)),
-      };
-    }).filter((entry) => entry.text.length > 0);
-    setTokenJson(payload);
-  };
-
-  const restoreSnapshot = (timeline, snapshot) => {
-    const handles = timelineHandles(timeline);
-    if (!Array.isArray(snapshot) || snapshot.length !== handles.length) return;
-    handles.forEach((handle, index) => {
-      handle.value = String(snapshot[index]);
-    });
-    refreshTimeline(timeline);
-  };
-
-  const elementIsVisible = (element) => Boolean(
-    element && (
-      element.offsetParent !== null ||
-      Number(element.getClientRects?.().length || 0) > 0
-    )
-  );
-
-  const visibleElement = (selector) =>
-    Array.from(document.querySelectorAll(selector)).find(elementIsVisible);
-
-  const displayedEditorLine = () => {
-    const input = document.querySelector("#editor-current-line input");
-    return Number(input?.value);
-  };
-
-  const workspaceLinesMatch = (timeline, preview) => {
-    const timelineLine = Number(timeline?.dataset.lineNumber);
-    const previewLine = Number(preview?.dataset.lineNumber);
-    const currentLine = displayedEditorLine();
-    const timelineStart = Number(timeline?.dataset.lineStart);
-    const timelineEnd = Number(timeline?.dataset.lineEnd);
-    const previewStart = Number(preview?.dataset.lineStart);
-    const previewEnd = Number(preview?.dataset.lineEnd);
-    return (
-      Number.isInteger(timelineLine) &&
-      Number.isInteger(previewLine) &&
-      Number.isInteger(currentLine) &&
-      [timelineStart, timelineEnd, previewStart, previewEnd].every(Number.isFinite) &&
-      timelineLine === previewLine &&
-      previewLine === currentLine &&
-      Math.abs(timelineStart - previewStart) < 0.0005 &&
-      Math.abs(timelineEnd - previewEnd) < 0.0005
-    );
-  };
-
-  const applyTimelineZoom = (timeline, mode) => {
-    const scrollArea = timeline?.querySelector(".kf-token-scroll");
-    const canvas = timeline?.querySelector(".kf-token-canvas");
-    if (!scrollArea || !canvas) return;
-    const baseWidth = Math.max(1, Number(canvas.dataset.baseWidth) || 760);
-    const oldWidth = Math.max(1, canvas.getBoundingClientRect().width);
-    const fitZoom = Math.max(0.2, scrollArea.clientWidth / baseWidth);
-    const currentZoom = Number(
-      canvas.dataset.zoom || Math.max(fitZoom, oldWidth / baseWidth)
-    );
-    let nextZoom = currentZoom;
-    if (mode === "in") nextZoom = Math.min(8, currentZoom * 1.4);
-    if (mode === "out") nextZoom = Math.max(fitZoom, currentZoom / 1.4);
-    if (mode === "fit") nextZoom = fitZoom;
-    const anchor = Math.min(
-      1,
-      Math.max(0, (scrollArea.scrollLeft + scrollArea.clientWidth / 2) / oldWidth)
-    );
-    const nextWidth = Math.max(scrollArea.clientWidth, baseWidth * nextZoom);
-    canvas.dataset.zoom = String(nextZoom);
-    canvas.style.width = `${nextWidth}px`;
-    canvas.style.minWidth = `${nextWidth}px`;
-    requestAnimationFrame(() => {
-      scrollArea.scrollLeft = Math.max(
-        0,
-        anchor * nextWidth - scrollArea.clientWidth / 2
-      );
-    });
-  };
-
-  const applyPreviewZoom = (stage, direction) => {
-    if (!stage) return;
-    const host = stage.closest("#editor-preview") || stage;
-    const current = Number(
-      host.dataset.fontSize || Number.parseFloat(getComputedStyle(stage).fontSize)
-    );
-    const next = Math.min(
-      56,
-      Math.max(16, current * (direction === "in" ? 1.1 : 0.9))
-    );
-    host.dataset.fontSize = String(next);
-    host.style.setProperty("--kf-preview-font-size", `${next}px`);
-  };
-
-  const applyOverviewZoom = (overview, direction) => {
-    if (!overview) return;
-    const current = Number(overview.dataset.fontSize || 13);
-    const next = Math.min(
-      24,
-      Math.max(10, current + (direction === "in" ? 1 : -1))
-    );
-    overview.dataset.fontSize = String(next);
-    overview.style.setProperty("--kf-overview-font-size", `${next}px`);
-  };
-
-  document.addEventListener("wheel", (event) => {
-    if (!(event.ctrlKey || event.metaKey)) return;
-    const timeline = event.target.closest?.(".kf-token-editor");
-    const previewStage = event.target.closest?.(".kf-editor-preview-stage");
-    const overview = event.target.closest?.("#editor-lines");
-    if (!timeline && !previewStage && !overview) return;
-    event.preventDefault();
-    const direction = event.deltaY < 0 ? "in" : "out";
-    if (timeline) applyTimelineZoom(timeline, direction);
-    if (previewStage) applyPreviewZoom(previewStage, direction);
-    if (overview) applyOverviewZoom(overview, direction);
-  }, { passive: false });
-
-  const updatePlaybackAt = (localTime) => {
-    const timeline = visibleElement(".kf-token-editor");
-    const preview = visibleElement(".kf-editor-preview-stage");
-    if (!timeline || !workspaceLinesMatch(timeline, preview)) return;
-    const clipStart = Number(timeline.dataset.clipStart);
-    const clipEnd = Number(timeline.dataset.clipEnd);
-    const duration = Math.max(0.01, clipEnd - clipStart);
-    const absoluteTime = clipStart + Number(localTime || 0);
-    const percent = Math.min(
-      100,
-      Math.max(0, ((absoluteTime - clipStart) / duration) * 100)
-    );
-    const playhead = timeline.querySelector(".kf-token-playhead");
-    if (playhead) playhead.style.left = `${percent}%`;
-    const playtime = timeline.querySelector(".kf-token-playtime");
-    if (playtime) playtime.textContent = `${absoluteTime.toFixed(2)}s`;
-    const scrollArea = timeline.querySelector(".kf-token-scroll");
-    const canvas = timeline.querySelector(".kf-token-canvas");
-    if (scrollArea && canvas && canvas.scrollWidth > scrollArea.clientWidth) {
-      const target = (percent / 100) * canvas.scrollWidth;
-      const safeLeft = scrollArea.scrollLeft + scrollArea.clientWidth * 0.18;
-      const safeRight = scrollArea.scrollLeft + scrollArea.clientWidth * 0.82;
-      const lastTarget = Number(timeline.__kfLastFollowTarget ?? -100000);
-      if (
-        (target < safeLeft || target > safeRight) &&
-        Math.abs(target - lastTarget) > scrollArea.clientWidth * 0.18
-      ) {
-        timeline.__kfLastFollowTarget = target;
-        scrollArea.scrollTo({
-          left: Math.max(0, target - scrollArea.clientWidth / 2),
-          behavior: window.__karaokeForgeDraggingPlayhead ? "auto" : "smooth",
-        });
-      }
-    }
-    const tokenBlocks = Array.from(timeline.querySelectorAll(".kf-token-block"))
-      .sort((left, right) =>
-        Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex)
-      );
-    tokenBlocks.forEach((block) => {
-      const start = Number(block.dataset.start);
-      const end = Number(block.dataset.end);
-      block.classList.toggle(
-        "is-playing",
-        absoluteTime >= start && absoluteTime < end
-      );
-    });
-
-    const karaoke = visibleElement(".kf-live-karaoke-current");
-    if (karaoke) {
-      const lineStart = Number(karaoke.dataset.lineStart);
-      const lineEnd = Math.max(lineStart + 0.01, Number(karaoke.dataset.lineEnd));
-      const measure = karaoke.querySelector(".kf-live-karaoke-measure");
-      const measureBounds = measure?.getBoundingClientRect();
-      const totalWidth = Math.max(0.01, Number(measureBounds?.width || 0));
-      let completedWidth = 0;
-      let lyricProgress = absoluteTime >= lineEnd ? 100 : 0;
-      for (let index = 0; index < tokenBlocks.length; index += 1) {
-        const block = tokenBlocks[index];
-        const start = Number(block.dataset.start);
-        const end = Math.max(start + 0.01, Number(block.dataset.end));
-        const core = measure?.querySelector(
-          `.kf-karaoke-token-core[data-token-index="${index}"]`
-        );
-        const coreBounds = core?.getBoundingClientRect();
-        const coreStart = Math.max(
-          0,
-          Number(coreBounds?.left || measureBounds?.left || 0) -
-            Number(measureBounds?.left || 0)
-        );
-        const coreEnd = Math.max(
-          coreStart,
-          Number(coreBounds?.right || measureBounds?.left || 0) -
-            Number(measureBounds?.left || 0)
-        );
-        if (absoluteTime >= end) {
-          completedWidth = coreEnd;
-          lyricProgress = (completedWidth / totalWidth) * 100;
-          continue;
-        }
-        if (absoluteTime >= start) {
-          const inside = (absoluteTime - start) / (end - start);
-          lyricProgress = (
-            (coreStart + (coreEnd - coreStart) * inside) / totalWidth
-          ) * 100;
-        }
-        break;
-      }
-      const fill = karaoke.querySelector(".kf-live-karaoke-fill");
-      if (fill) {
-        fill.style.clipPath = `inset(0 ${100 - lyricProgress}% 0 0)`;
-      }
-    }
-  };
-
-  const waveSurferPartsFor = (selector) => {
-    const host = visibleElement(selector);
-    if (!host) return null;
-    const queue = [host];
-    const visited = new Set();
-    let progress = null;
-    let wrapper = null;
-    let playButton = null;
-    let rateButton = null;
-    const mediaCandidates = new Set();
-    while (queue.length) {
-      const root = queue.shift();
-      if (!root || visited.has(root)) continue;
-      visited.add(root);
-      progress ||= root.querySelector?.('[part="progress"]');
-      wrapper ||= root.querySelector?.('[part="wrapper"]');
-      const controls = root.querySelector?.('[data-testid="waveform-controls"]');
-      playButton ||= controls?.querySelector(".play-pause-button");
-      rateButton ||= controls?.querySelector(".control-wrapper > button:last-child");
-      root.querySelectorAll?.("audio").forEach((candidate) => {
-        mediaCandidates.add(candidate);
-      });
-      root.querySelectorAll?.("*").forEach((element) => {
-        if (element.shadowRoot) queue.push(element.shadowRoot);
-      });
-    }
-    const usableMedia = (candidate) => {
-      const duration = Number(candidate?.duration);
-      const hasSource = Boolean(
-        candidate?.currentSrc || candidate?.getAttribute?.("src")
-      );
-      return hasSource || (Number.isFinite(duration) && duration > 0);
-    };
-    // Gradio keeps an empty native <audio> beside the real WaveSurfer player.
-    // Once waveform parts exist, their progress/button state is authoritative.
-    const media = progress && wrapper
-      ? null
-      : Array.from(mediaCandidates).find(usableMedia) || null;
-    return (progress && wrapper) || media
-      ? { host, progress, wrapper, playButton, rateButton, media }
-      : null;
-  };
-
-  const globalEditorModeActive = () => {
-    const panel = document.querySelector("#editor-global-mode-panel");
-    return elementIsVisible(panel) || Boolean(visibleElement(".kf-global-timeline"));
-  };
-
-  const waveSurferParts = () => waveSurferPartsFor(
-    globalEditorModeActive() ? "#editor-global-audio" : "#editor-line-audio"
-  );
-
-  const waveProgressRatio = (parts) => {
-    if (
-      Number.isFinite(parts?.media?.duration) &&
-      parts.media.duration > 0 &&
-      Number.isFinite(parts.media.currentTime)
-    ) {
-      return Math.min(1, Math.max(0, parts.media.currentTime / parts.media.duration));
-    }
-    const width = Number.parseFloat(parts?.progress?.style?.width || "");
-    return Number.isFinite(width) ? Math.min(1, Math.max(0, width / 100)) : null;
-  };
-
-  const globalPlaybackDuration = (timeline, parts) => {
-    const candidates = [
-      Number(parts?.media?.duration),
-      Number(timeline?.dataset.mediaDuration),
-      Number(timeline?.dataset.duration),
-    ];
-    return candidates.find((duration) => Number.isFinite(duration) && duration > 0) || 0.01;
-  };
-
-  const playbackSeconds = (parts, duration) => {
-    const mediaDuration = Number(parts?.media?.duration);
-    const mediaTime = Number(parts?.media?.currentTime);
-    if (
-      Number.isFinite(mediaDuration) &&
-      mediaDuration > 0 &&
-      Number.isFinite(mediaTime)
-    ) {
-      return Math.min(mediaDuration, Math.max(0, mediaTime));
-    }
-    const ratio = waveProgressRatio(parts);
-    return ratio === null ? null : ratio * Math.max(0.01, Number(duration) || 0);
-  };
-
-  const seekWaveSurfer = (parts, ratio) => {
-    if (parts?.media && Number.isFinite(parts.media.duration) && parts.media.duration > 0) {
-      parts.media.currentTime = Math.min(1, Math.max(0, ratio)) * parts.media.duration;
-      return true;
-    }
-    if (!parts?.wrapper) return false;
-    const bounds = parts.wrapper.getBoundingClientRect();
-    const clientX = bounds.left + Math.min(1, Math.max(0, ratio)) * bounds.width;
-    const options = {
-      bubbles: true,
-      composed: true,
-      clientX,
-      clientY: bounds.top + bounds.height / 2,
-      button: 0,
-    };
-    parts.wrapper.dispatchEvent(new MouseEvent("click", options));
-    return true;
-  };
-
-  const seekEditorAbsoluteTime = (timeline, parts, absoluteTime) => {
-    if (!timeline || !parts || !Number.isFinite(absoluteTime)) return false;
-    if (globalEditorModeActive()) {
-      window.__karaokeForgePendingGlobalSeek = null;
-      return seekGlobalTimeline(
-        visibleElement(".kf-global-timeline"),
-        parts,
-        absoluteTime
-      );
-    }
-    const lineStart = Number(timeline.dataset.lineStart);
-    const lineEnd = Number(timeline.dataset.lineEnd);
-    if (![lineStart, lineEnd].every(Number.isFinite) || lineEnd <= lineStart) {
-      return false;
-    }
-    return seekWaveSurfer(parts, (absoluteTime - lineStart) / (lineEnd - lineStart));
-  };
-
-  const seekFromTimelinePointer = (timeline, clientX) => {
-    const track = timeline?.querySelector(".kf-token-track");
-    const preview = visibleElement(".kf-editor-preview-stage");
-    const parts = waveSurferParts();
-    if (!track || !preview || !parts || !workspaceLinesMatch(timeline, preview)) {
-      return false;
-    }
-    const bounds = track.getBoundingClientRect();
-    const clipStart = Number(timeline.dataset.clipStart);
-    const clipEnd = Number(timeline.dataset.clipEnd);
-    const lineStart = Number(preview.dataset.lineStart);
-    const lineEnd = Number(preview.dataset.lineEnd);
-    if (
-      ![clipStart, clipEnd, lineStart, lineEnd].every(Number.isFinite) ||
-      bounds.width <= 0 || lineEnd <= lineStart
-    ) return false;
-    const trackRatio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
-    const requested = clipStart + trackRatio * (clipEnd - clipStart);
-    const seekableEnd = Math.max(lineStart, lineEnd - 0.01);
-    const absoluteTime = Math.min(seekableEnd, Math.max(lineStart, requested));
-    seekEditorAbsoluteTime(timeline, parts, absoluteTime);
-    updatePlaybackAt(absoluteTime - clipStart);
-    return true;
-  };
-
-  const buttonIsPause = (button) =>
-    /pause|\u6682\u505c/i.test(button?.getAttribute("aria-label") || "");
-
-  const selectedPlaybackRate = () => {
-    const input = document.querySelector(
-      "#editor-playback-rate input[type='range'], #editor-playback-rate input"
-    );
-    const rate = Number.parseFloat(input?.value || "1");
-    return Number.isFinite(rate) ? Math.min(2, Math.max(0.5, rate)) : 1;
-  };
-
-  const applyPlaybackRate = (parts) => {
-    const button = parts?.rateButton;
-    if (!button) return;
-    const selected = selectedPlaybackRate();
-    const current = Number.parseFloat(button.textContent || "1");
-    if (!Number.isFinite(current) || Math.abs(current - selected) < 0.001) return;
-    const now = performance.now();
-    if (now - Number(button.__kfLastRateClick || 0) < 120) return;
-    button.__kfLastRateClick = now;
-    button.click();
-  };
-
-  const playbackIsActive = (parts) => (
-    parts?.media ? !parts.media.paused && !parts.media.ended : buttonIsPause(parts?.playButton)
-  );
-
-  const clearTokenAuditionGuard = () => {
-    window.__karaokeForgeTokenAuditionGuardUntil = 0;
-    window.__karaokeForgeTokenAuditionGuardLine = null;
-  };
-
-  const clearEditorMutationGuard = () => {
-    window.__karaokeForgeEditorMutationGuardUntil = 0;
-    window.__karaokeForgeEditorMutationGuardLine = null;
-  };
-
-  const guardEditorMutationStop = (milliseconds = 160) => {
-    const timeline = visibleElement(".kf-token-editor");
-    window.__karaokeForgeEditorMutationGuardUntil = performance.now() + milliseconds;
-    window.__karaokeForgeEditorMutationGuardLine = timeline?.dataset.lineNumber ?? null;
-  };
-
-  const guardTokenAuditionStop = (milliseconds = 220) => {
-    const timeline = visibleElement(".kf-token-editor");
-    window.__karaokeForgeTokenAuditionGuardUntil = performance.now() + milliseconds;
-    window.__karaokeForgeTokenAuditionGuardLine = timeline?.dataset.lineNumber ?? null;
-  };
-
-  const playPlayback = (parts, preserveAuditionGuard = false) => {
-    if (!parts) return false;
-    if (!preserveAuditionGuard) clearTokenAuditionGuard();
-    clearEditorMutationGuard();
-    applyPlaybackRate(parts);
-    if (parts.media) {
-      parts.media.play().catch(() => parts.playButton?.click());
-    } else if (!buttonIsPause(parts.playButton)) {
-      parts.playButton?.click();
-    }
-    return true;
-  };
-
-  const pausePlayback = (parts) => {
-    if (!parts) return;
-    if (parts.media && !parts.media.paused) parts.media.pause();
-    else if (buttonIsPause(parts.playButton)) parts.playButton.click();
-  };
-
-  const clearTokenStopTimer = () => {
-    const auditionWasActive = Boolean(window.__karaokeForgeTokenAuditionActive);
-    if (window.__karaokeForgeTokenStopTimer) {
-      clearTimeout(window.__karaokeForgeTokenStopTimer);
-    }
-    window.__karaokeForgeTokenStopTimer = null;
-    window.__karaokeForgeTokenAuditionActive = false;
-    window.__karaokeForgeTokenAuditionStopAt = null;
-    if (auditionWasActive) guardTokenAuditionStop();
-  };
-
-  const pauseForEditorMutation = () => {
-    guardEditorMutationStop();
-    clearTokenStopTimer();
-    pausePlayback(waveSurferParts());
-  };
-
-  const selectGlobalLine = (lineNumber) => {
-    if (!setHiddenInput("#kf-global-line-request", String(lineNumber))) return;
-    window.setTimeout(() => {
-      const root = document.querySelector("#kf-global-select-line");
-      const button = root?.matches?.("button") ? root : root?.querySelector("button");
-      button?.click();
-    }, 15);
-  };
-
-  const applyGlobalLineEdge = (request) => {
-    if (!setHiddenInput("#kf-global-edge-request", JSON.stringify(request))) return false;
-    window.setTimeout(() => {
-      const root = document.querySelector("#kf-global-edge-apply");
-      const button = root?.matches?.("button") ? root : root?.querySelector("button");
-      button?.click();
-    }, 15);
-    return true;
-  };
-
-  const markGlobalLineSelected = (timeline, lineNumber) => {
-    const requested = Math.trunc(Number(lineNumber));
-    if (!timeline || !Number.isFinite(requested) || requested < 1) return false;
-    let matched = false;
-    timeline.querySelectorAll(".kf-global-line-block").forEach((block) => {
-      const selected = Number(block.dataset.lineNumber) === requested;
-      block.classList.toggle("is-selected", selected);
-      matched ||= selected;
-    });
-    return matched;
-  };
-
-  const updateGlobalKaraokeAt = (activeBlock, absoluteTime) => {
-    const preview = visibleElement(".kf-editor-preview-stage");
-    const activeLine = Number(activeBlock?.dataset.lineNumber);
-    const previewLine = Number(preview?.dataset.lineNumber);
-    const matches = Boolean(
-      activeBlock && preview && Number.isFinite(activeLine) && activeLine === previewLine
-    );
-    preview?.classList.toggle("is-global-gap", !matches);
-    if (!matches) return;
-    const tokenTimeline = visibleElement(".kf-token-editor");
-    if (workspaceLinesMatch(tokenTimeline, preview)) {
-      // The shared token editor contains the newest unsaved drag/text draft.
-      // pollWaveSurfer already used it to update the fill in this frame.
-      return;
-    }
-    const karaoke = preview.querySelector(".kf-live-karaoke-current");
-    const measure = karaoke?.querySelector(".kf-live-karaoke-measure");
-    const measureBounds = measure?.getBoundingClientRect();
-    const totalWidth = Math.max(0.01, Number(measureBounds?.width || 0));
-    const tokenBlocks = Array.from(activeBlock.querySelectorAll(".kf-global-token"))
-      .sort((left, right) =>
-        Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex)
-      );
-    let lyricProgress = absoluteTime >= Number(activeBlock.dataset.end) ? 100 : 0;
-    for (let index = 0; index < tokenBlocks.length; index += 1) {
-      const block = tokenBlocks[index];
-      const start = Number(block.dataset.start);
-      const end = Math.max(start + 0.01, Number(block.dataset.end));
-      const core = measure?.querySelector(
-        `.kf-karaoke-token-core[data-token-index="${index}"]`
-      );
-      const coreBounds = core?.getBoundingClientRect();
-      const coreStart = Math.max(
-        0,
-        Number(coreBounds?.left || measureBounds?.left || 0) -
-          Number(measureBounds?.left || 0)
-      );
-      const coreEnd = Math.max(
-        coreStart,
-        Number(coreBounds?.right || measureBounds?.left || 0) -
-          Number(measureBounds?.left || 0)
-      );
-      if (absoluteTime >= end) {
-        lyricProgress = coreEnd / totalWidth * 100;
-        continue;
-      }
-      if (absoluteTime >= start) {
-        const inside = (absoluteTime - start) / (end - start);
-        lyricProgress = (coreStart + (coreEnd - coreStart) * inside) /
-          totalWidth * 100;
-      }
-      break;
-    }
-    const fill = karaoke?.querySelector(".kf-live-karaoke-fill");
-    if (fill) fill.style.clipPath = `inset(0 ${100 - lyricProgress}% 0 0)`;
-  };
-
-  const pollWaveSurfer = () => {
-    window.__karaokeForgeWavePollFrame = requestAnimationFrame(pollWaveSurfer);
-    const globalMode = globalEditorModeActive();
-    const timeline = visibleElement(".kf-token-editor");
-    const parts = waveSurferPartsFor(
-      globalMode ? "#editor-global-audio" : "#editor-line-audio"
-    );
-    const ratio = waveProgressRatio(parts);
-    applyPlaybackRate(parts);
-    const preview = visibleElement(".kf-editor-preview-stage");
-    if (
-      timeline &&
-      preview &&
-      workspaceLinesMatch(timeline, preview) &&
-      !window.__karaokeForgeDraggingPlayhead
-    ) {
-      const clipStart = Number(timeline.dataset.clipStart);
-      const lineStart = Number(preview.dataset.lineStart);
-      const lineEnd = Number(preview.dataset.lineEnd);
-      const globalTimeline = visibleElement(".kf-global-timeline");
-      const globalDuration = globalPlaybackDuration(globalTimeline, parts);
-      const absoluteTime = globalMode
-        ? playbackSeconds(parts, globalDuration)
-        : (ratio === null
-          ? null
-          : lineStart + ratio * Math.max(0.01, lineEnd - lineStart));
-      if (Number.isFinite(absoluteTime)) {
-        updatePlaybackAt(absoluteTime - clipStart);
-        const auditionStopAt = Number(window.__karaokeForgeTokenAuditionStopAt);
-        if (
-          window.__karaokeForgeTokenAuditionActive &&
-          Number.isFinite(auditionStopAt) &&
-          absoluteTime >= auditionStopAt
-        ) {
-          pausePlayback(parts);
-          clearTokenStopTimer();
-        }
-      }
-    }
-    if (globalMode) {
-      const globalTimeline = visibleElement(".kf-global-timeline");
-      const globalParts = parts || waveSurferPartsFor("#editor-global-audio");
-      const playbackDuration = globalPlaybackDuration(globalTimeline, globalParts);
-      const canvasDuration = Math.max(
-        Number(globalTimeline?.dataset.duration) || 0,
-        playbackDuration,
-        0.01
-      );
-      const playbackActive = playbackIsActive(globalParts);
-      const displayedLine = displayedEditorLine();
-      if (
-        Number.isFinite(displayedLine) && displayedLine >= 1 &&
-        displayedLine !== Number(window.__karaokeForgeLastDisplayedEditorLine)
-      ) {
-        window.__karaokeForgeLastDisplayedEditorLine = displayedLine;
-        const followsPlayback = displayedLine ===
-          Number(window.__karaokeForgeGlobalFollowLine);
-        if (!followsPlayback) {
-          window.__karaokeForgeGlobalFollowLine = displayedLine;
-          markGlobalLineSelected(globalTimeline, displayedLine);
-          const requestedBlock = globalTimeline?.querySelector(
-            `.kf-global-line-block[data-line-number="${displayedLine}"]`
-          );
-          if (requestedBlock) {
-            queueGlobalSeek(
-              globalTimeline,
-              globalParts,
-              Number(requestedBlock.dataset.start),
-              playbackActive
-            );
-          }
-          window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
-        } else if (!playbackActive) {
-          markGlobalLineSelected(globalTimeline, displayedLine);
-        }
-      }
-      const manualSelectionActive = Boolean(window.__karaokeForgePendingGlobalSeek) ||
-        Boolean(window.__karaokeForgeDraggingGlobalLineEdge) ||
-        performance.now() < Number(window.__karaokeForgeGlobalManualSelectionUntil || 0);
-      let currentTime = playbackSeconds(globalParts, playbackDuration);
-      const pendingSeek = window.__karaokeForgePendingGlobalSeek;
-      if (pendingSeek) {
-        const now = performance.now();
-        const pendingTarget = Math.min(
-          playbackDuration,
-          Math.max(0, Number(pendingSeek.seconds) || 0)
-        );
-        const reachedTarget = Number.isFinite(currentTime) &&
-          Math.abs(currentTime - pendingTarget) <= 0.45;
-        if (reachedTarget && (!pendingSeek.play || playbackActive)) {
-          window.__karaokeForgePendingGlobalSeek = null;
-        } else if (now >= Number(pendingSeek.expiresAt || 0)) {
-          window.__karaokeForgePendingGlobalSeek = null;
-        } else if (
-          globalParts && now - Number(pendingSeek.lastAttempt || 0) >= 120
-        ) {
-          pendingSeek.lastAttempt = now;
-          seekGlobalTimeline(globalTimeline, globalParts, pendingTarget);
-          if (pendingSeek.play) playPlayback(globalParts);
-          currentTime = playbackSeconds(globalParts, playbackDuration);
-        }
-      }
-      if (Number.isFinite(currentTime)) {
-        const percent = Math.min(100, Math.max(0, currentTime / canvasDuration * 100));
-        const globalRatio = waveProgressRatio(globalParts);
-        const justFinished = Boolean(window.__karaokeForgeGlobalPlaybackWasActive) &&
-          !playbackActive && globalRatio !== null && globalRatio >= 0.99999;
-        window.__karaokeForgeGlobalPlaybackWasActive = playbackActive;
-        const playhead = globalTimeline?.querySelector(".kf-global-playhead");
-        if (
-          playhead &&
-          !window.__karaokeForgeDraggingGlobalPlayhead &&
-          !window.__karaokeForgeDraggingGlobalLineEdge
-        ) {
-          playhead.style.left = `${percent}%`;
-          playhead.setAttribute("aria-valuenow", currentTime.toFixed(2));
-        }
-        const scrollArea = globalTimeline?.querySelector(".kf-global-scroll");
-        const canvas = globalTimeline?.querySelector(".kf-global-canvas");
-        if (
-          playbackActive &&
-          !window.__karaokeForgeDraggingGlobalPlayhead &&
-          !window.__karaokeForgeDraggingGlobalLineEdge &&
-          scrollArea && canvas &&
-          canvas.scrollWidth > scrollArea.clientWidth
-        ) {
-          const target = percent / 100 * canvas.scrollWidth;
-          const safeLeft = scrollArea.scrollLeft + scrollArea.clientWidth * 0.15;
-          const safeRight = scrollArea.scrollLeft + scrollArea.clientWidth * 0.85;
-          const lastTarget = Number(globalTimeline.__kfLastFollowTarget ?? -100000);
-          if (
-            (target < safeLeft || target > safeRight) &&
-            Math.abs(target - lastTarget) > scrollArea.clientWidth * 0.16
-          ) {
-            globalTimeline.__kfLastFollowTarget = target;
-            scrollArea.scrollTo({
-              left: Math.max(0, target - scrollArea.clientWidth / 2),
-              behavior: "smooth",
-            });
-          }
-        }
-        let activeBlock = null;
-        globalTimeline?.querySelectorAll(".kf-global-line-block").forEach((block) => {
-          const start = Number(block.dataset.start);
-          const end = Number(block.dataset.end);
-          const active = currentTime >= start && currentTime < end;
-          block.classList.toggle("is-playing", active);
-          if (active) {
-            activeBlock ||= block;
-            block.setAttribute("aria-current", "true");
-          } else {
-            block.removeAttribute("aria-current");
-          }
-        });
-        const loopInput = document.querySelector("#editor-loop-line input[type='checkbox']");
-        const selectedBlock = globalTimeline?.querySelector(".kf-global-line-block.is-selected");
-        let looped = false;
-        if (
-          loopInput?.checked && selectedBlock &&
-          !manualSelectionActive &&
-          (playbackActive || justFinished) &&
-          currentTime >= Number(selectedBlock.dataset.end) - 0.04
-        ) {
-          looped = seekGlobalTimeline(
-            globalTimeline,
-            globalParts,
-            Number(selectedBlock.dataset.start)
-          );
-          if (looped && justFinished) playPlayback(globalParts);
-        }
-        if (
-          playbackActive && !looped && activeBlock &&
-          !manualSelectionActive &&
-          !window.__karaokeForgeDraggingGlobalPlayhead &&
-          !window.__karaokeForgeDraggingGlobalLineEdge
-        ) {
-          const activeLine = Number(activeBlock.dataset.lineNumber);
-          if (window.__karaokeForgeGlobalFollowLine !== activeLine) {
-            window.__karaokeForgeGlobalFollowLine = activeLine;
-            markGlobalLineSelected(globalTimeline, activeLine);
-            selectGlobalLine(activeLine);
-          }
-        }
-        updateGlobalKaraokeAt(looped ? selectedBlock : activeBlock, currentTime);
-      }
-    } else {
-      window.__karaokeForgeGlobalPlaybackWasActive = false;
-    }
-  };
-  if (window.__karaokeForgeWavePollFrame) {
-    cancelAnimationFrame(window.__karaokeForgeWavePollFrame);
-  }
-  pollWaveSurfer();
-
-  let observedTimelineLine = null;
-  const clearAuditionAfterLineChange = () => {
-    const timeline = visibleElement(".kf-token-editor");
-    const line = timeline?.dataset.lineNumber || null;
-    if (observedTimelineLine !== null && line !== observedTimelineLine) {
-      clearTokenStopTimer();
-    }
-    observedTimelineLine = line;
-  };
-  new MutationObserver(clearAuditionAfterLineChange).observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
-  clearAuditionAfterLineChange();
-
-  document.addEventListener("pointerdown", (event) => {
-    const handle = event.target.closest?.(".kf-token-boundary");
-    if (!handle) return;
-    pauseForEditorMutation();
-    const timeline = handle.closest(".kf-token-editor");
-    timeline.__kfUndoHistory ||= [];
-    timeline.__kfRedoHistory = [];
-    const snapshot = boundarySnapshot(timeline);
-    const previous = timeline.__kfUndoHistory.at(-1);
-    if (!previous || JSON.stringify(previous) !== JSON.stringify(snapshot)) {
-      timeline.__kfUndoHistory.push(snapshot);
-    }
-  });
-
-  document.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    const playhead = event.target.closest?.(".kf-token-playhead");
-    const timeline = playhead?.closest?.(".kf-token-editor");
-    if (!playhead || !timeline) return;
-    event.preventDefault();
-    event.stopPropagation();
-    clearTokenStopTimer();
-    const parts = waveSurferParts();
-    const resumeAfterDrag = playbackIsActive(parts);
-    pausePlayback(parts);
-    window.__karaokeForgeDraggingPlayhead = true;
-    const pointerId = event.pointerId;
-    playhead.setPointerCapture?.(pointerId);
-    seekFromTimelinePointer(timeline, event.clientX);
-    const move = (moveEvent) => {
-      if (moveEvent.pointerId !== pointerId) return;
-      moveEvent.preventDefault();
-      seekFromTimelinePointer(timeline, moveEvent.clientX);
-    };
-    const finish = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      window.__karaokeForgeDraggingPlayhead = false;
-      playhead.releasePointerCapture?.(pointerId);
-      playhead.removeEventListener("pointermove", move);
-      playhead.removeEventListener("pointerup", finish);
-      playhead.removeEventListener("pointercancel", finish);
-      if (resumeAfterDrag) requestAnimationFrame(() => playPlayback(waveSurferParts()));
-    };
-    playhead.addEventListener("pointermove", move);
-    playhead.addEventListener("pointerup", finish);
-    playhead.addEventListener("pointercancel", finish);
-  });
-
-  document.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    const scrollArea = event.target.closest?.(".kf-token-scroll");
-    if (
-      !scrollArea ||
-      scrollArea.scrollWidth <= scrollArea.clientWidth ||
-      event.target.closest?.(
-        ".kf-token-block, .kf-token-boundary, .kf-token-playhead, button, input, textarea, select"
-      )
-    ) return;
-    event.preventDefault();
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startScrollLeft = scrollArea.scrollLeft;
-    scrollArea.classList.add("is-panning");
-    scrollArea.setPointerCapture?.(pointerId);
-    const move = (moveEvent) => {
-      if (moveEvent.pointerId !== pointerId) return;
-      scrollArea.scrollLeft = startScrollLeft - (moveEvent.clientX - startX);
-    };
-    const finish = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      scrollArea.classList.remove("is-panning");
-      scrollArea.releasePointerCapture?.(pointerId);
-      scrollArea.removeEventListener("pointermove", move);
-      scrollArea.removeEventListener("pointerup", finish);
-      scrollArea.removeEventListener("pointercancel", finish);
-    };
-    scrollArea.addEventListener("pointermove", move);
-    scrollArea.addEventListener("pointerup", finish);
-    scrollArea.addEventListener("pointercancel", finish);
-  });
-
-  document.addEventListener("input", (event) => {
-    const textInput = event.target.closest?.(".kf-token-text");
-    if (textInput) {
-      pauseForEditorMutation();
-      const timeline = textInput.closest(".kf-token-editor");
-      if (timeline) refreshTimeline(timeline);
-      return;
-    }
-    const handle = event.target.closest?.(".kf-token-boundary");
-    if (!handle) return;
-    const timeline = handle.closest(".kf-token-editor");
-    const handles = timelineHandles(timeline);
-    const tokenIndex = Number(handle.dataset.tokenIndex);
-    const edge = handle.dataset.edge;
-    const ownOther = handles.find((candidate) =>
-      Number(candidate.dataset.tokenIndex) === tokenIndex &&
-      candidate.dataset.edge === (edge === "start" ? "end" : "start")
-    );
-    const neighbor = handles.find((candidate) =>
-      Number(candidate.dataset.tokenIndex) === tokenIndex + (edge === "start" ? -1 : 1) &&
-      candidate.dataset.edge === (edge === "start" ? "end" : "start")
-    );
-    const lower = edge === "start"
-      ? (neighbor ? Number(neighbor.value) + 0.01 : Number(handle.min))
-      : Number(ownOther.value) + 0.01;
-    const upper = edge === "start"
-      ? Number(ownOther.value) - 0.01
-      : (neighbor ? Number(neighbor.value) - 0.01 : Number(handle.max));
-    handle.value = String(Math.min(upper, Math.max(lower, Number(handle.value))));
-    refreshTimeline(timeline);
-  });
-
-  document.addEventListener("click", (event) => {
-    const zoomOut = event.target.closest?.(".kf-token-zoom-out");
-    const zoomFit = event.target.closest?.(".kf-token-zoom-fit");
-    const zoomIn = event.target.closest?.(".kf-token-zoom-in");
-    if (zoomOut || zoomFit || zoomIn) {
-      const timeline = event.target.closest(".kf-token-editor");
-      applyTimelineZoom(
-        timeline,
-        zoomIn ? "in" : zoomOut ? "out" : "fit"
-      );
-      return;
-    }
-
-    const pageLeft = event.target.closest?.(".kf-token-page-left");
-    const pageRight = event.target.closest?.(".kf-token-page-right");
-    if (pageLeft || pageRight) {
-      const timeline = event.target.closest(".kf-token-editor");
-      const scrollArea = timeline.querySelector(".kf-token-scroll");
-      if (scrollArea) {
-        scrollArea.scrollBy({
-          left: scrollArea.clientWidth * (pageLeft ? -0.82 : 0.82),
-          behavior: "smooth",
-        });
-      }
-      return;
-    }
-
-    const undo = event.target.closest?.(".kf-token-undo");
-    const redo = event.target.closest?.(".kf-token-redo");
-    if (undo || redo) {
-      pauseForEditorMutation();
-      const timeline = event.target.closest(".kf-token-editor");
-      timeline.__kfUndoHistory ||= [];
-      timeline.__kfRedoHistory ||= [];
-      if (undo && timeline.__kfUndoHistory.length) {
-        timeline.__kfRedoHistory.push(boundarySnapshot(timeline));
-        restoreSnapshot(timeline, timeline.__kfUndoHistory.pop());
-      } else if (redo && timeline.__kfRedoHistory.length) {
-        timeline.__kfUndoHistory.push(boundarySnapshot(timeline));
-        restoreSnapshot(timeline, timeline.__kfRedoHistory.pop());
-      }
-      return;
-    }
-
-    const block = event.target.closest?.(".kf-token-block");
-    if (!block) return;
-    if (event.target.closest?.(".kf-token-text")) return;
-    const timeline = block.closest(".kf-token-editor");
-    const parts = waveSurferParts();
-    if (!timeline || !parts) return;
-    const preview = visibleElement(".kf-editor-preview-stage");
-    const lineStart = Number(preview?.dataset.lineStart);
-    const lineEnd = Number(preview?.dataset.lineEnd);
-    const start = Number(block.dataset.start);
-    const end = Number(block.dataset.end);
-    if (![lineStart, lineEnd, start, end].every(Number.isFinite)) return;
-    const scrollArea = timeline.querySelector(".kf-token-scroll");
-    if (scrollArea) {
-      scrollArea.scrollTo({
-        left: Math.max(
-          0,
-          block.offsetLeft + block.offsetWidth / 2 - scrollArea.clientWidth / 2
-        ),
-        behavior: "smooth",
-      });
-    }
-    pausePlayback(parts);
-    seekEditorAbsoluteTime(timeline, parts, start);
-    clearTokenStopTimer();
-    clearTokenAuditionGuard();
-    const tokenDuration = Math.max(0.01, end - start);
-    const stopSafety = Math.min(0.045, Math.max(0.008, tokenDuration * 0.12));
-    const stopAt = Math.max(start + 0.001, end - stopSafety);
-    const capturedTimeline = timeline;
-    const capturedLine = timeline.dataset.lineNumber;
-    window.__karaokeForgeTokenAuditionActive = true;
-    window.__karaokeForgeTokenAuditionStopAt = stopAt;
-    requestAnimationFrame(() => playPlayback(parts, true));
-    window.__karaokeForgeTokenStopTimer = setTimeout(
-      () => {
-        const currentTimeline = visibleElement(".kf-token-editor");
-        const sameLine = (
-          capturedTimeline.isConnected &&
-          currentTimeline === capturedTimeline &&
-          currentTimeline?.dataset.lineNumber === capturedLine
-        );
-        if (!sameLine) {
-          clearTokenStopTimer();
-          return;
-        }
-        const current = waveSurferParts();
-        pausePlayback(current);
-        clearTokenStopTimer();
-      },
-      Math.max(1, ((stopAt - start) * 1000) / selectedPlaybackRate())
-    );
-  });
-
-  const drawerBackdrop = document.createElement("div");
-  drawerBackdrop.id = "kf-editor-drawer-backdrop";
-  document.body.appendChild(drawerBackdrop);
-
-  const setOverviewOpen = (open) => {
-    const drawer = document.querySelector("#editor-overview-panel");
-    drawer?.classList.toggle("is-open", open);
-    drawerBackdrop.classList.toggle("is-open", open);
-    document.body.style.overflow = open ? "hidden" : "";
-  };
-
-  document.addEventListener("click", (event) => {
-    if (event.target.closest?.("#editor-overview-toggle")) {
-      setOverviewOpen(true);
-      return;
-    }
-    if (
-      event.target.closest?.("#editor-overview-close") ||
-      event.target === drawerBackdrop
-    ) {
-      setOverviewOpen(false);
-      return;
-    }
-    const lyricCell = event.target.closest?.(
-      "#editor-lines tbody td, #editor-lines [role='gridcell']"
-    );
-    const lyricColumn = lyricCell?.cellIndex ??
-      (Number(lyricCell?.getAttribute("aria-colindex")) - 1);
-    if (lyricCell && lyricColumn === 0) {
-      window.setTimeout(() => setOverviewOpen(false), 120);
-    }
-  });
-
-  const lineContextMenu = document.createElement("div");
-  lineContextMenu.id = "kf-line-context-menu";
-  lineContextMenu.innerHTML = `
-    <button type="button" data-action="toggle-hidden">👁 隐藏 / 显示这句</button>
-    <button type="button" data-action="insert-before">＋ 在上方插入一行</button>
-    <button type="button" data-action="insert-after">＋ 在下方插入一行</button>
-    <button type="button" data-action="delete">🗑 删除这句</button>
-  `;
-  document.body.appendChild(lineContextMenu);
-
-  const closeLineContextMenu = () => {
-    lineContextMenu.classList.remove("is-open");
-    lineContextMenu.removeAttribute("data-row");
-  };
-
-  const tokenContextMenu = document.createElement("div");
-  tokenContextMenu.id = "kf-token-context-menu";
-  tokenContextMenu.innerHTML = `
-    <button type="button" data-action="delete">🗑 删除这个词块</button>
-  `;
-  document.body.appendChild(tokenContextMenu);
-
-  const closeTokenContextMenu = () => {
-    tokenContextMenu.classList.remove("is-open");
-    tokenContextMenu.__kfTargetBlock = null;
-  };
-
-  const renumberTokenBlocks = (timeline) => {
-    const blocks = Array.from(timeline.querySelectorAll(".kf-token-block"))
-      .sort((left, right) =>
-        Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex)
-      );
-    const handles = timelineHandles(timeline);
-    blocks.forEach((block, newIndex) => {
-      const oldIndex = Number(block.dataset.tokenIndex);
-      block.dataset.tokenIndex = String(newIndex);
-      handles
-        .filter((handle) => Number(handle.dataset.tokenIndex) === oldIndex)
-        .forEach((handle, edgeIndex) => {
-          handle.dataset.tokenIndex = String(newIndex);
-          handle.dataset.boundaryIndex = String(newIndex * 2 + edgeIndex);
-        });
-    });
-  };
-
-  const deleteTokenBlock = (block) => {
-    const timeline = block?.closest?.(".kf-token-editor");
-    if (!timeline) return;
-    const blocks = timeline.querySelectorAll(".kf-token-block");
-    if (blocks.length <= 1) return;
-    pauseForEditorMutation();
-    const tokenIndex = Number(block.dataset.tokenIndex);
-    timelineHandles(timeline)
-      .filter((handle) => Number(handle.dataset.tokenIndex) === tokenIndex)
-      .forEach((handle) => handle.remove());
-    block.remove();
-    renumberTokenBlocks(timeline);
-    refreshTimeline(timeline);
-    window.setTimeout(() => {
-      const root = document.querySelector("#editor-save-tokens");
-      const button = root?.matches?.("button") ? root : root?.querySelector("button");
-      button?.click();
-    }, 30);
-  };
-
-  const showTokenContextMenu = (event) => {
-    const block = event.target.closest?.(".kf-token-block");
-    if (!block) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    pauseForEditorMutation();
-    closeLineContextMenu();
-    tokenContextMenu.__kfTargetBlock = block;
-    const text = block.dataset.token || "空白词块";
-    const button = tokenContextMenu.querySelector('button[data-action="delete"]');
-    if (button) {
-      button.textContent = `🗑 删除“${Array.from(text).slice(0, 12).join("")}”`;
-      button.disabled = block.closest(".kf-token-editor")
-        ?.querySelectorAll(".kf-token-block").length <= 1;
-    }
-    tokenContextMenu.style.left = `${Math.max(
-      4,
-      Math.min(event.clientX, window.innerWidth - 224)
-    )}px`;
-    tokenContextMenu.style.top = `${Math.max(
-      4,
-      Math.min(event.clientY, window.innerHeight - 70)
-    )}px`;
-    tokenContextMenu.classList.add("is-open");
-  };
-  document.addEventListener("contextmenu", showTokenContextMenu, true);
-
-  const editorDraftSelector =
-    ".kf-token-text, #editor-lines, #editor-pronunciation-panel";
-  const editorActionSelector =
-    "#editor-line-controls button, #editor-overview-panel button, " +
-    "#kf-line-context-menu button, #editor-exit-workspace";
-
-  document.addEventListener("focusin", (event) => {
-    if (event.target.closest?.(editorDraftSelector)) pauseForEditorMutation();
-  });
-
-  document.addEventListener("input", (event) => {
-    if (event.target.closest?.(editorDraftSelector)) pauseForEditorMutation();
-  });
-
-  document.addEventListener("pointerdown", (event) => {
-    if (
-      event.target.closest?.(
-        "#editor-save-tokens, #editor-save-tokens button, #editor-timing-actions button, " +
-        "#editor-pronunciation-panel button"
-      )
-    ) {
-      pauseForEditorMutation();
-    }
-    if (event.target.closest?.(editorActionSelector)) {
-      pauseForEditorMutation();
-    }
-    if (event.target.closest?.("#editor-line-audio, #editor-global-audio")) {
-      window.__karaokeForgePendingGlobalSeek = null;
-      clearTokenStopTimer();
-      clearTokenAuditionGuard();
-      clearEditorMutationGuard();
-    }
-  });
-
-  document.addEventListener("click", (event) => {
-    if (event.target.closest?.(editorActionSelector)) pauseForEditorMutation();
-  });
-
-  tokenContextMenu.addEventListener("click", (event) => {
-    const button = event.target.closest?.('button[data-action="delete"]');
-    const block = tokenContextMenu.__kfTargetBlock;
-    if (!button || button.disabled || !block) return;
-    deleteTokenBlock(block);
-    closeTokenContextMenu();
-  });
-
-  const lyricRowIndex = (target) => {
-    const cell = target.closest?.(
-      "#editor-lines td, #editor-lines [role='gridcell']"
-    );
-    const row = cell?.closest?.("tr, [role='row']");
-    if (!cell || !row) return null;
-    const cells = Array.from(
-      row.querySelectorAll("td, [role='gridcell']")
-    );
-    const displayedNumber = Number.parseInt(cells[0]?.textContent?.trim() || "", 10);
-    if (Number.isInteger(displayedNumber) && displayedNumber > 0) {
-      return displayedNumber - 1;
-    }
-    const body = row.closest("tbody");
-    if (body) {
-      const rows = Array.from(body.querySelectorAll(":scope > tr"));
-      const index = rows.indexOf(row);
-      if (index >= 0) return index;
-    }
-    const ariaIndex = Number.parseInt(row.getAttribute("aria-rowindex") || "", 10);
-    return Number.isInteger(ariaIndex) ? Math.max(0, ariaIndex - 2) : null;
-  };
-
-  const showLineContextMenu = (event) => {
-    if (event.button !== 2 || !event.target.closest?.("#editor-lines")) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    const rowIndex = lyricRowIndex(event.target);
-    if (!Number.isInteger(rowIndex)) {
-      closeLineContextMenu();
-      return;
-    }
-    lineContextMenu.dataset.row = String(rowIndex);
-    lineContextMenu.style.left = `${Math.max(
-      4,
-      Math.min(event.clientX, window.innerWidth - 224)
-    )}px`;
-    lineContextMenu.style.top = `${Math.max(
-      4,
-      Math.min(event.clientY, window.innerHeight - 178)
-    )}px`;
-    lineContextMenu.classList.add("is-open");
-  };
-  document.addEventListener("pointerdown", showLineContextMenu, true);
-  document.addEventListener("contextmenu", (event) => {
-    if (!event.target.closest?.("#editor-lines")) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-  }, true);
-
-  lineContextMenu.addEventListener("click", (event) => {
-    const button = event.target.closest?.("button[data-action]");
-    const row = Number(lineContextMenu.dataset.row);
-    if (!button || !Number.isInteger(row)) return;
-    const request = JSON.stringify({ row, action: button.dataset.action });
-    closeLineContextMenu();
-    if (!setHiddenInput("#kf-line-context-action", request)) return;
-    window.setTimeout(() => {
-      const root = document.querySelector("#kf-line-context-apply");
-      const applyButton = root?.matches?.("button")
-        ? root
-        : root?.querySelector("button");
-      applyButton?.click();
-    }, 20);
-  });
-
-  document.addEventListener("pointerdown", (event) => {
-    if (!event.target.closest?.("#kf-line-context-menu")) {
-      closeLineContextMenu();
-    }
-    if (!event.target.closest?.("#kf-token-context-menu")) {
-      closeTokenContextMenu();
-    }
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      window.__karaokeForgeCancelGlobalLineEdgeDrag?.();
-      setOverviewOpen(false);
-      closeLineContextMenu();
-      closeTokenContextMenu();
-    }
-  });
-
-  const globalTimelineParts = () => ({
-    timeline: visibleElement(".kf-global-timeline"),
-    parts: waveSurferPartsFor("#editor-global-audio"),
-  });
-
-  function seekGlobalTimeline(timeline, parts, seconds) {
-    if (!timeline || !parts) return false;
-    const mediaDuration = Number(parts.media?.duration);
-    const playbackDuration = globalPlaybackDuration(timeline, parts);
-    const canvasDuration = Math.max(
-      Number(timeline.dataset.duration) || 0,
-      playbackDuration,
-      0.01
-    );
-    const target = Math.min(playbackDuration, Math.max(0, Number(seconds) || 0));
-    timeline.__kfLastSeekSeconds = target;
-    if (parts.media && Number.isFinite(mediaDuration) && mediaDuration > 0) {
-      parts.media.currentTime = Math.min(mediaDuration, target);
-    } else {
-      seekWaveSurfer(parts, target / playbackDuration);
-    }
-    const playhead = timeline.querySelector(".kf-global-playhead");
-    if (playhead) playhead.style.left = `${target / canvasDuration * 100}%`;
-    return true;
-  }
-
-  function queueGlobalSeek(timeline, parts, seconds, shouldPlay) {
-    const requested = Math.max(0, Number(seconds) || 0);
-    window.__karaokeForgePendingGlobalSeek = {
-      seconds: requested,
-      play: Boolean(shouldPlay),
-      expiresAt: performance.now() + 2500,
-      lastAttempt: performance.now(),
-    };
-    const moved = seekGlobalTimeline(timeline, parts, requested);
-    if (shouldPlay) playPlayback(parts);
-    return moved;
-  }
-
-  const seekGlobalFromPointer = (timeline, parts, clientX) => {
-    const track = timeline?.querySelector(".kf-global-track");
-    if (!track) return false;
-    const bounds = track.getBoundingClientRect();
-    if (bounds.width <= 0) return false;
-    const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
-    const canvasDuration = Math.max(Number(timeline.dataset.duration) || 0, 0.01);
-    return seekGlobalTimeline(timeline, parts, ratio * canvasDuration);
-  };
-
-  document.addEventListener("pointerdown", (event) => {
-    const edge = event.target.closest?.(".kf-global-line-edge");
-    if (
-      !edge ||
-      event.button !== 0 ||
-      event.isPrimary === false ||
-      window.__karaokeForgeDraggingGlobalLineEdge
-    ) return;
-    const timeline = edge.closest(".kf-global-timeline");
-    const track = edge.closest(".kf-global-track");
-    const lineNumber = Number(edge.dataset.lineNumber);
-    const edgeName = edge.dataset.edge;
-    const block = timeline?.querySelector(
-      `.kf-global-line-block[data-line-number="${lineNumber}"]`
-    );
-    if (
-      !timeline || !track || !block ||
-      timeline.dataset.edgeSaving === "true" ||
-      !Number.isInteger(lineNumber) ||
-      !["start", "end"].includes(edgeName)
-    ) return;
-    const duration = Math.max(Number(timeline.dataset.duration) || 0, 0.01);
-    const baseStart = Number(block.dataset.start);
-    const baseEnd = Number(block.dataset.end);
-    if (!Number.isFinite(baseStart) || !Number.isFinite(baseEnd) || baseEnd <= baseStart) {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    const parts = waveSurferPartsFor("#editor-global-audio");
-    const resumeAfterDrag = playbackIsActive(parts);
-    window.__karaokeForgePendingGlobalSeek = null;
-    pauseForEditorMutation();
-    window.__karaokeForgeDraggingGlobalLineEdge = true;
-    window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 10000;
-    window.__karaokeForgeGlobalFollowLine = lineNumber;
-    markGlobalLineSelected(timeline, lineNumber);
-    edge.classList.add("is-dragging");
-
-    const pointerId = event.pointerId;
-    const originalBlockLeft = block.style.left;
-    const originalBlockWidth = block.style.width;
-    const originalEdgeLeft = edge.style.left;
-    const originalFlipped = edge.classList.contains("is-flipped");
-    const tokenBlocks = Array.from(block.querySelectorAll(".kf-global-token"))
-      .sort((left, right) => Number(left.dataset.tokenIndex) - Number(right.dataset.tokenIndex));
-    const firstTokenEnd = Number(tokenBlocks.at(0)?.dataset.end);
-    const lastTokenStart = Number(tokenBlocks.at(-1)?.dataset.start);
-    let previewSeconds = edgeName === "start" ? baseStart : baseEnd;
-    const pointerStartX = event.clientX;
-    let pointerMoved = false;
-    let finished = false;
-
-    const secondsFromPointer = (clientX) => {
-      const bounds = track.getBoundingClientRect();
-      if (bounds.width <= 0) return previewSeconds;
-      const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
-      let seconds = Math.round(ratio * duration * 100) / 100;
-      if (edgeName === "start") {
-        const tokenLimit = Number.isFinite(firstTokenEnd)
-          ? firstTokenEnd - 0.01
-          : baseEnd - 0.01;
-        seconds = Math.min(baseEnd - 0.01, tokenLimit, Math.max(0, seconds));
-      } else {
-        const tokenLimit = Number.isFinite(lastTokenStart)
-          ? lastTokenStart + 0.01
-          : baseStart + 0.01;
-        seconds = Math.max(baseStart + 0.01, tokenLimit, Math.min(duration, seconds));
-      }
-      return Math.round(Math.max(0, Math.min(duration, seconds)) * 100) / 100;
-    };
-
-    const previewAt = (seconds) => {
-      previewSeconds = seconds;
-      const nextStart = edgeName === "start" ? seconds : baseStart;
-      const nextEnd = edgeName === "end" ? seconds : baseEnd;
-      block.style.left = `${nextStart / duration * 100}%`;
-      block.style.width = `${Math.max(0.22, (nextEnd - nextStart) / duration * 100)}%`;
-      edge.style.left = `${seconds / duration * 100}%`;
-      edge.classList.toggle(
-        "is-flipped",
-        edgeName === "start" ? seconds <= 0.000001 : seconds >= duration - 0.000001
-      );
-      edge.setAttribute("aria-valuenow", seconds.toFixed(2));
-      edge.title = `拖动${edgeName === "start" ? "句首" : "句尾"}：${seconds.toFixed(2)}s`;
-      if (!seekGlobalTimeline(timeline, parts, seconds)) {
-        const playhead = timeline.querySelector(".kf-global-playhead");
-        if (playhead) playhead.style.left = `${seconds / duration * 100}%`;
-      }
-    };
-
-    const restorePreview = () => {
-      block.style.left = originalBlockLeft;
-      block.style.width = originalBlockWidth;
-      edge.style.left = originalEdgeLeft;
-      edge.classList.toggle("is-flipped", originalFlipped);
-      edge.classList.remove("is-dragging");
-      edge.removeAttribute("aria-valuenow");
-      edge.title = `拖动${edgeName === "start" ? "句首" : "句尾"}：${(
-        edgeName === "start" ? baseStart : baseEnd
-      ).toFixed(2)}s`;
-    };
-
-    const removeListeners = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", pointerUp);
-      window.removeEventListener("pointercancel", pointerCancel);
-      edge.removeEventListener("lostpointercapture", lostCapture);
-      if (edge.hasPointerCapture?.(pointerId)) edge.releasePointerCapture?.(pointerId);
-      if (window.__karaokeForgeCancelGlobalLineEdgeDrag === cancelFromOutside) {
-        window.__karaokeForgeCancelGlobalLineEdgeDrag = null;
-      }
-    };
-
-    const finish = (commit) => {
-      if (finished) return;
-      finished = true;
-      removeListeners();
-      restorePreview();
-      window.__karaokeForgeDraggingGlobalLineEdge = false;
-      window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 420;
-      const original = edgeName === "start" ? baseStart : baseEnd;
-      const changed = pointerMoved && Math.abs(previewSeconds - original) >= 0.005;
-      if (!commit || !changed) {
-        if (resumeAfterDrag) playPlayback(parts);
-        return;
-      }
-      timeline.dataset.edgeSaving = "true";
-      const submitted = applyGlobalLineEdge({
-        line: lineNumber,
-        edge: edgeName,
-        seconds: previewSeconds,
-        base_start: baseStart,
-        base_end: baseEnd,
-        text: block.dataset.text || "",
-      });
-      if (!submitted) delete timeline.dataset.edgeSaving;
-      window.setTimeout(() => {
-        if (document.body.contains(timeline)) delete timeline.dataset.edgeSaving;
-      }, 4500);
-    };
-
-    const move = (moveEvent) => {
-      if (moveEvent.pointerId !== pointerId || finished) return;
-      moveEvent.preventDefault();
-      pointerMoved ||= Math.abs(moveEvent.clientX - pointerStartX) >= 1;
-      previewAt(secondsFromPointer(moveEvent.clientX));
-    };
-    const pointerUp = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      finishEvent.preventDefault();
-      pointerMoved ||= Math.abs(finishEvent.clientX - pointerStartX) >= 1;
-      if (pointerMoved) previewAt(secondsFromPointer(finishEvent.clientX));
-      finish(true);
-    };
-    const pointerCancel = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      finish(false);
-    };
-    const lostCapture = (finishEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      finish(false);
-    };
-    function cancelFromOutside() {
-      finish(false);
-    }
-
-    edge.setPointerCapture?.(pointerId);
-    window.addEventListener("pointermove", move, { passive: false });
-    window.addEventListener("pointerup", pointerUp, { passive: false });
-    window.addEventListener("pointercancel", pointerCancel);
-    edge.addEventListener("lostpointercapture", lostCapture);
-    window.__karaokeForgeCancelGlobalLineEdgeDrag = cancelFromOutside;
-    previewAt(previewSeconds);
-  }, true);
-
-  document.addEventListener("click", (event) => {
-    const zoomButton = event.target.closest?.(
-      ".kf-global-zoom-in, .kf-global-zoom-out, .kf-global-zoom-fit"
-    );
-    if (zoomButton) {
-      const timeline = zoomButton.closest(".kf-global-timeline");
-      const canvas = timeline?.querySelector(".kf-global-canvas");
-      if (!canvas) return;
-      const current = Number(canvas.dataset.zoom || "1");
-      if (zoomButton.classList.contains("kf-global-zoom-fit")) {
-        canvas.dataset.zoom = "0";
-        canvas.style.minWidth = "100%";
-      } else {
-        const base = Number(canvas.dataset.baseWidth || "1400");
-        const next = Math.min(8, Math.max(0.5,
-          (current > 0 ? current : 1) *
-          (zoomButton.classList.contains("kf-global-zoom-in") ? 1.35 : 0.75)
-        ));
-        canvas.dataset.zoom = String(next);
-        canvas.style.minWidth = `${Math.max(700, base * next)}px`;
-      }
-      return;
-    }
-    const block = event.target.closest?.(".kf-global-line-block");
-    if (!block) return;
-    event.preventDefault();
-    event.stopPropagation();
-    clearTokenStopTimer();
-    clearTokenAuditionGuard();
-    clearEditorMutationGuard();
-    const { timeline, parts } = globalTimelineParts();
-    const lineNumber = Number(block.dataset.lineNumber);
-    window.__karaokeForgeLastDisplayedEditorLine = displayedEditorLine();
-    window.__karaokeForgeGlobalFollowLine = lineNumber;
-    window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
-    markGlobalLineSelected(timeline, lineNumber);
-    queueGlobalSeek(timeline, parts, Number(block.dataset.start), true);
-    selectGlobalLine(lineNumber);
-  }, true);
-
-  document.addEventListener("pointerdown", (event) => {
-    const track = event.target.closest?.(".kf-global-track");
-    if (
-      !track ||
-      event.target.closest?.(".kf-global-line-block, .kf-global-line-edge")
-    ) return;
-    const timeline = track.closest(".kf-global-timeline");
-    const parts = waveSurferPartsFor("#editor-global-audio");
-    if (!timeline || !parts) return;
-    event.preventDefault();
-    clearTokenStopTimer();
-    clearTokenAuditionGuard();
-    clearEditorMutationGuard();
-    window.__karaokeForgePendingGlobalSeek = null;
-    const resumeAfterDrag = playbackIsActive(parts);
-    pausePlayback(parts);
-    window.__karaokeForgeDraggingGlobalPlayhead = true;
-    const pointerId = event.pointerId;
-    track.setPointerCapture?.(pointerId);
-    seekGlobalFromPointer(timeline, parts, event.clientX);
-    const move = (moveEvent) => {
-      if (moveEvent.pointerId !== pointerId) return;
-      moveEvent.preventDefault();
-      seekGlobalFromPointer(timeline, parts, moveEvent.clientX);
-    };
-    let finished = false;
-    const finish = (finishEvent) => {
-      if (finished || finishEvent.pointerId !== pointerId) return;
-      finished = true;
-      track.removeEventListener("pointermove", move);
-      track.removeEventListener("pointerup", finish);
-      track.removeEventListener("pointercancel", finish);
-      track.removeEventListener("lostpointercapture", finish);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", finish);
-      if (track.hasPointerCapture?.(pointerId)) {
-        track.releasePointerCapture?.(pointerId);
-      }
-      window.__karaokeForgeDraggingGlobalPlayhead = false;
-      const requestedTime = Number(timeline.__kfLastSeekSeconds);
-      const requestedBlock = Array.from(
-        timeline.querySelectorAll(".kf-global-line-block")
-      ).find((block) => (
-        requestedTime >= Number(block.dataset.start) &&
-        requestedTime < Number(block.dataset.end)
-      ));
-      if (requestedBlock) {
-        const requestedLine = Number(requestedBlock.dataset.lineNumber);
-        window.__karaokeForgeLastDisplayedEditorLine = displayedEditorLine();
-        window.__karaokeForgeGlobalFollowLine = requestedLine;
-        window.__karaokeForgeGlobalManualSelectionUntil = performance.now() + 320;
-        markGlobalLineSelected(timeline, requestedLine);
-        selectGlobalLine(requestedLine);
-      }
-      if (resumeAfterDrag) playPlayback(parts);
-    };
-    track.addEventListener("pointermove", move);
-    track.addEventListener("pointerup", finish);
-    track.addEventListener("pointercancel", finish);
-    track.addEventListener("lostpointercapture", finish);
-    window.addEventListener("pointerup", finish);
-    window.addEventListener("pointercancel", finish);
-  }, true);
-
-  const isTextEntry = (target) => {
-    if (target.closest?.("textarea, select, [contenteditable='true']")) return true;
-    const input = target.closest?.("input");
-    return Boolean(input && [
-      "text", "search", "email", "url", "tel", "password", "number"
-    ].includes(input.type));
-  };
-
-  const handlePlaybackSpace = (event) => {
-    if (
-      event.code !== "Space" ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      isTextEntry(event.target)
-    ) return;
-    if (window.__karaokeForgeDraggingGlobalLineEdge) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    const pendingSeek = window.__karaokeForgePendingGlobalSeek;
-    const parts = waveSurferParts();
-    if (!parts && !pendingSeek) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    if (event.type !== "keydown" || event.repeat) return;
-    clearTokenStopTimer();
-    if (pendingSeek) {
-      pendingSeek.play = !Boolean(pendingSeek.play);
-      if (pendingSeek.play) playPlayback(parts);
-      else pausePlayback(parts);
-    } else if (playbackIsActive(parts)) {
-      pausePlayback(parts);
-    } else {
-      playPlayback(parts);
-    }
-  };
-  document.addEventListener("keydown", handlePlaybackSpace, true);
-  document.addEventListener("keyup", handlePlaybackSpace, true);
-
-  document.addEventListener("change", (event) => {
-    if (!event.target.closest?.("#editor-timing-mode")) return;
-    window.__karaokeForgeCancelGlobalLineEdgeDrag?.();
-    window.__karaokeForgePendingGlobalSeek = null;
-    window.__karaokeForgeGlobalManualSelectionUntil = 0;
-    window.__karaokeForgeGlobalPlaybackWasActive = false;
-    ["#editor-line-audio", "#editor-global-audio"].forEach((selector) => {
-      const parts = waveSurferPartsFor(selector);
-      pausePlayback(parts);
-      if (parts?.media) parts.media.pause();
-    });
-  }, true);
-
-  document.addEventListener("keydown", (event) => {
-    if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
-    if (event.target.closest?.("input, textarea, [contenteditable='true']")) return;
-    const timeline = document.activeElement?.closest?.(".kf-token-editor");
-    if (!timeline) return;
-    event.preventDefault();
-    const button = timeline.querySelector(
-      event.shiftKey ? ".kf-token-redo" : ".kf-token-undo"
-    );
-    button?.click();
-  });
-  return [];
-}
-"""
+TOKEN_TIMELINE_JS = (Path(__file__).parent / "assets" / "editor.js").read_text(encoding="utf-8")
 
 EDITOR_STOP_GATE_JS = r"""
 async (...args) => {
@@ -3232,9 +555,11 @@ def _allow_gradio_workspace_paths(
 def _allow_gradio_result_workspaces(app: object, values: object) -> None:
     """Discover workspace manifests in a callback result without opening directories."""
 
-    pending = list(values) if isinstance(values, Sequence) and not isinstance(
-        values, (str, bytes, os.PathLike)
-    ) else [values]
+    pending = (
+        list(values)
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes, os.PathLike))
+        else [values]
+    )
     for value in pending:
         if not isinstance(value, (str, os.PathLike)):
             continue
@@ -3691,9 +1016,7 @@ def prepare_subtitle_material_preview(
             waveform_detail = "真实音频波形" if audio is not None else "波形布局示意"
             badge = f"无 MV 成片样式 · {waveform_detail} · {sample.description}"
             if audio is None:
-                notes.append(
-                    "音频尚未下载，当前波形只用于展示布局；生成成片时会换成真实音乐波形。"
-                )
+                notes.append("音频尚未下载，当前波形只用于展示布局；生成成片时会换成真实音乐波形。")
         except Exception as exc:
             notes.append(f"动态封面预览失败，已改用静态封面：{exc}")
     if not background_data and cover is not None:
@@ -3957,6 +1280,8 @@ def subtitle_preview_html(
     highlight_progress: float = 0.4,
     active_row: int = 1,
     translation_margin_v: float = 54,
+    show_countdown: bool = True,
+    countdown_gap_threshold: float = 8.0,
 ) -> str:
     """Return a browser-native preview of the current ASS subtitle style."""
 
@@ -3994,13 +1319,15 @@ def subtitle_preview_html(
     main_size = max(16, min(48, round(float(font_size) * 0.55)))
     translated_size = max(13, min(36, round(float(translation_font_size) * 0.55)))
     pronunciation_size = max(10, min(24, round(float(pronunciation_font_size) * 0.55)))
+    reading_gap = max(4, round(main_size * 0.12))
+    reading_room = pronunciation_size * 1.1 + reading_gap
     bottom = max(12, min(92, round(float(margin_v) * 0.42)))
     translation_top = max(1.5, min(72.0, float(translation_margin_v) / 10.8))
     translation_html = ""
     if show_translation and safe_translation:
         translation_html = (
             '<div style="position:absolute;left:15%;right:15%;'
-            f'top:{translation_top:.2f}%;'
+            f"top:{translation_top:.2f}%;"
             f"text-align:center;font-family:'{safe_font}',sans-serif;"
             f"font-size:{translated_size}px;color:{translation_color};font-weight:700;"
             "text-shadow:-1px -1px 0 #111,1px -1px 0 #111,"
@@ -4015,9 +1342,14 @@ def subtitle_preview_html(
         if local_split <= 0:
             return html.escape(value)
         if local_split >= len(value):
-            return f'<span style="color:{highlight_color};">{html.escape(value)}</span>'
+            return (
+                f'<span class="kf-preview-sung" style="color:{highlight_color};'
+                f'--kf-wait-color:{text_color};--kf-sung-color:{highlight_color};">'
+                f"{html.escape(value)}</span>"
+            )
         return (
-            f'<span style="color:{highlight_color};">'
+            f'<span class="kf-preview-sung" style="color:{highlight_color};'
+            f'--kf-wait-color:{text_color};--kf-sung-color:{highlight_color};">'
             f"{html.escape(value[:local_split])}</span>{html.escape(value[local_split:])}"
         )
 
@@ -4042,12 +1374,15 @@ def subtitle_preview_html(
             parts.append(coloured_source(value[cursor:start], cursor, active=active))
             reading = unit.reading
             reading_color = pronunciation_color
+            reading_class = ""
             if active and start < split_at:
                 reading_color = highlight_color
+                reading_class = ' class="kf-preview-sung"'
             parts.append(
-                '<ruby style="ruby-position:over;ruby-align:center;">'
+                '<ruby class="kf-lyric-ruby">'
                 f"{coloured_source(value[start:end], start, active=active)}"
-                f'<rt style="font-size:{pronunciation_size}px;color:{reading_color};'
+                f'<rt{reading_class} style="font-size:{pronunciation_size}px;color:{reading_color};'
+                f"--kf-wait-color:{pronunciation_color};--kf-sung-color:{highlight_color};"
                 "font-weight:700;text-shadow:-1px -1px 0 #111,1px -1px 0 #111,"
                 '-1px 1px 0 #111,1px 1px 0 #111,0 2px 5px #000;">'
                 f"{html.escape(reading)}</rt></ruby>"
@@ -4058,6 +1393,23 @@ def subtitle_preview_html(
 
     upper_line_html = preview_line(upper_text, active=active_row == 0)
     lower_line_html = preview_line(lower_text, active=active_row == 1)
+    upper_reading_room = reading_room if '<ruby class="kf-lyric-ruby">' in upper_line_html else 0
+    lower_reading_room = reading_room if '<ruby class="kf-lyric-ruby">' in lower_line_html else 0
+    upper_bottom = bottom + main_size * 1.2 + lower_reading_room + max(16, main_size * 0.35)
+    show_cue = bool(show_countdown and active_text)
+    countdown_html = ""
+    if show_cue:
+        notes = "".join(
+            '<svg class="kf-preview-note" viewBox="0 0 26 34" aria-hidden="true">'
+            f'<path fill="currentColor" d="{COUNTDOWN_NOTE_SVG_PATH}"/></svg>'
+            for _ in range(3)
+        )
+        countdown_html = (
+            '<span class="kf-preview-countdown" role="img" '
+            'aria-label="开唱前 3 秒，三个音符依次点亮并保持，开唱时消失" '
+            f'title="长间奏达到 {float(countdown_gap_threshold):g} 秒时显示；此处循环演示">'
+            f"{notes}</span>"
+        )
     background_html = ""
     allowed_image_prefixes = (
         "data:image/jpeg;base64,",
@@ -4072,24 +1424,33 @@ def subtitle_preview_html(
     safe_badge = html.escape(preview_badge or "实时字幕预览 · KTV 双行布局")
     return f"""
     <div class="kf-subtitle-preview" data-kf-layout="ktv-split"
-         data-kf-material="{str(bool(material_mode)).lower()}">
+         data-kf-material="{str(bool(material_mode)).lower()}"
+         data-kf-countdown="{str(show_cue).lower()}"
+         style="--kf-reading-size:{pronunciation_size}px;--kf-reading-gap:{reading_gap}px;
+                --kf-cue-highlight:{highlight_color};--kf-cue-muted:{text_color};">
       {background_html}
       <div class="kf-preview-vignette"></div>
       {translation_html}
-      <div style="position:absolute;left:6%;right:16%;
-                  bottom:{bottom + main_size + 28}px;text-align:left;
+      <div class="{"kf-preview-idle-row" if active_row != 0 else "kf-preview-active-row"}"
+           style="position:absolute;left:6%;right:16%;
+                  bottom:{upper_bottom:.1f}px;text-align:left;
                   font-family:'{safe_font}',sans-serif;font-size:{main_size}px;
                   color:{text_color};font-weight:800;
                   text-shadow:-2px -2px 0 #111,2px -2px 0 #111,
                               -2px 2px 0 #111,2px 2px 0 #111,0 3px 8px #000;">
-        {upper_line_html}
+        <span class="kf-style-lyric-content" style="--kf-reading-room:{upper_reading_room:.1f}px;">
+          {countdown_html if active_row == 0 else ""}{upper_line_html}
+        </span>
       </div>
-      <div style="position:absolute;left:16%;right:6%;bottom:{bottom}px;
+      <div class="{"kf-preview-idle-row" if active_row != 1 else "kf-preview-active-row"}"
+           style="position:absolute;left:16%;right:6%;bottom:{bottom}px;
                   text-align:right;font-family:'{safe_font}',sans-serif;
                   font-size:{main_size}px;color:{text_color};font-weight:800;
                   text-shadow:-2px -2px 0 #111,2px -2px 0 #111,
                               -2px 2px 0 #111,2px 2px 0 #111,0 3px 8px #000;">
-        {lower_line_html}
+        <span class="kf-style-lyric-content" style="--kf-reading-room:{lower_reading_room:.1f}px;">
+          {countdown_html if active_row == 1 else ""}{lower_line_html}
+        </span>
       </div>
       <div class="kf-preview-badge">{safe_badge}</div>
     </div>
@@ -5461,7 +2822,7 @@ def _editor_undo_snapshot(
     document: LyricsDocument,
     line_number: int,
 ) -> dict[str, Any]:
-    """Store one reversible editor document together with its active line."""
+    """Store a document revision together with the line to focus when restoring it."""
 
     return {
         "document": document.to_dict(),
@@ -5566,16 +2927,14 @@ def _editor_document_with_pending_changes(
     pronunciation_table: object | None = None,
     ripple_enabled: bool = False,
 ) -> tuple[LyricsDocument, dict[str, Any] | None]:
-    """Persist current-line drafts before navigation and capture one undo snapshot."""
+    """Persist current-line drafts and capture the revision before the edit."""
 
     original = document_from_payload(payload)
     selected = min(max(1, int(line_number)), len(original.lines))
     original_line = original.lines[selected - 1]
     source_ids = _editor_row_source_ids(line_table, len(original.lines))
     selected_matches = [
-        position
-        for position, source_id in enumerate(source_ids, 1)
-        if source_id == selected
+        position for position, source_id in enumerate(source_ids, 1) if source_id == selected
     ]
     selected_after = selected_matches[0] if len(selected_matches) == 1 else None
     pronunciation_changed = False
@@ -5651,6 +3010,7 @@ def _ripple_global_editor_changes(
     enabled: bool,
     *,
     source_ids: Sequence[int | None] | None = None,
+    minimum_gap: float = 0.02,
 ) -> tuple[int, ...]:
     """Ripple every directly extended row once, accounting for earlier propagated shifts."""
 
@@ -5669,17 +3029,14 @@ def _ripple_global_editor_changes(
         if source_id is None or not 1 <= source_id <= len(original.lines):
             continue
         old_line = original.lines[source_id - 1]
-        if (
-            old_line.end is None
-            or direct_end is None
-            or direct_end <= old_line.end + 1e-9
-        ):
+        if old_line.end is None or direct_end is None or direct_end <= old_line.end + 1e-9:
             continue
         starts_before = [line.start for line in edited.lines]
         newly_shifted = ripple_following_line_timing(
             edited,
             index,
             previous_end=old_line.end + ripple_offsets[index - 1],
+            minimum_gap=minimum_gap,
         )
         shifted_lines.update(newly_shifted)
         for shifted_line_number in newly_shifted:
@@ -5799,7 +3156,7 @@ def apply_editor_line_action(
         headline = f"### ✅ 已{action_label}"
     else:
         headline = f"### ✅ 已{action_label}第 {row_index + 1} 行"
-    status = f"{headline}\n如有误操作，点击右侧“撤销 / 重做”。"
+    status = f"{headline}\n如有误操作，可使用右侧“撤销”和“重做”。"
     return (*workspace, status, undo_payload)
 
 
@@ -5821,21 +3178,101 @@ def undo_editor_line_action(
     line_table: object,
     line_number: int,
     undo_payload: dict[str, Any],
+    token_timing_json: str | None = None,
+    whole_pronunciation: str | None = None,
+    pronunciation_table: object | None = None,
+    ripple_enabled: bool = False,
 ) -> tuple[object, ...]:
-    current = apply_editor_rows(document_from_payload(payload), line_table)
-    snapshot = _editor_undo_document(undo_payload, int(line_number))
-    if snapshot is None:
-        workspace = _editor_selected_line_outputs(current, int(line_number))
+    return _travel_editor_history(
+        payload,
+        line_table,
+        line_number,
+        undo_payload,
+        token_timing_json,
+        whole_pronunciation,
+        pronunciation_table,
+        ripple_enabled,
+    )
+
+
+def redo_editor_line_action(
+    payload: dict[str, Any],
+    line_table: object,
+    line_number: int,
+    undo_payload: dict[str, Any],
+    token_timing_json: str | None = None,
+    whole_pronunciation: str | None = None,
+    pronunciation_table: object | None = None,
+    ripple_enabled: bool = False,
+) -> tuple[object, ...]:
+    return _travel_editor_history(
+        payload,
+        line_table,
+        line_number,
+        undo_payload,
+        token_timing_json,
+        whole_pronunciation,
+        pronunciation_table,
+        ripple_enabled,
+        redo=True,
+    )
+
+
+def _travel_editor_history(
+    payload: dict[str, Any],
+    line_table: object,
+    line_number: int,
+    history: dict[str, Any],
+    token_timing_json: str | None,
+    whole_pronunciation: str | None,
+    pronunciation_table: object | None,
+    ripple_enabled: bool,
+    *,
+    redo: bool = False,
+) -> tuple[object, ...]:
+    try:
+        current, pending_snapshot = _editor_document_with_pending_changes(
+            payload,
+            line_table,
+            line_number,
+            token_timing_json,
+            whole_pronunciation,
+            pronunciation_table,
+            ripple_enabled,
+        )
+    except (TypeError, ValueError):
+        if redo:
+            raise
+        # Undo must remain available when a draft cannot be committed, such as
+        # cleared lyrics or an end before its start. Discard just that draft;
+        # an additional undo can still restore the previous committed revision.
+        committed = document_from_payload(payload)
+        workspace = _editor_selected_line_outputs(committed, int(line_number))
         return (
             *workspace,
-            "### ℹ️ 暂无可撤销修改\n继续编辑即可；这里不会再弹出错误。",
-            {},
+            "### ✅ 已撤销无效草稿\n已恢复当前行上次保存的内容；此前的撤销和重做记录已保留。",
+            history,
+        )
+    current_line = _mapped_editor_line_number(
+        line_table, len(payload["lines"]), int(line_number), len(current.lines)
+    )
+    history = _editor_record_history(history, pending_snapshot)
+    restored_payload, history = travel_history(
+        history, _editor_undo_snapshot(current, current_line), redo=redo
+    )
+    snapshot = _editor_undo_document(restored_payload or {}, current_line)
+    action = "重做" if redo else "撤销"
+    if snapshot is None:
+        workspace = _editor_selected_line_outputs(current, current_line)
+        return (
+            *workspace,
+            f"### ℹ️ 暂无可{action}修改\n当前编辑内容已保留。",
+            history,
         )
     restored, restored_line_number = snapshot
-    restored.require_timed()
     workspace = _editor_selected_line_outputs(restored, restored_line_number)
-    status = "### ✅ 已撤销上次编辑\n已回到发生修改的歌词行；再次点击可以重做。"
-    return (*workspace, status, _editor_undo_snapshot(current, int(line_number)))
+    status = f"### ✅ 已{action}上次编辑\n已回到发生修改的歌词行；可继续撤销或重做。"
+    return (*workspace, status, history)
 
 
 def save_editor_pronunciation(
@@ -5902,10 +3339,13 @@ def save_editor_pronunciation_workspace(
         editor_preview_html(document, selected),
         f"### ✅ 已保存第 {selected} 行注音",
     )
-    next_undo = (
-        pending_snapshot or _editor_undo_snapshot(before, selected)
-        if document.to_dict() != before.to_dict()
-        else undo_state
+    next_undo = _editor_record_history(
+        undo_state,
+        (
+            pending_snapshot or _editor_undo_snapshot(before, selected)
+            if document.to_dict() != before.to_dict()
+            else None
+        ),
     )
     return (*result, next_undo)
 
@@ -5956,11 +3396,7 @@ def nudge_editor_timing(
         if index != int(line_number) - 1
         and (old_line.start, old_line.end) != (new_line.start, new_line.end)
     ]
-    ripple_note = (
-        f"；已联动后移第 {shifted[0]}–{shifted[-1]} 行"
-        if shifted
-        else ""
-    )
+    ripple_note = f"；已联动后移第 {shifted[0]}–{shifted[-1]} 行" if shifted else ""
     status = (
         f"第 {int(line_number)} 行：**{line.start:.2f}s → {line.end:.2f}s**"
         f"（时长 {line.end - line.start:.2f}s）{ripple_note}"
@@ -6594,8 +4030,7 @@ def auto_configure_model_network_for_web() -> tuple[str, str, str, bool]:
         "### ⚠️ 自动探测没有找到可用路径\n"
         "国内直连和官方源都不可用时，程序也不会自动切换到未校验镜像。"
         "你可以先检查网络、打开代理软件再重试，"
-        "手动填写其 HTTP 端口，或阅读提示后明确选择 hf-mirror。\n\n"
-        + "  \n".join(details),
+        "手动填写其 HTTP 端口，或阅读提示后明确选择 hf-mirror。\n\n" + "  \n".join(details),
         current_mode,
         current_proxy,
         current_confirmed,
@@ -6701,11 +4136,7 @@ def _recent_workspace_offer() -> tuple[str, str, bool]:
 
 def _workspace_choice_label(workspace: WorkspaceProject) -> str:
     updated_at = getattr(workspace, "updated_at", None)
-    timestamp = (
-        updated_at.astimezone().strftime("%m-%d %H:%M")
-        if updated_at
-        else ""
-    )
+    timestamp = updated_at.astimezone().strftime("%m-%d %H:%M") if updated_at else ""
     suffix = f" · {timestamp}" if timestamp else ""
     return f"{workspace.name}{suffix} · {workspace.manifest.parent.name}"
 
@@ -6773,6 +4204,8 @@ def create_web_app(
 
     recent_manifest, recent_message, recent_available = _recent_workspace_offer()
     workspace_choices = _workspace_dropdown_choices()
+    initial_preferences = load_preferences()
+    initial_global_mode = initial_preferences.get("timing_mode", "line") == "global"
     initial_music_u = initial_netease_music_u or ""
     netease_session_broker = _NeteaseSessionBroker(initial_music_u)
     if not managed_netease_login:
@@ -6804,6 +4237,13 @@ def create_web_app(
         qqmusic_output_directory = gr.State()
         editor_payload = gr.State({})
         editor_line_undo_payload = gr.State({})
+        editor_mutation_ack = gr.Textbox(
+            value="",
+            container=False,
+            show_label=False,
+            elem_id="kf-editor-mutation-ack",
+            interactive=False,
+        )
         editor_output_directory = gr.State()
         editor_handoff_ready = gr.State(False)
         netease_session_music_u = gr.State("")
@@ -6822,32 +4262,32 @@ def create_web_app(
                   <span>Karaoke Forge · Local Studio</span>
                   <span class="kf-version" aria-label="当前版本 {__version__}">v{__version__}</span>
                 </div>
-                <h1 class="kf-title">让每一句歌词，<br>都踩准拍子。</h1>
-                <p class="kf-subtitle">
-                  上传歌曲、MV 和歌词，剩下的交给本地工作台。
-                  自动生成时间轴、逐字高亮字幕和卡拉 OK 成片。
-                </p>
+                <h1 class="kf-title">Karaoke Forge</h1>
+                <p class="kf-subtitle">本地卡拉 OK 制作工作台 · 从歌曲到逐字高亮 MV</p>
                 <div class="kf-steps">
                   <span class="kf-step"><b>01</b>选择素材</span>
-                  <span class="kf-step"><b>02</b>调整效果</span>
-                  <span class="kf-step"><b>03</b>点击生成</span>
-                  <span class="kf-step"><b>04</b>预览下载</span>
+                  <span class="kf-step"><b>02</b>试听与校准</span>
+                  <span class="kf-step"><b>03</b>导出 MV</span>
                 </div>
               </section>
             </div>
             """
         )
 
-        with gr.Tabs(selected="make") as main_tabs:
-            with gr.Tab("制作卡拉 OK MV", id="make"), gr.Row(equal_height=False):
-                with gr.Column(scale=7, min_width=340):
-                    with gr.Group(
+        with gr.Tabs(selected="make", elem_id="kf-main-tabs") as main_tabs:
+            with gr.Tab("制作 MV", id="make"), gr.Row(
+                equal_height=False, elem_id="kf-make-layout"
+            ):
+                with gr.Column(scale=7, min_width=300, elem_id="kf-make-inputs"):
+                    with gr.Accordion(
+                        "继续已保存的工程",
+                        open=False,
                         elem_classes=["kf-card", "kf-resume-card"],
                         visible=True,
                     ) as recent_workspace_prompt:
                         recent_workspace_message = gr.Markdown(recent_message)
                         saved_workspace_selector = gr.Dropdown(
-                            label="已保存工程（自动选择最近有效工程）",
+                            label="已保存工程（默认选中最近工程）",
                             choices=workspace_choices,
                             value=recent_manifest or None,
                             interactive=recent_available,
@@ -6863,7 +4303,7 @@ def create_web_app(
                                 interactive=recent_available,
                             )
                             start_blank_workspace = gr.Button(
-                                "不载入，继续当前制作页",
+                                "保留当前制作页",
                             )
                             refresh_saved_workspaces = gr.Button("刷新工程列表")
                     with gr.Group(elem_classes="kf-card"):
@@ -6871,58 +4311,61 @@ def create_web_app(
                         gr.Markdown("## 选择制作素材")
                         with gr.Row():
                             make_audio = gr.File(
-                                label="① 歌曲音频（无 MV 时必填；有声 MV 可用其音轨）",
+                                label="歌曲音频（有声 MV 可不传）",
+                                elem_id="make-audio-upload",
                                 file_types=["audio"],
                                 type="filepath",
                             )
                             make_video = gr.File(
-                                label="② 对应 MV（可选）",
+                                label="歌曲 MV（可选）",
+                                elem_id="make-video-upload",
                                 file_types=["video"],
                                 type="filepath",
                             )
                             make_lyrics = gr.File(
-                                label=(
-                                    "③ 已生成歌词/字幕项目（推荐 JSON，也支持 ASS/LRC/SRT/VTT）"
-                                ),
+                                label="歌词 / 字幕文件",
+                                elem_id="make-lyrics-upload",
                                 file_types=[".txt", ".lrc", ".srt", ".vtt", ".ass", ".json"],
                                 type="filepath",
                             )
-                        make_cover = gr.File(
-                            label="没有 MV？上传专辑图片（可选；在线歌曲链接也会尝试读取封面）",
-                            file_types=["image"],
-                            type="filepath",
-                        )
-                        gr.Markdown(
-                            "> 不上传 MV 时，可分别选择背景主题与唱片布局；5 种背景 × 5 种布局，"
-                            "共 25 种组合。默认会从每张专辑封面继承颜色，并放入居中黑胶唱片机。"
-                        )
-                        with gr.Row():
-                            make_cover_background = gr.Dropdown(
-                                label="无 MV 背景主题",
-                                choices=[
-                                    ("专辑流光 · 自动继承每张封面颜色", "adaptive"),
-                                    ("深空星环 · 蓝紫暗色舞台", "midnight"),
-                                    ("日落玻璃 · 珊瑚暖色舞台", "sunset"),
-                                    ("海盐极光 · 明亮青绿水光", "ocean"),
-                                    ("纸艺花园 · 奶油色手工拼贴", "paper"),
-                                ],
-                                value="adaptive",
+                        with gr.Accordion('没有 MV？设置封面与动态背景', open=False):
+                            make_cover = gr.File(
+                                label="专辑封面（无 MV 时使用，可选）",
+                                elem_id="make-cover-upload",
+                                file_types=["image"],
+                                type="filepath",
                             )
-                            make_cover_style = gr.Dropdown(
-                                label="唱片与频谱布局",
-                                choices=[
-                                    ("黑胶唱片机 · 大唱片、唱臂与柔焦封面", "turntable"),
-                                    ("星环唱片 · 居中黑胶与双层声浪", "aurora"),
-                                    ("偏置黑胶 · 悬浮唱片与脉冲窗", "vinyl"),
-                                    ("环绕唱片 · 居中封面与横向声浪", "halo"),
-                                    ("侧置频谱 · 左侧唱片与动态频谱", "spectrum"),
-                                ],
-                                value="turntable",
+                            gr.Markdown(
+                                "> 不上传 MV 时，可分别选择背景主题与唱片布局；5 种背景 × 5 种布局，"
+                                "共 25 种组合。默认会从每张专辑封面继承颜色，并放入居中黑胶唱片机。"
                             )
-                            make_cover_waveform = gr.Checkbox(
-                                label="显示随音乐实时变化的波形 / 频谱",
-                                value=True,
-                            )
+                            with gr.Row():
+                                make_cover_background = gr.Dropdown(
+                                    label="无 MV 背景主题",
+                                    choices=[
+                                        ("专辑流光 · 自动继承每张封面颜色", "adaptive"),
+                                        ("深空星环 · 蓝紫暗色舞台", "midnight"),
+                                        ("日落玻璃 · 珊瑚暖色舞台", "sunset"),
+                                        ("海盐极光 · 明亮青绿水光", "ocean"),
+                                        ("纸艺花园 · 奶油色手工拼贴", "paper"),
+                                    ],
+                                    value="adaptive",
+                                )
+                                make_cover_style = gr.Dropdown(
+                                    label="唱片与频谱布局",
+                                    choices=[
+                                        ("黑胶唱片机 · 大唱片、唱臂与柔焦封面", "turntable"),
+                                        ("星环唱片 · 居中黑胶与双层声浪", "aurora"),
+                                        ("偏置黑胶 · 悬浮唱片与脉冲窗", "vinyl"),
+                                        ("环绕唱片 · 居中封面与横向声浪", "halo"),
+                                        ("侧置频谱 · 左侧唱片与动态频谱", "spectrum"),
+                                    ],
+                                    value="turntable",
+                                )
+                                make_cover_waveform = gr.Checkbox(
+                                    label="显示随音乐实时变化的波形 / 频谱",
+                                    value=True,
+                                )
                         make_lyrics_status = gr.Markdown("尚未选择歌词文件。")
                         with gr.Accordion("没有歌词文件？直接粘贴歌词", open=False):
                             make_pasted = gr.Textbox(
@@ -6939,7 +4382,7 @@ def create_web_app(
                                 <div class="kf-tip">
                                   <b>Vmoe 卡拉 OK 字幕库</b>提供带逐字特效的 ASS。因官方接口要求
                                   reCAPTCHA，请在下方官方页面由本人完成搜索和验证，下载 ASS 后
-                                  上传到上面的“③ 已生成歌词/字幕项目”；程序不会绕过验证码。
+                                  上传到上面的“歌词 / 字幕文件”；程序不会绕过验证码。
                                   <div style="margin-top:10px">
                                     <a href="https://karaoke.vmoe.info/" target="_blank"
                                        rel="noopener noreferrer">在新窗口打开 Vmoe 歌词搜索</a>
@@ -6995,9 +4438,7 @@ def create_web_app(
                                 size="sm",
                                 interactive=managed_netease_login,
                             )
-                            make_netease_login_status = gr.Markdown(
-                                initial_netease_status
-                            )
+                            make_netease_login_status = gr.Markdown(initial_netease_status)
                             gr.Markdown(
                                 "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
                                 "正常扫码或登录，成功后窗口会自动关闭；不用退出平时的 Edge，"
@@ -7105,124 +4546,103 @@ def create_web_app(
                                     "Noto Sans CJK SC",
                                     "Arial",
                                 ],
-                                value="Microsoft YaHei",
+                                value=initial_preferences.get("font", "Microsoft YaHei"),
                                 allow_custom_value=True,
                             )
-                            make_font_size = gr.Slider(32, 88, value=58, step=1, label="字号")
-                            make_margin = gr.Slider(30, 180, value=72, step=2, label="底部距离")
-                        make_font_files = gr.File(
-                            label="导入自定义字体（TTF / OTF / TTC，可多选；会随工程保存）",
-                            file_types=[".ttf", ".otf", ".ttc"],
-                            file_count="multiple",
-                            type="filepath",
-                        )
-                        gr.Markdown(
-                            "> 字体名称一般填写字体文件显示的家族名；上传后会先用首个文件名自动填入，"
-                            "若预览不一致可手动修改。请只使用有授权的字体。"
-                        )
-                        with gr.Row():
-                            make_text_color = gr.ColorPicker(label="未唱颜色", value="#FFFFFF")
-                            make_highlight_color = gr.ColorPicker(
-                                label="唱到的颜色", value="#FFD54A"
-                            )
-                        with gr.Row():
-                            make_show_translation = gr.Checkbox(
-                                label="有中文翻译时显示翻译",
-                                value=True,
-                            )
-                            make_translation_size = gr.Slider(
-                                24,
-                                58,
-                                value=38,
+                            make_font_size = gr.Slider(
+                                32,
+                                88,
+                                value=initial_preferences.get("font_size", 58),
                                 step=1,
-                                label="翻译字号",
+                                label="字号",
                             )
-                            make_translation_color = gr.ColorPicker(
-                                label="翻译颜色",
-                                value="#EAF4FF",
-                            )
-                            make_translation_margin = gr.Slider(
-                                16,
-                                760,
-                                value=54,
+                            make_margin = gr.Slider(
+                                30,
+                                180,
+                                value=initial_preferences.get("margin_v", 72),
                                 step=2,
-                                label="翻译距顶部",
-                                info="按最终 1080p 字幕坐标计算；数值越大，翻译越靠下。",
+                                label="底部距离",
                             )
-                        with gr.Row():
-                            make_show_pronunciation = gr.Checkbox(
-                                label="显示日语振假名和英语片假名读音",
-                                value=True,
-                            )
-                            make_auto_english_pronunciation = gr.Checkbox(
-                                label="显示英语片假名（关闭后也会过滤旧工程和已导入的英文注音）",
-                                value=True,
-                            )
-                            make_pronunciation_size = gr.Slider(
-                                18,
-                                40,
-                                value=26,
-                                step=1,
-                                label="注音字号",
-                            )
-                            make_pronunciation_color = gr.ColorPicker(
-                                label="注音颜色",
-                                value="#FFFFFF",
-                            )
-                        with gr.Row():
-                            make_show_countdown = gr.Checkbox(
-                                label="长间奏结束前显示三点开唱提示",
-                                value=True,
-                            )
-                            make_countdown_gap = gr.Slider(
-                                5,
-                                20,
-                                value=8,
-                                step=1,
-                                label="视为长间奏的空档（秒）",
-                                info="超过此长度会清空字幕，并在下一句前 3 秒给出提示。",
-                            )
-
-                        with gr.Accordion("歌曲实景字幕预览", open=True):
-                            make_preview_status = gr.Markdown(
-                                "上传 MV，或上传音频和封面后，会自动换成这首歌的真实画面；"
-                                "加入歌词后也会自动挑选对应时刻的一句。"
-                            )
-                            make_style_preview = gr.HTML(
-                                subtitle_preview_html(
-                                    "Microsoft YaHei",
-                                    58,
-                                    "#FFFFFF",
-                                    "#FFD54A",
-                                    72,
-                                    True,
-                                    38,
-                                    "#EAF4FF",
-                                    True,
-                                    26,
-                                    "#FFFFFF",
-                                    (
-                                        "I hear the flowers whisper.\n"
-                                        "Let me bloom inside your garden."
-                                    ),
-                                    "让我在你的花园里盛放。",
-                                )
+                        with gr.Accordion('导入自定义字体', open=False):
+                            make_font_files = gr.File(
+                                label="导入自定义字体（TTF / OTF / TTC，可多选；会随工程保存）",
+                                file_types=[".ttf", ".otf", ".ttc"],
+                                file_count="multiple",
+                                type="filepath",
                             )
                             gr.Markdown(
-                                "<small>画面、歌词和时间点来自当前素材；颜色、位置会即时更新。"
-                                "浏览器未安装的自定义字体在这里可能近似显示，最终成片会嵌入上传字体。</small>"
+                                "> 字体名称一般填写字体文件显示的家族名；上传后会先用首个文件名自动填入，"
+                                "若预览不一致可手动修改。请只使用有授权的字体。"
                             )
-                            with gr.Accordion("手动更换预览歌词（可选）", open=False):
-                                with gr.Row():
-                                    make_preview_text = gr.Textbox(
-                                        label="原文双行预览（画面上排 + 下排）",
-                                        value=_PREVIEW_DEFAULT_TEXT,
-                                        lines=2,
-                                    )
-                                    make_preview_translation = gr.Textbox(
-                                        label="翻译预览",
-                                        value=_PREVIEW_DEFAULT_TRANSLATION,
-                                    )
+                        with gr.Row():
+                            make_text_color = gr.ColorPicker(
+                                label="未唱颜色",
+                                value=initial_preferences.get("text_color", "#FFFFFF"),
+                            )
+                            make_highlight_color = gr.ColorPicker(
+                                label="唱到的颜色",
+                                value=initial_preferences.get("highlight_color", "#FFD54A"),
+                            )
+                        with gr.Accordion('翻译样式', open=False):
+                            with gr.Row():
+                                make_show_translation = gr.Checkbox(
+                                    label="有中文翻译时显示翻译",
+                                    value=initial_preferences.get("show_translation", True),
+                                )
+                                make_translation_size = gr.Slider(
+                                    24,
+                                    58,
+                                    value=initial_preferences.get("translation_font_size", 38),
+                                    step=1,
+                                    label="翻译字号",
+                                )
+                                make_translation_color = gr.ColorPicker(
+                                    label="翻译颜色",
+                                    value=initial_preferences.get("translation_color", "#EAF4FF"),
+                                )
+                                make_translation_margin = gr.Slider(
+                                    16,
+                                    760,
+                                    value=initial_preferences.get("translation_margin_v", 54),
+                                    step=2,
+                                    label="翻译距顶部",
+                                    info="按最终 1080p 字幕坐标计算；数值越大，翻译越靠下。",
+                                )
+                        with gr.Accordion('日语 / 英语注音', open=False):
+                            with gr.Row():
+                                make_show_pronunciation = gr.Checkbox(
+                                    label="显示日语振假名和英语片假名读音",
+                                    value=initial_preferences.get("show_pronunciation", True),
+                                )
+                                make_auto_english_pronunciation = gr.Checkbox(
+                                    label="显示英语片假名（关闭后也会过滤旧工程和已导入的英文注音）",
+                                    value=initial_preferences.get("auto_english_pronunciation", True),
+                                )
+                                make_pronunciation_size = gr.Slider(
+                                    18,
+                                    40,
+                                    value=initial_preferences.get("pronunciation_font_size", 26),
+                                    step=1,
+                                    label="注音字号",
+                                )
+                                make_pronunciation_color = gr.ColorPicker(
+                                    label="注音颜色",
+                                    value=initial_preferences.get("pronunciation_color", "#FFFFFF"),
+                                )
+                        with gr.Accordion('间奏与开唱提示', open=False):
+                            with gr.Row():
+                                make_show_countdown = gr.Checkbox(
+                                    label="长间奏结束前显示三音符开唱提示",
+                                    value=initial_preferences.get("show_countdown", True),
+                                )
+                                make_countdown_gap = gr.Slider(
+                                    5,
+                                    20,
+                                    value=initial_preferences.get("countdown_gap_threshold", 8),
+                                    step=1,
+                                    label="视为长间奏的空档（秒）",
+                                    info="超过此长度会清空字幕，并在下一句前 3 秒给出提示。",
+                                )
 
                         with gr.Accordion("高级设置", open=False):
                             with gr.Row():
@@ -7271,38 +4691,85 @@ def create_web_app(
                                 info="视频较大时请选择剩余空间充足的磁盘，建议至少预留 2 GB。",
                             )
 
-                    gr.Markdown(
-                        "> 推荐先生成校准工程：这里上传的音频、MV、歌词和网易云链接会"
-                        "直接带入编辑器，不需要重复上传。确认歌词后再生成最终视频。"
-                    )
-                    gr.Markdown("**最终导出版本（可单选，也可同时选择）**")
-                    with gr.Row():
-                        make_export_original = gr.Checkbox(
-                            label="导出原声版",
-                            value=True,
+                with gr.Column(scale=5, min_width=300, elem_id="kf-make-preview"):
+                    with gr.Group(elem_classes="kf-card", elem_id="kf-preview-card"):
+                        gr.Markdown("### 字幕与画面预览")
+                        make_preview_status = gr.Markdown(
+                            "上传 MV，或上传音频和封面后，会自动换成这首歌的真实画面；"
+                            "加入歌词后也会自动挑选对应时刻的一句。"
                         )
-                        make_export_instrumental = gr.Checkbox(
-                            label=_demucs_option_label("导出无人声伴奏版"),
-                            value=False,
+                        make_style_preview = gr.HTML(
+                            subtitle_preview_html(
+                                make_font.value,
+                                make_font_size.value,
+                                make_text_color.value,
+                                make_highlight_color.value,
+                                make_margin.value,
+                                make_show_translation.value,
+                                make_translation_size.value,
+                                make_translation_color.value,
+                                make_show_pronunciation.value,
+                                make_pronunciation_size.value,
+                                make_pronunciation_color.value,
+                                (
+                                    "I hear the flowers whisper.\n"
+                                    "Let me bloom inside your garden."
+                                ),
+                                "让我在你的花园里盛放。",
+                                auto_english_pronunciation=make_auto_english_pronunciation.value,
+                                translation_margin_v=make_translation_margin.value,
+                                show_countdown=make_show_countdown.value,
+                                countdown_gap_threshold=make_countdown_gap.value,
+                            )
                         )
-                    with gr.Row():
-                        make_prepare_button = gr.Button(
-                            "① 生成可校准 KTV 工程",
-                            variant="primary",
-                            elem_classes="kf-primary",
+                        gr.Markdown(
+                            "<small>画面、歌词和时间点来自当前素材；颜色、位置会即时更新。"
+                            "浏览器未安装的自定义字体在这里可能近似显示，最终成片会嵌入上传字体。</small>"
                         )
-                        make_button = gr.Button(
-                            "② 生成所选卡拉 OK MV",
-                            variant="secondary",
-                        )
-                    make_open_editor_button = gr.Button(
-                        "打开当前歌词工程继续微调",
-                        size="sm",
-                    )
+                        with gr.Accordion("手动更换预览歌词（可选）", open=False):
+                            with gr.Row():
+                                make_preview_text = gr.Textbox(
+                                    label="原文双行预览（画面上排 + 下排）",
+                                    value=_PREVIEW_DEFAULT_TEXT,
+                                    lines=2,
+                                )
+                                make_preview_translation = gr.Textbox(
+                                    label="翻译预览",
+                                    value=_PREVIEW_DEFAULT_TRANSLATION,
+                                )
 
-                with gr.Column(scale=5, min_width=320):
+                    with gr.Group(elem_classes="kf-card", elem_id="kf-make-actions"):
+                        gr.Markdown(
+                            "### 准备好后，开始校准\n"
+                            "先试听和校准歌词，再导出成片。素材会自动带入编辑器。"
+                        )
+                        gr.Markdown("**最终导出版本（可单选，也可同时选择）**")
+                        with gr.Row():
+                            make_export_original = gr.Checkbox(
+                                label="导出原声版",
+                                value=True,
+                            )
+                            make_export_instrumental = gr.Checkbox(
+                                label=_demucs_option_label("导出无人声伴奏版"),
+                                value=False,
+                            )
+                        with gr.Row():
+                            make_prepare_button = gr.Button(
+                                "生成工程，进入校准",
+                                variant="primary",
+                                elem_classes="kf-primary",
+                            )
+                            make_button = gr.Button(
+                                "直接制作 MV",
+                                variant="secondary",
+                            )
+                        make_open_editor_button = gr.Button(
+                            "打开当前歌词工程继续微调",
+                            size="sm",
+                        )
+
                     with gr.Group(elem_classes="kf-card"):
-                        gr.HTML('<div class="kf-section-label">Step 03 · 成品</div>')
+                        gr.HTML('<div class="kf-section-label">输出与处理进度</div>')
                         make_status = gr.Markdown(
                             "### 等待开始\n选择素材后点击生成，这里会显示结果。",
                             elem_classes="kf-status",
@@ -7320,7 +4787,363 @@ def create_web_app(
                         open_make_dir = gr.Button("在电脑中打开输出文件夹")
                         open_make_message = gr.Markdown()
 
-            with gr.Tab("只生成时间轴歌词", id="align"), gr.Row(equal_height=False):
+            with gr.Tab("歌词编辑", id="editor"):
+                with gr.Column(elem_id="editor-workspace"):
+                    with gr.Row(elem_id="editor-topbar"):
+                        gr.Button(
+                            "☰ 歌词总览",
+                            elem_id="editor-overview-toggle",
+                        )
+                        gr.Markdown(
+                            "`Ctrl + 滚轮`：缩放鼠标所在的歌词或时间轴",
+                            elem_id="editor-zoom-help",
+                        )
+                        editor_status = gr.Markdown(
+                            "### 等待载入歌词项目",
+                            elem_id="editor-status",
+                        )
+                        editor_exit_workspace = gr.Button(
+                            "← 返回制作页",
+                            elem_id="editor-exit-workspace",
+                        )
+                    with gr.Row(elem_id="editor-mode-bar"):
+                        editor_timing_mode = gr.Radio(
+                            choices=[
+                                ("逐句逐词精修", "line"),
+                                ("全局连续调整", "global"),
+                            ],
+                            value=initial_preferences.get("timing_mode", "line"),
+                            label="编辑模式",
+                            interactive=True,
+                            scale=2,
+                            elem_id="editor-timing-mode",
+                        )
+                        editor_ripple_following = gr.Checkbox(
+                            label="本句句尾越过下一句时，联动后续歌词（合唱可关闭）",
+                            value=initial_preferences.get("ripple_following", True),
+                            interactive=True,
+                            scale=3,
+                        )
+                    with gr.Accordion(
+                        "载入或更换工程", open=False, elem_id="editor-project-loader"
+                    ):
+                        with gr.Row():
+                            editor_audio = gr.Audio(
+                                label="校准用歌曲音频",
+                                sources=["upload"],
+                                type="filepath",
+                            )
+                            editor_source = gr.File(
+                                label="带时间轴歌词或 Karaoke Forge 歌词 JSON",
+                                file_types=[
+                                    ".lrc",
+                                    ".yrc",
+                                    ".srt",
+                                    ".vtt",
+                                    ".ass",
+                                    ".json",
+                                ],
+                                type="filepath",
+                            )
+                        editor_load = gr.Button(
+                            "载入编辑器", variant="primary", elem_id="editor-load-project"
+                        )
+                        editor_name = gr.Textbox(
+                            label="导出名称",
+                            value="",
+                            placeholder="留空时沿用工程歌名",
+                        )
+                    with gr.Row(elem_id="editor-project-actions"):
+                        editor_export = gr.Button(
+                            "保存并导出全部格式（同时载入制作页）",
+                            variant="primary",
+                            elem_classes="kf-primary",
+                            elem_id="editor-export",
+                        )
+                        editor_handoff = gr.Button(
+                            "确认校准并开始制作 MV",
+                            variant="primary",
+                            elem_classes="kf-primary",
+                            elem_id="editor-handoff",
+                        )
+                    with gr.Row(equal_height=True, elem_id="editor-main-grid"):
+                        with (
+                            gr.Column(
+                                scale=1,
+                                min_width=0,
+                                elem_id="editor-overview-panel",
+                            ),
+                            gr.Group(elem_classes="kf-card"),
+                        ):
+                            with gr.Row():
+                                gr.Markdown("## 歌词总览")
+                                gr.Button(
+                                    "收起总览",
+                                    elem_id="editor-overview-close",
+                                )
+                            gr.Markdown(
+                                "点击序号会选择、试听并收起窗口；点击其他单元格可继续编辑。"
+                                "右键任意歌词行可隐藏、插入或删除；也可使用右侧当前句操作。"
+                            )
+                            editor_lines = gr.Dataframe(
+                                headers=["序号", "状态", "开始秒", "结束秒", "原文", "翻译"],
+                                datatype=["number", "str", "number", "number", "str", "str"],
+                                value=[],
+                                row_count=(1, "dynamic"),
+                                column_count=(6, "fixed"),
+                                interactive=True,
+                                wrap=True,
+                                label="歌词总览（点序号试听并收起；其他列可编辑）",
+                                elem_id="editor-lines",
+                            )
+                        with (
+                            gr.Column(
+                                scale=8,
+                                min_width=0,
+                                elem_id="editor-timing-panel",
+                            ),
+                            gr.Group(
+                                elem_classes="kf-card",
+                                elem_id="editor-timing-card",
+                            ),
+                        ):
+                            editor_preview = gr.HTML(
+                                '<div class="kf-tip"><b>开始校准歌词</b><br>'
+                                '从制作页生成工程，或展开上方“载入或更换工程”导入歌词。'
+                                '载入后可从“歌词总览”选句试听。</div>',
+                                elem_classes="kf-sticky-preview",
+                                elem_id="editor-preview",
+                            )
+                            with gr.Column(
+                                elem_id="editor-audio-panel",
+                                visible=not initial_global_mode,
+                            ) as editor_audio_panel:
+                                editor_line_audio = gr.Audio(
+                                    label="当前句试听",
+                                    interactive=False,
+                                    autoplay=True,
+                                    loop=False,
+                                    elem_id="editor-line-audio",
+                                )
+                                editor_audio_refresh_trigger = gr.Textbox(
+                                    value="",
+                                    visible=False,
+                                )
+                            editor_timing_status = gr.Markdown(
+                                "从歌词总览选择一句即可自动播放。",
+                                elem_id="editor-timing-status",
+                            )
+                            with gr.Column(
+                                visible=initial_global_mode,
+                                elem_id="editor-global-mode-panel",
+                            ) as editor_global_mode_panel:
+                                gr.Markdown(
+                                    "### 全局连续时间轴\n"
+                                    "整首音频只加载一次；点击句块或拖动红色播放头即可连续定位，"
+                                    "不再为每句重新生成试听片段。点击任一句后，可直接在下方继续"
+                                    "精修这句的每个字。"
+                                )
+                                editor_global_audio = gr.Audio(
+                                    label="全曲连续试听",
+                                    interactive=False,
+                                    autoplay=False,
+                                    loop=False,
+                                    elem_id="editor-global-audio",
+                                )
+                                editor_global_timeline = gr.HTML(
+                                    '<div class="kf-tip">载入工程后，这里会显示全曲时间轴。</div>',
+                                    elem_id="editor-global-timeline",
+                                )
+                                editor_global_line_request = gr.Number(
+                                    value=1,
+                                    precision=0,
+                                    elem_id="kf-global-line-request",
+                                )
+                                editor_global_select_line = gr.Button(
+                                    "选择全局时间轴句子",
+                                    elem_id="kf-global-select-line",
+                                )
+                                editor_global_navigation_id = gr.Textbox(
+                                    value="",
+                                    elem_id="kf-global-navigation-id",
+                                )
+                                editor_global_navigation_ack = gr.Textbox(
+                                    value="",
+                                    elem_id="kf-global-navigation-ack",
+                                )
+                                editor_global_edge_request = gr.Textbox(
+                                    value="",
+                                    elem_id="kf-global-edge-request",
+                                )
+                                editor_global_edge_apply = gr.Button(
+                                    "应用全局时间轴句界",
+                                    elem_id="kf-global-edge-apply",
+                                )
+                                editor_apply_global_rows = gr.Button(
+                                    "保存总览中的全局时间修改",
+                                    variant="secondary",
+                                    elem_id="editor-save-global-rows",
+                                )
+                                with gr.Row():
+                                    editor_global_scope = gr.Radio(
+                                        choices=[
+                                            ("整首歌", "all"),
+                                            ("当前句及之后", "suffix"),
+                                        ],
+                                        value="all",
+                                        label="平移范围",
+                                        interactive=True,
+                                    )
+                                    editor_global_offset = gr.Number(
+                                        value=0.1,
+                                        precision=3,
+                                        label="平移秒数（可为负）",
+                                    )
+                                    editor_apply_global_shift = gr.Button(
+                                        "应用全局平移",
+                                        variant="primary",
+                                        elem_classes="kf-primary",
+                                        elem_id="editor-shift-global",
+                                    )
+                            with gr.Column(elem_id="editor-token-tuning-panel"):
+                                gr.Markdown(
+                                    "### 当前句逐字微调\n"
+                                    "全局模式中点击上方任一句即可载入；可改字、删字、拖动黄色"
+                                    "边界，并用红线定位到整曲中的真实时间。"
+                                )
+                                editor_token_timeline = gr.HTML(
+                                    '<div class="kf-tip">选择歌词后，这里会显示可拖动的逐词时间条。</div>',
+                                    elem_id="editor-token-timeline",
+                                )
+                                editor_token_json = gr.Textbox(
+                                    value="[]",
+                                    show_label=False,
+                                    container=False,
+                                    elem_id="kf-token-json",
+                                )
+                                with gr.Row(
+                                    elem_id="editor-timing-actions"
+                                ) as editor_timing_actions:
+                                    editor_save_tokens = gr.Button(
+                                        "保存逐词时间",
+                                        variant="primary",
+                                        elem_classes="kf-primary",
+                                        elem_id="editor-save-tokens",
+                                    )
+                                    editor_start_earlier = gr.Button(
+                                        "开始 −0.1s", elem_id="editor-start-earlier"
+                                    )
+                                    editor_start_later = gr.Button(
+                                        "开始 +0.1s", elem_id="editor-start-later"
+                                    )
+                                    editor_end_earlier = gr.Button(
+                                        "结束 −0.1s", elem_id="editor-end-earlier"
+                                    )
+                                    editor_end_later = gr.Button(
+                                        "结束 +0.1s", elem_id="editor-end-later"
+                                    )
+
+                        with (
+                            gr.Column(
+                                scale=4,
+                                min_width=0,
+                                elem_id="editor-side-panel",
+                            ),
+                            gr.Group(
+                                elem_classes="kf-card",
+                                elem_id="editor-side-card",
+                            ),
+                        ):
+                            with gr.Column(elem_id="editor-line-controls"):
+                                gr.Markdown("### 当前句操作")
+                                with gr.Row():
+                                    editor_line_number = gr.Number(
+                                        label="当前行",
+                                        value=1,
+                                        precision=0,
+                                        minimum=1,
+                                        interactive=False,
+                                        elem_id="editor-current-line",
+                                    )
+                                    editor_load_line = gr.Button(
+                                        "重新载入", elem_id="editor-reload-line"
+                                    )
+                                    editor_listen_line = gr.Button("试听")
+                            with gr.Row():
+                                editor_toggle_line_hidden = gr.Button(
+                                    "👁 隐藏 / 显示", elem_id="editor-toggle-line"
+                                )
+                                editor_delete_line = gr.Button(
+                                    "🗑 删除", elem_id="editor-delete-line"
+                                )
+                                editor_undo_line_action = gr.Button("↶ 撤销", elem_id="editor-undo")
+                                editor_redo_line_action = gr.Button("↷ 重做", elem_id="editor-redo")
+                            with gr.Row():
+                                editor_previous_line = gr.Button(
+                                    "← 上一句",
+                                    elem_id="editor-previous-line",
+                                )
+                                editor_next_line = gr.Button(
+                                    "下一句 →",
+                                    elem_id="editor-next-line",
+                                )
+                            with gr.Row():
+                                editor_loop_line = gr.Checkbox(
+                                    label="循环当前句",
+                                    value=False,
+                                    interactive=True,
+                                    elem_id="editor-loop-line",
+                                )
+                                editor_playback_rate = gr.Slider(
+                                    minimum=0.5,
+                                    maximum=2.0,
+                                    value=initial_preferences.get("playback_rate", 1.0),
+                                    step=0.5,
+                                    label="播放倍速",
+                                    interactive=True,
+                                    elem_id="editor-playback-rate",
+                                )
+                            editor_line_context_action = gr.Textbox(
+                                value="",
+                                show_label=False,
+                                container=False,
+                                elem_id="kf-line-context-action",
+                            )
+                            editor_apply_context_action = gr.Button(
+                                "应用歌词行菜单",
+                                elem_id="kf-line-context-apply",
+                            )
+                            with gr.Column(elem_id="editor-pronunciation-panel"):
+                                editor_whole_pronunciation = gr.Textbox(
+                                    label="整行注音（可选）",
+                                    placeholder="逐词表格为空时可用整行读音",
+                                )
+                                editor_pronunciation_units = gr.Dataframe(
+                                    headers=["原文片段", "读音", "起始字符", "结束字符"],
+                                    datatype=["str", "str", "number", "number"],
+                                    value=[],
+                                    row_count=(1, "dynamic"),
+                                    column_count=(4, "fixed"),
+                                    interactive=True,
+                                    wrap=True,
+                                    label="逐词注音（修改“读音”列）",
+                                    elem_id="editor-pronunciation-units",
+                                )
+                                editor_save_pronunciation = gr.Button(
+                                    "保存本行注音",
+                                    variant="primary",
+                                    elem_id="editor-save-pronunciation",
+                                )
+
+                    with gr.Accordion("下载与输出目录", open=False):
+                        editor_downloads = gr.File(
+                            label="下载编辑后的歌词",
+                            file_count="multiple",
+                        )
+                        open_editor_dir = gr.Button("在电脑中打开输出文件夹")
+                        open_editor_message = gr.Markdown()
+
+            with gr.Tab("音频对齐", id="align"), gr.Row(equal_height=False):
                 with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
                     gr.HTML('<div class="kf-section-label">Lyrics Lab</div>')
                     gr.Markdown("## 从歌曲得到时间轴歌词")
@@ -7402,7 +5225,7 @@ def create_web_app(
                     open_align_dir = gr.Button("在电脑中打开输出文件夹")
                     open_align_message = gr.Markdown()
 
-            with gr.Tab("网易云链接生成歌词", id="netease"), gr.Row(equal_height=False):
+            with gr.Tab("网易云歌词", id="netease"), gr.Row(equal_height=False):
                 with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
                     gr.HTML('<div class="kf-section-label">NetEase Link</div>')
                     gr.Markdown("## 从网易云单曲链接生成时间轴歌词")
@@ -7459,9 +5282,7 @@ def create_web_app(
                         size="sm",
                         interactive=managed_netease_login,
                     )
-                    netease_login_status = gr.Markdown(
-                        initial_netease_status
-                    )
+                    netease_login_status = gr.Markdown(initial_netease_status)
                     gr.Markdown(
                         "会打开一个 **Karaoke Forge 专用 Edge 窗口**。请在网易云官网"
                         "正常扫码或登录，成功后窗口会自动关闭；不用退出平时的 Edge，"
@@ -7566,7 +5387,7 @@ def create_web_app(
                     open_netease_dir = gr.Button("在电脑中打开输出文件夹")
                     open_netease_message = gr.Markdown()
 
-            with gr.Tab("QQ 音乐生成歌词", id="qqmusic"), gr.Row(equal_height=False):
+            with gr.Tab("QQ 音乐歌词", id="qqmusic"), gr.Row(equal_height=False):
                 with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
                     gr.HTML('<div class="kf-section-label">QQ Music Lyrics</div>')
                     gr.Markdown("## 从 QQ 音乐单曲链接生成时间轴歌词")
@@ -7610,324 +5431,7 @@ def create_web_app(
                     open_qqmusic_dir = gr.Button("在电脑中打开输出文件夹")
                     open_qqmusic_message = gr.Markdown()
 
-            with gr.Tab("歌词与注音编辑", id="editor"):
-                with gr.Column(elem_id="editor-workspace"):
-                    with gr.Row(elem_id="editor-topbar"):
-                        gr.Button(
-                            "☰ 歌词总览",
-                            elem_id="editor-overview-toggle",
-                        )
-                        gr.Markdown(
-                            "`Ctrl + 滚轮`：缩放鼠标所在的歌词或时间轴",
-                            elem_id="editor-zoom-help",
-                        )
-                        editor_status = gr.Markdown(
-                            "### 等待载入歌词项目",
-                            elem_id="editor-status",
-                        )
-                        editor_exit_workspace = gr.Button(
-                            "← 返回制作页",
-                            elem_id="editor-exit-workspace",
-                        )
-                    with gr.Row(elem_id="editor-mode-bar"):
-                        editor_timing_mode = gr.Radio(
-                            choices=[
-                                ("逐句逐词精修", "line"),
-                                ("全局连续调整", "global"),
-                            ],
-                            value="line",
-                            label="编辑模式",
-                            interactive=True,
-                            scale=2,
-                            elem_id="editor-timing-mode",
-                        )
-                        editor_ripple_following = gr.Checkbox(
-                            label="本句句尾越过下一句时，联动后续歌词（合唱可关闭）",
-                            value=True,
-                            interactive=True,
-                            scale=3,
-                        )
-                    with gr.Row(equal_height=True, elem_id="editor-main-grid"):
-                        with (
-                            gr.Column(
-                                scale=1,
-                                min_width=0,
-                                elem_id="editor-overview-panel",
-                            ),
-                            gr.Group(elem_classes="kf-card"),
-                        ):
-                            with gr.Row():
-                                gr.Markdown("## 歌词总览")
-                                gr.Button(
-                                    "收起总览",
-                                    elem_id="editor-overview-close",
-                                )
-                            gr.Markdown(
-                                "点击序号会选择、试听并收起窗口；点击其他单元格可继续编辑。"
-                                "右键任意歌词行可隐藏、插入或删除；也可使用右侧当前句操作。"
-                            )
-                            with gr.Accordion("载入或更换工程", open=False):
-                                with gr.Row():
-                                    editor_audio = gr.Audio(
-                                        label="校准用歌曲音频",
-                                        sources=["upload"],
-                                        type="filepath",
-                                    )
-                                    editor_source = gr.File(
-                                        label="带时间轴歌词或 Karaoke Forge 歌词 JSON",
-                                        file_types=[
-                                            ".lrc",
-                                            ".yrc",
-                                            ".srt",
-                                            ".vtt",
-                                            ".ass",
-                                            ".json",
-                                        ],
-                                        type="filepath",
-                                    )
-                                editor_load = gr.Button("载入编辑器", variant="primary")
-                            editor_lines = gr.Dataframe(
-                                headers=["序号", "状态", "开始秒", "结束秒", "原文", "翻译"],
-                                datatype=["number", "str", "number", "number", "str", "str"],
-                                value=[],
-                                row_count=(1, "dynamic"),
-                                column_count=(6, "fixed"),
-                                interactive=True,
-                                wrap=True,
-                                label="歌词总览（点序号试听并收起；其他列可编辑）",
-                                elem_id="editor-lines",
-                            )
-                            with gr.Row():
-                                editor_name = gr.Textbox(
-                                    label="导出名称",
-                                    value="",
-                                    placeholder="留空时沿用工程歌名",
-                                )
-                                editor_export = gr.Button(
-                                    "保存并导出全部格式（同时载入制作页）",
-                                    variant="primary",
-                                    elem_classes="kf-primary",
-                                )
-                                editor_handoff = gr.Button(
-                                    "确认校准并开始制作 MV",
-                                    variant="primary",
-                                    elem_classes="kf-primary",
-                                )
-                            editor_downloads = gr.File(
-                                label="下载编辑后的歌词",
-                                file_count="multiple",
-                            )
-                            open_editor_dir = gr.Button("在电脑中打开输出文件夹")
-                            open_editor_message = gr.Markdown()
-                        with (
-                            gr.Column(
-                                scale=8,
-                                min_width=560,
-                                elem_id="editor-timing-panel",
-                            ),
-                            gr.Group(
-                                elem_classes="kf-card",
-                                elem_id="editor-timing-card",
-                            ),
-                        ):
-                            editor_preview = gr.HTML(
-                                '<div class="kf-tip">载入项目后，这里会实时预览当前行。</div>',
-                                elem_classes="kf-sticky-preview",
-                                elem_id="editor-preview",
-                            )
-                            with gr.Column(elem_id="editor-audio-panel") as editor_audio_panel:
-                                editor_line_audio = gr.Audio(
-                                    label="当前句试听",
-                                    interactive=False,
-                                    autoplay=True,
-                                    loop=False,
-                                    elem_id="editor-line-audio",
-                                )
-                                editor_audio_refresh_trigger = gr.Textbox(
-                                    value="",
-                                    visible=False,
-                                )
-                            editor_timing_status = gr.Markdown(
-                                "从歌词总览选择一句即可自动播放。",
-                                elem_id="editor-timing-status",
-                            )
-                            with gr.Column(
-                                visible=False,
-                                elem_id="editor-global-mode-panel",
-                            ) as editor_global_mode_panel:
-                                gr.Markdown(
-                                    "### 全局连续时间轴\n"
-                                    "整首音频只加载一次；点击句块或拖动红色播放头即可连续定位，"
-                                    "不再为每句重新生成试听片段。点击任一句后，可直接在下方继续"
-                                    "精修这句的每个字。"
-                                )
-                                editor_global_audio = gr.Audio(
-                                    label="全曲连续试听",
-                                    interactive=False,
-                                    autoplay=False,
-                                    loop=False,
-                                    elem_id="editor-global-audio",
-                                )
-                                editor_global_timeline = gr.HTML(
-                                    '<div class="kf-tip">载入工程后，这里会显示全曲时间轴。</div>',
-                                    elem_id="editor-global-timeline",
-                                )
-                                editor_global_line_request = gr.Number(
-                                    value=1,
-                                    precision=0,
-                                    elem_id="kf-global-line-request",
-                                )
-                                editor_global_select_line = gr.Button(
-                                    "选择全局时间轴句子",
-                                    elem_id="kf-global-select-line",
-                                )
-                                editor_global_edge_request = gr.Textbox(
-                                    value="",
-                                    elem_id="kf-global-edge-request",
-                                )
-                                editor_global_edge_apply = gr.Button(
-                                    "应用全局时间轴句界",
-                                    elem_id="kf-global-edge-apply",
-                                )
-                                editor_apply_global_rows = gr.Button(
-                                    "保存总览中的全局时间修改",
-                                    variant="secondary",
-                                )
-                                with gr.Row():
-                                    editor_global_scope = gr.Radio(
-                                        choices=[
-                                            ("整首歌", "all"),
-                                            ("当前句及之后", "suffix"),
-                                        ],
-                                        value="all",
-                                        label="平移范围",
-                                        interactive=True,
-                                    )
-                                    editor_global_offset = gr.Number(
-                                        value=0.1,
-                                        precision=3,
-                                        label="平移秒数（可为负）",
-                                    )
-                                    editor_apply_global_shift = gr.Button(
-                                        "应用全局平移",
-                                        variant="primary",
-                                        elem_classes="kf-primary",
-                                    )
-                            with gr.Column(elem_id="editor-token-tuning-panel"):
-                                gr.Markdown(
-                                    "### 当前句逐字微调\n"
-                                    "全局模式中点击上方任一句即可载入；可改字、删字、拖动黄色"
-                                    "边界，并用红线定位到整曲中的真实时间。"
-                                )
-                                editor_token_timeline = gr.HTML(
-                                    '<div class="kf-tip">选择歌词后，这里会显示可拖动的逐词时间条。</div>',
-                                    elem_id="editor-token-timeline",
-                                )
-                                editor_token_json = gr.Textbox(
-                                    value="[]",
-                                    show_label=False,
-                                    container=False,
-                                    elem_id="kf-token-json",
-                                )
-                                with gr.Row(
-                                    elem_id="editor-timing-actions"
-                                ) as editor_timing_actions:
-                                    editor_save_tokens = gr.Button(
-                                        "保存逐词时间",
-                                        variant="primary",
-                                        elem_classes="kf-primary",
-                                        elem_id="editor-save-tokens",
-                                    )
-                                    editor_start_earlier = gr.Button("开始 −0.1s")
-                                    editor_start_later = gr.Button("开始 +0.1s")
-                                    editor_end_earlier = gr.Button("结束 −0.1s")
-                                    editor_end_later = gr.Button("结束 +0.1s")
-
-                        with (
-                            gr.Column(
-                                scale=4,
-                                min_width=340,
-                                elem_id="editor-side-panel",
-                            ),
-                            gr.Group(
-                                elem_classes="kf-card",
-                                elem_id="editor-side-card",
-                            ),
-                        ):
-                            with gr.Column(elem_id="editor-line-controls"):
-                                gr.Markdown("### 当前句操作")
-                                with gr.Row():
-                                    editor_line_number = gr.Number(
-                                        label="当前行",
-                                        value=1,
-                                        precision=0,
-                                        minimum=1,
-                                        interactive=False,
-                                        elem_id="editor-current-line",
-                                    )
-                                    editor_load_line = gr.Button("重新载入")
-                                    editor_listen_line = gr.Button("试听")
-                            with gr.Row():
-                                editor_toggle_line_hidden = gr.Button("👁 隐藏 / 显示")
-                                editor_delete_line = gr.Button("🗑 删除")
-                                editor_undo_line_action = gr.Button("↶ 撤销 / 重做（全工程）")
-                            with gr.Row():
-                                editor_previous_line = gr.Button(
-                                    "← 上一句",
-                                    elem_id="editor-previous-line",
-                                )
-                                editor_next_line = gr.Button(
-                                    "下一句 →",
-                                    elem_id="editor-next-line",
-                                )
-                            with gr.Row():
-                                editor_loop_line = gr.Checkbox(
-                                    label="循环当前句",
-                                    value=False,
-                                    interactive=True,
-                                    elem_id="editor-loop-line",
-                                )
-                                gr.Slider(
-                                    minimum=0.5,
-                                    maximum=2.0,
-                                    value=1.0,
-                                    step=0.5,
-                                    label="播放倍速",
-                                    interactive=True,
-                                    elem_id="editor-playback-rate",
-                                )
-                            editor_line_context_action = gr.Textbox(
-                                value="",
-                                show_label=False,
-                                container=False,
-                                elem_id="kf-line-context-action",
-                            )
-                            editor_apply_context_action = gr.Button(
-                                "应用歌词行菜单",
-                                elem_id="kf-line-context-apply",
-                            )
-                            with gr.Column(elem_id="editor-pronunciation-panel"):
-                                editor_whole_pronunciation = gr.Textbox(
-                                    label="整行注音（可选）",
-                                    placeholder="逐词表格为空时可用整行读音",
-                                )
-                                editor_pronunciation_units = gr.Dataframe(
-                                    headers=["原文片段", "读音", "起始字符", "结束字符"],
-                                    datatype=["str", "str", "number", "number"],
-                                    value=[],
-                                    row_count=(1, "dynamic"),
-                                    column_count=(4, "fixed"),
-                                    interactive=True,
-                                    wrap=True,
-                                    label="逐词注音（修改“读音”列）",
-                                    elem_id="editor-pronunciation-units",
-                                )
-                                editor_save_pronunciation = gr.Button(
-                                    "保存本行注音",
-                                    variant="primary",
-                                )
-
-            with gr.Tab("歌词格式转换", id="convert"), gr.Row():
+            with gr.Tab("格式转换", id="convert"), gr.Row():
                 with gr.Column(scale=6), gr.Group(elem_classes="kf-card"):
                     gr.HTML('<div class="kf-section-label">Format Desk</div>')
                     gr.Markdown("## 在常见歌词格式之间转换")
@@ -7965,7 +5469,7 @@ def create_web_app(
                         interactive=False,
                     )
 
-            with gr.Tab("环境检查与帮助", id="doctor"), gr.Row():
+            with gr.Tab("设置与帮助", id="doctor"), gr.Row():
                 with gr.Column(scale=7), gr.Group(elem_classes="kf-card"):
                     environment = gr.Markdown(environment_markdown())
                     refresh_environment = gr.Button("重新检查")
@@ -7998,9 +5502,7 @@ def create_web_app(
                         info="不保存账号或密码；Clash 常见端口为 7890 / 7897。",
                     )
                     model_mirror_confirmed = gr.Checkbox(
-                        label=(
-                            "我明白 hf-mirror 是第三方服务，并明确同意仅用它下载公开模型"
-                        ),
+                        label=("我明白 hf-mirror 是第三方服务，并明确同意仅用它下载公开模型"),
                         value=initial_mirror_confirmed,
                     )
                     with gr.Row():
@@ -8047,6 +5549,104 @@ def create_web_app(
         gr.HTML(
             f'<div class="kf-footer">Karaoke Forge v{__version__} · 本地处理 · '
             "请确保你拥有歌曲、歌词和视频的使用权</div>"
+        )
+        editor_preferences = gr.Textbox(
+            value=json.dumps(initial_preferences, ensure_ascii=False),
+            show_label=False,
+            container=False,
+            elem_id="kf-editor-preferences",
+        )
+        editor_preferences_update = gr.Textbox(
+            value="",
+            show_label=False,
+            container=False,
+            elem_id="kf-editor-preferences-update",
+        )
+        preference_controls = {
+            "font": make_font,
+            "font_size": make_font_size,
+            "margin_v": make_margin,
+            "text_color": make_text_color,
+            "highlight_color": make_highlight_color,
+            "show_translation": make_show_translation,
+            "translation_font_size": make_translation_size,
+            "translation_color": make_translation_color,
+            "translation_margin_v": make_translation_margin,
+            "show_pronunciation": make_show_pronunciation,
+            "auto_english_pronunciation": make_auto_english_pronunciation,
+            "pronunciation_font_size": make_pronunciation_size,
+            "pronunciation_color": make_pronunciation_color,
+            "show_countdown": make_show_countdown,
+            "countdown_gap_threshold": make_countdown_gap,
+            "timing_mode": editor_timing_mode,
+            "ripple_following": editor_ripple_following,
+            "playback_rate": editor_playback_rate,
+        }
+
+        def persist_preference_patch(patch: object) -> None:
+            try:
+                save_preferences(patch)
+            except OSError as exc:
+                _record_web_error("save-editor-preferences", exc)
+                gr.Warning("本次设置已生效，但暂时无法保存到本机，下次打开可能需要重新设置。")
+
+        def preference_input_callback(key: str) -> Callable[[object], None]:
+            def save_control_preference(value: object) -> None:
+                persist_preference_patch({key: value})
+
+            return save_control_preference
+
+        for preference_key, preference_control in preference_controls.items():
+            # .input only follows a user's edit; restoring a project or page
+            # must not overwrite settings that were saved in another session.
+            preference_control.input(
+                preference_input_callback(preference_key),
+                inputs=preference_control,
+                outputs=None,
+                queue=False,
+                show_progress="hidden",
+            )
+
+        def save_editor_preferences_update(value: str) -> None:
+            try:
+                patch = json.loads(value)
+            except (TypeError, ValueError):
+                return
+            persist_preference_patch(patch)
+
+        # The bridge is written by JavaScript, so Gradio's user-input event is
+        # not emitted. Only this dedicated bridge uses .change; visible controls
+        # keep .input so project/page restoration cannot save over preferences.
+        editor_preferences_update.change(
+            save_editor_preferences_update,
+            inputs=editor_preferences_update,
+            outputs=None,
+            queue=False,
+            show_progress="hidden",
+        )
+
+        def restore_editor_preferences() -> tuple[object, ...]:
+            # Blocks can live for days. Re-read on every page load so a new
+            # browser session gets changes made since this server was started.
+            preferences = load_preferences()
+            mode = preferences.get("timing_mode")
+            return (
+                *(preferences.get(key, gr.skip()) for key in preference_controls),
+                json.dumps(preferences, ensure_ascii=False),
+                gr.update(visible=mode != "global") if mode is not None else gr.skip(),
+                gr.update(visible=mode == "global") if mode is not None else gr.skip(),
+            )
+
+        app.load(
+            restore_editor_preferences,
+            outputs=[
+                *preference_controls.values(),
+                editor_preferences,
+                editor_audio_panel,
+                editor_global_mode_panel,
+            ],
+            queue=False,
+            show_progress="hidden",
         )
         app.load(fn=None, js=TOKEN_TIMELINE_JS, queue=False)
 
@@ -8181,9 +5781,7 @@ def create_web_app(
             if video is not None and video.is_file() and probe_media_has_audio(video) is True:
                 return current_music_u or "", gr.skip(), gr.skip()
             supplied_music_u = (current_music_u or "").strip()
-            if supplied_music_u and not netease_session_broker.recognizes_managed(
-                supplied_music_u
-            ):
+            if supplied_music_u and not netease_session_broker.recognizes_managed(supplied_music_u):
                 # The advanced MUSIC_U field is intentionally session-scoped and is not
                 # copied into the managed, cross-session login broker.
                 return supplied_music_u, gr.skip(), gr.skip()
@@ -8263,9 +5861,7 @@ def create_web_app(
         def begin_netease_relogin(request: object | None = None) -> tuple[object, ...]:
             if not local_netease_login_request(request):
                 return gr.skip(), *remote_netease_login_result()
-            login_generation = netease_session_broker.begin_explicit_login(
-                disable_existing=True
-            )
+            login_generation = netease_session_broker.begin_explicit_login(disable_existing=True)
             status = (
                 "### ⏳ 正在重新连接网易云账号\n"
                 "旧会话将被清理，请在弹出的专用 Edge 窗口中完成官方登录。"
@@ -8356,8 +5952,7 @@ def create_web_app(
                 detail = clear_netease_login_profile()
             except NeteaseLoginError as exc:
                 status = (
-                    "### ⚠️ 已断开当前账号，但专用登录资料暂时无法完全清理\n"
-                    f"{html.escape(str(exc))}"
+                    f"### ⚠️ 已断开当前账号，但专用登录资料暂时无法完全清理\n{html.escape(str(exc))}"
                 )
                 return (
                     "",
@@ -8486,9 +6081,7 @@ def create_web_app(
             music_u: str,
             request: object | None,
         ) -> tuple[str, str, str]:
-            safe_music_u = (
-                music_u if netease_session_broker.managed_token_allowed(music_u) else ""
-            )
+            safe_music_u = music_u if netease_session_broker.managed_token_allowed(music_u) else ""
             if not local_netease_login_request(request):
                 if netease_session_broker.recognizes_managed(safe_music_u):
                     safe_music_u = ""
@@ -9019,6 +6612,8 @@ def create_web_app(
             make_preview_progress,
             make_preview_active_row,
             make_translation_margin,
+            make_show_countdown,
+            make_countdown_gap,
         ]
         material_preview_event.then(
             subtitle_preview_html,
@@ -9030,6 +6625,8 @@ def create_web_app(
             *instant_preview_controls[:11],
             make_auto_english_pronunciation,
             make_translation_margin,
+            make_show_countdown,
+            make_countdown_gap,
         ]:
             preview_input.change(
                 subtitle_preview_html,
@@ -9290,9 +6887,7 @@ def create_web_app(
                 if path is not None and not path.is_file()
             ]
             missing_note = (
-                f"；未找到：{'、'.join(missing_assets)}，其余内容仍已恢复"
-                if missing_assets
-                else ""
+                f"；未找到：{'、'.join(missing_assets)}，其余内容仍已恢复" if missing_assets else ""
             )
             safe_workspace_name = html.escape(workspace.name)
             font_files = [str(path) for path in workspace.font_files]
@@ -9306,9 +6901,7 @@ def create_web_app(
             quality = str(settings.get("quality") or "推荐质量")
             if quality not in {"快速预览", "推荐质量", "高质量"}:
                 quality = "推荐质量"
-            auto_english_pronunciation = bool(
-                settings.get("auto_english_pronunciation", True)
-            )
+            auto_english_pronunciation = bool(settings.get("auto_english_pronunciation", True))
             cover_background = str(settings.get("cover_background") or "adaptive")
             if cover_background not in {"adaptive", "midnight", "sunset", "ocean", "paper"}:
                 cover_background = "adaptive"
@@ -9327,9 +6920,7 @@ def create_web_app(
             translation_margin_v = max(16, min(760, translation_margin_v))
             show_countdown = bool(settings.get("show_countdown", True))
             try:
-                countdown_gap_threshold = float(
-                    settings.get("countdown_gap_threshold") or 8.0
-                )
+                countdown_gap_threshold = float(settings.get("countdown_gap_threshold") or 8.0)
             except (TypeError, ValueError):
                 countdown_gap_threshold = 8.0
             countdown_gap_threshold = max(5.0, min(20.0, countdown_gap_threshold))
@@ -9339,10 +6930,9 @@ def create_web_app(
             alignment_separate_vocals = bool(settings.get("alignment_separate_vocals", False))
             timing_refinement = _web_timing_refinement(settings.get("timing_refinement", "auto"))
             make_status = (
-                f"### ✅ 已恢复工程 `{safe_workspace_name}`\n"
-                f"可以继续编辑或直接制作{missing_note}。"
+                f"### ✅ 已恢复工程 `{safe_workspace_name}`\n可以继续编辑或直接制作{missing_note}。"
             )
-            return (
+            restored_values = [
                 audio,
                 video,
                 str(workspace.lyrics_project),
@@ -9368,7 +6958,16 @@ def create_web_app(
                 countdown_gap_threshold,
                 gr.update(visible=True),
                 make_status,
-            )
+            ]
+            saved_preferences = load_preferences()
+            preference_key_by_component = {
+                component._id: key for key, component in preference_controls.items()
+            }
+            for index, component in enumerate(workspace_restore_outputs):
+                key = preference_key_by_component.get(component._id)
+                if key in saved_preferences:
+                    restored_values[index] = gr.skip()
+            return tuple(restored_values)
 
         restore_workspace_event = continue_recent_workspace.click(
             restore_recent_workspace,
@@ -9394,6 +6993,7 @@ def create_web_app(
         def open_current_make_project_editor(
             source: object,
             audio: object,
+            video: object | None = None,
         ) -> tuple[object, ...]:
             try:
                 path = _file_path(source)
@@ -9415,6 +7015,40 @@ def create_web_app(
                         or path.stem
                     )
                 )
+                playback_audio = _file_path(audio)
+                if (
+                    playback_audio is None
+                    or not playback_audio.is_file()
+                    or _is_empty_audio_placeholder(playback_audio)
+                ):
+                    playback_audio = (
+                        workspace.audio
+                        if workspace is not None
+                        and workspace.audio is not None
+                        and workspace.audio.is_file()
+                        else None
+                    )
+                playback_note = ""
+                if playback_audio is None:
+                    playback_video = _file_path(video)
+                    if playback_video is None or not playback_video.is_file():
+                        playback_video = workspace.video if workspace is not None else None
+                    if playback_video is not None and playback_video.is_file():
+                        has_audio = probe_media_has_audio(playback_video)
+                        if has_audio is True:
+                            playback_audio = playback_video
+                            playback_note = "已使用 MV 音轨，可逐句试听和微调。"
+                        elif has_audio is False:
+                            playback_note = "MV 没有音轨；可继续编辑歌词，试听前请在编辑器中上传音频。"
+                        else:
+                            playback_note = (
+                                "暂时无法确认 MV 音轨；可继续编辑歌词，"
+                                "试听前请在编辑器中上传音频。"
+                            )
+                    else:
+                        playback_note = "尚未载入试听音频；可继续编辑歌词，也可在编辑器中上传音频。"
+                if playback_note:
+                    loaded = (*loaded[:2], f"{loaded[2]}\n{playback_note}", *loaded[3:])
             except Exception as exc:
                 result = [gr.skip() for _ in range(15)]
                 result[-2] = gr.update(selected="make")
@@ -9423,15 +7057,17 @@ def create_web_app(
             return (
                 *loaded,
                 str(path),
-                audio,
+                str(playback_audio) if playback_audio is not None else None,
                 project_name,
                 gr.update(selected="editor"),
-                "### ✅ 歌词工程已载入编辑器\n可逐句试听和微调；制作页素材会继续保留。",
+                "### ✅ 歌词工程已载入编辑器\n"
+                + (playback_note or "可逐句试听和微调。")
+                + "制作页素材会继续保留。",
             )
 
         make_open_editor_button.click(
             open_current_make_project_editor,
-            inputs=[make_lyrics, make_audio],
+            inputs=[make_lyrics, make_audio, make_video],
             outputs=[
                 editor_payload,
                 editor_lines,
@@ -9569,7 +7205,7 @@ def create_web_app(
                 *result[2:],
                 token_timeline,
                 token_json,
-                snapshot or undo_state,
+                _editor_record_history(undo_state, snapshot),
             )
 
         def editor_audio_with_prefetch(
@@ -9703,9 +7339,20 @@ def create_web_app(
             ripple_enabled: bool,
             event: gr.SelectData,
         ) -> tuple[object, ...]:
-            skipped = tuple(gr.skip() for _ in range(11))
+            skipped = tuple(gr.skip() for _ in range(12))
             if not getattr(event, "selected", True) or event.index is None:
                 return skipped
+            if (
+                isinstance(event.index, (tuple, list))
+                and len(event.index) > 1
+                and event.index[1] != 0
+            ):
+                return skipped
+            # Only first-column selections acquire the browser mutation gate.
+            # A late acknowledgement for an ordinary cell click could otherwise
+            # release an unrelated save that started after that click.
+            acknowledgment = uuid4().hex
+            skipped = (*skipped[:11], acknowledgment)
             selected = (
                 event.index[0]
                 if isinstance(event.index, (tuple, list)) and event.index
@@ -9729,9 +7376,7 @@ def create_web_app(
                     return skipped
                 try:
                     requested_source_id = (
-                        int(float(raw_row[0]))
-                        if raw_row[0] not in (None, "")
-                        else selected_row + 1
+                        int(float(raw_row[0])) if raw_row[0] not in (None, "") else selected_row + 1
                     )
                 except (TypeError, ValueError):
                     requested_source_id = selected_row + 1
@@ -9766,8 +7411,7 @@ def create_web_app(
             if str(timing_mode) == "global":
                 clip = gr.skip()
                 timing_status = (
-                    f"已在全局时间轴选择第 {line_number} 行；"
-                    "整曲播放器保持连续，不会重新切片。"
+                    f"已在全局时间轴选择第 {line_number} 行；整曲播放器保持连续，不会重新切片。"
                 )
             else:
                 clip, timing_status = editor_audio_with_prefetch(
@@ -9787,7 +7431,8 @@ def create_web_app(
                 token_json,
                 clip,
                 timing_status,
-                snapshot or undo_state,
+                _editor_record_history(undo_state, snapshot),
+                acknowledgment,
             )
 
         select_editor_row.__annotations__["event"] = gr.SelectData
@@ -9827,22 +7472,22 @@ def create_web_app(
             target = min(
                 max(
                     1,
-                    int(absolute_target)
-                    if absolute_target is not None
-                    else selected + int(delta),
+                    int(absolute_target) if absolute_target is not None else selected + int(delta),
                 ),
                 len(document.lines),
             )
-            loaded = load_editor_line(
+            if continuous_mode and target == selected and snapshot is None:
+                return tuple(gr.skip() for _ in range(11))
+            line = document.lines[target - 1]
+            loaded = (
                 document.to_dict(),
                 document_to_editor_rows(document),
-                target,
+                line.pronunciation or "",
+                document_pronunciation_to_editor_rows(document, line),
+                gr.skip() if continuous_mode else editor_preview_html(document, target),
             )
-            token_timeline, token_json = editor_token_workspace(
-                loaded[0],
-                loaded[1],
-                target,
-            )
+            token_timeline = editor_token_timeline_html(document, target)
+            token_json = token_timing_to_json(line)
             if load_audio:
                 clip, timing_status = editor_audio_with_prefetch(
                     audio,
@@ -9870,7 +7515,7 @@ def create_web_app(
                 token_json,
                 clip,
                 timing_status,
-                snapshot or undo_state,
+                _editor_record_history(undo_state, snapshot),
             )
 
         editor_exit_workspace.click(
@@ -9919,9 +7564,7 @@ def create_web_app(
                 try:
                     document = read_lyrics(path)
                     project_name = str(
-                        document.metadata.get("ti")
-                        or document.metadata.get("title")
-                        or path.stem
+                        document.metadata.get("ti") or document.metadata.get("title") or path.stem
                     )
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     project_name = path.stem
@@ -9968,6 +7611,7 @@ def create_web_app(
                 editor_line_undo_payload,
             ],
             queue=False,
+            show_progress="hidden",
             cancels=[editor_preview_event, editor_line_draft_event],
         )
         editor_lines.select(
@@ -9996,8 +7640,10 @@ def create_web_app(
                 editor_line_audio,
                 editor_timing_status,
                 editor_line_undo_payload,
+                editor_mutation_ack,
             ],
             queue=False,
+            show_progress="hidden",
             cancels=[editor_preview_event, editor_line_draft_event],
         )
         editor_line_workspace_outputs = [
@@ -10027,6 +7673,15 @@ def create_web_app(
             ripple_enabled: bool,
         ) -> tuple[object, ...]:
             global_mode = str(mode) == "global"
+            if not payload or not payload.get("lines"):
+                return (
+                    gr.update(visible=not global_mode),
+                    gr.update(visible=True),
+                    gr.update(visible=True),
+                    gr.update(visible=global_mode),
+                    "载入歌词后即可使用所选编辑模式。",
+                    *(gr.skip() for _ in range(9)),
+                )
             before = document_from_payload(payload)
             document, snapshot = _editor_document_with_pending_changes(
                 payload,
@@ -10079,11 +7734,11 @@ def create_web_app(
                 document_pronunciation_to_editor_rows(document, line),
                 editor_preview_html(document, selected),
                 refreshed_token_json,
-                snapshot or undo_state,
+                _editor_record_history(undo_state, snapshot),
                 line_audio,
             )
 
-        editor_timing_mode.change(
+        editor_timing_mode_event = editor_timing_mode.input(
             switch_editor_timing_mode,
             inputs=[
                 editor_timing_mode,
@@ -10114,6 +7769,8 @@ def create_web_app(
                 editor_line_audio,
             ],
             queue=False,
+            show_progress="hidden",
+            cancels=[editor_preview_event, editor_line_draft_event],
         )
         editor_audio.change(
             lambda audio: audio,
@@ -10134,9 +7791,20 @@ def create_web_app(
             trigger_mode="always_last",
         )
 
-        editor_global_select_line.click(
-            lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, requested: (
-                step_editor_line_workspace(
+        def select_global_editor_workspace(
+            audio,
+            payload,
+            table,
+            line_number,
+            token_json,
+            whole,
+            units,
+            undo_state,
+            ripple,
+            requested,
+        ):
+            try:
+                result = step_editor_line_workspace(
                     audio,
                     payload,
                     table,
@@ -10151,7 +7819,13 @@ def create_web_app(
                     continuous_mode=True,
                     absolute_target=int(requested),
                 )
-            ),
+            except (ValueError, TypeError, IndexError) as exc:
+                result = [gr.skip() for _ in range(11)]
+                result[9] = f"切句未完成：{html.escape(str(exc))}"
+            return result
+
+        global_navigation_event = editor_global_select_line.click(
+            select_global_editor_workspace,
             inputs=[
                 editor_audio,
                 editor_payload,
@@ -10168,6 +7842,14 @@ def create_web_app(
             queue=False,
             trigger_mode="always_last",
             cancels=[editor_preview_event, editor_line_draft_event],
+            show_progress="hidden",
+        )
+        global_navigation_event.then(
+            lambda navigation_id: navigation_id,
+            inputs=editor_global_navigation_id,
+            outputs=editor_global_navigation_ack,
+            queue=False,
+            show_progress="hidden",
         )
 
         def global_workspace_result(
@@ -10194,9 +7876,7 @@ def create_web_app(
                 editor_preview_html(document, selected),
                 token_timeline,
                 token_json,
-                editor_global_timeline_workspace(
-                    document.to_dict(), rows, selected, audio
-                ),
+                editor_global_timeline_workspace(document.to_dict(), rows, selected, audio),
                 status,
                 undo_state,
             )
@@ -10236,15 +7916,11 @@ def create_web_app(
                 len(document.lines),
             )
             changed = document.to_dict() != before.to_dict()
-            snapshot = (
-                _editor_undo_snapshot(before, int(line_number))
-                if changed
-                else undo_state
+            snapshot = _editor_record_history(
+                undo_state, (_editor_undo_snapshot(before, int(line_number)) if changed else None)
             )
             ripple_note = (
-                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
-                if shifted_lines
-                else ""
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行" if shifted_lines else ""
             )
             status = (
                 f"### ✅ 已保存全局总览修改{ripple_note}"
@@ -10370,6 +8046,18 @@ def create_web_app(
                 raise ValueError("要调整的歌词行当前不可见或没有完整时间。")
 
             original_edge = current.start if edge == "start" else current.end
+            snap = request_payload.get("snap")
+            snapped_join = False
+            if isinstance(snap, dict) and edge == "end" and snap.get("edge") == "start":
+                snap_line = snap.get("line")
+                if (
+                    isinstance(snap_line, int)
+                    and not isinstance(snap_line, bool)
+                    and 1 <= snap_line <= len(timeline_document.lines)
+                    and snap_line != target
+                ):
+                    snap_start = timeline_document.lines[snap_line - 1].start
+                    snapped_join = snap_start is not None and abs(snap_start - seconds) < 1e-6
             if abs(seconds - original_edge) < 0.0005:
                 after = document
             else:
@@ -10386,6 +8074,7 @@ def create_web_app(
                 after,
                 ripple_enabled,
                 source_ids=source_ids,
+                minimum_gap=0.0 if snapped_join else 0.02,
             )
             changed = after.to_dict() != before.to_dict()
             source_focus = source_ids[target - 1] if target <= len(source_ids) else None
@@ -10394,13 +8083,13 @@ def create_web_app(
                 if source_focus is not None and 1 <= source_focus <= len(before.lines)
                 else min(max(1, int(line_number)), len(before.lines))
             )
-            next_undo = _editor_undo_snapshot(before, focus) if changed else undo_state
+            next_undo = _editor_record_history(
+                undo_state, _editor_undo_snapshot(before, focus) if changed else None
+            )
             line = after.lines[target - 1]
             assert line.start is not None and line.end is not None
             ripple_note = (
-                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
-                if shifted_lines
-                else ""
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行" if shifted_lines else ""
             )
             edge_label = "句首" if edge == "start" else "句尾"
             status = (
@@ -10411,7 +8100,7 @@ def create_web_app(
             )
             return global_workspace_result(after, target, audio, status, next_undo)
 
-        editor_global_edge_apply.click(
+        editor_global_edge_event = editor_global_edge_apply.click(
             apply_global_line_edge_workspace,
             inputs=[
                 editor_payload,
@@ -10431,7 +8120,7 @@ def create_web_app(
             cancels=[editor_preview_event, editor_line_draft_event],
         )
 
-        editor_apply_global_rows.click(
+        editor_global_rows_event = editor_apply_global_rows.click(
             apply_global_rows_workspace,
             inputs=[
                 editor_payload,
@@ -10486,10 +8175,8 @@ def create_web_app(
                 start_line=start_line,
             )
             changed = document.to_dict() != before.to_dict()
-            snapshot = (
-                _editor_undo_snapshot(before, int(line_number))
-                if changed
-                else undo_state
+            snapshot = _editor_record_history(
+                undo_state, (_editor_undo_snapshot(before, int(line_number)) if changed else None)
             )
             range_label = "当前句及之后" if start_line > 1 else "整首歌"
             status = (
@@ -10504,7 +8191,7 @@ def create_web_app(
                 snapshot,
             )
 
-        editor_apply_global_shift.click(
+        editor_global_shift_event = editor_apply_global_shift.click(
             apply_global_shift_workspace,
             inputs=[
                 editor_payload,
@@ -10523,7 +8210,7 @@ def create_web_app(
             queue=False,
             cancels=[editor_preview_event, editor_line_draft_event],
         )
-        editor_previous_line.click(
+        editor_previous_line_event = editor_previous_line.click(
             lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, mode: (
                 step_editor_line_workspace(
                     audio,
@@ -10554,9 +8241,10 @@ def create_web_app(
             ],
             outputs=editor_line_workspace_outputs,
             queue=False,
+            show_progress="hidden",
             cancels=[editor_preview_event, editor_line_draft_event],
         )
-        editor_next_line.click(
+        editor_next_line_event = editor_next_line.click(
             lambda audio, payload, table, line_number, token_json, whole, units, undo_state, ripple, mode: (
                 step_editor_line_workspace(
                     audio,
@@ -10587,6 +8275,7 @@ def create_web_app(
             ],
             outputs=editor_line_workspace_outputs,
             queue=False,
+            show_progress="hidden",
             cancels=[editor_preview_event, editor_line_draft_event],
         )
 
@@ -10752,6 +8441,7 @@ def create_web_app(
             pronunciation_table: object,
             action_request: str,
             ripple_enabled: bool,
+            undo_state: dict[str, Any] | None = None,
         ) -> tuple[object, ...]:
             before = document_from_payload(payload)
             undo_focus = min(max(1, int(line_number)), len(before.lines))
@@ -10764,9 +8454,8 @@ def create_web_app(
                 request_data = parsed_request
                 raw_action_row = int(parsed_request["row"])
                 raw_rows_before_action = _table_rows(table)
-                if (
-                    not bool(parsed_request.get("current"))
-                    and 0 <= raw_action_row < len(raw_rows_before_action)
+                if not bool(parsed_request.get("current")) and 0 <= raw_action_row < len(
+                    raw_rows_before_action
                 ):
                     raw_target = [*raw_rows_before_action[raw_action_row], None][:1]
                     try:
@@ -10786,12 +8475,8 @@ def create_web_app(
                 pass
             if request_data is not None and bool(request_data.get("current")):
                 original_selected = min(max(1, int(line_number)), len(before.lines))
-                if _editor_row_source_ids(table, len(before.lines)).count(
-                    original_selected
-                ) != 1:
-                    raise ValueError(
-                        "当前句已被删除或重复；请先应用全局表格修改，再选择歌词行。"
-                    )
+                if _editor_row_source_ids(table, len(before.lines)).count(original_selected) != 1:
+                    raise ValueError("当前句已被删除或重复；请先应用全局表格修改，再选择歌词行。")
             document, _snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -10858,7 +8543,12 @@ def create_web_app(
             return (
                 *_editor_selected_line_outputs(after, final_selected),
                 f"{action_result[8]}{ripple_note}",
-                _editor_undo_snapshot(before, undo_focus),
+                _editor_record_history(
+                    undo_state or {},
+                    _editor_undo_snapshot(before, undo_focus)
+                    if after.to_dict() != before.to_dict()
+                    else None,
+                ),
             )
 
         def apply_editor_current_line_action_workspace(
@@ -10870,6 +8560,7 @@ def create_web_app(
             pronunciation_table: object,
             action: str,
             ripple_enabled: bool,
+            undo_state: dict[str, Any],
         ) -> tuple[object, ...]:
             request = json.dumps(
                 {"row": int(line_number) - 1, "action": action, "current": True},
@@ -10884,6 +8575,7 @@ def create_web_app(
                 pronunciation_table,
                 request,
                 ripple_enabled,
+                undo_state,
             )
 
         editor_context_action_event = editor_apply_context_action.click(
@@ -10897,81 +8589,6 @@ def create_web_app(
                 editor_pronunciation_units,
                 editor_line_context_action,
                 editor_ripple_following,
-            ],
-            outputs=editor_line_action_outputs,
-            queue=False,
-            cancels=[
-                editor_preview_event,
-                editor_line_draft_event,
-                editor_auto_advance_event,
-            ],
-        )
-        editor_toggle_line_event = editor_toggle_line_hidden.click(
-            lambda payload, table, line_number, token_json, whole, units, ripple: (
-                apply_editor_current_line_action_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    "toggle-hidden",
-                    ripple,
-                )
-            ),
-            inputs=[
-                editor_payload,
-                editor_lines,
-                editor_line_number,
-                editor_token_json,
-                editor_whole_pronunciation,
-                editor_pronunciation_units,
-                editor_ripple_following,
-            ],
-            outputs=editor_line_action_outputs,
-            queue=False,
-            cancels=[
-                editor_preview_event,
-                editor_line_draft_event,
-                editor_auto_advance_event,
-            ],
-        )
-        editor_delete_line_event = editor_delete_line.click(
-            lambda payload, table, line_number, token_json, whole, units, ripple: (
-                apply_editor_current_line_action_workspace(
-                    payload,
-                    table,
-                    line_number,
-                    token_json,
-                    whole,
-                    units,
-                    "delete",
-                    ripple,
-                )
-            ),
-            inputs=[
-                editor_payload,
-                editor_lines,
-                editor_line_number,
-                editor_token_json,
-                editor_whole_pronunciation,
-                editor_pronunciation_units,
-                editor_ripple_following,
-            ],
-            outputs=editor_line_action_outputs,
-            queue=False,
-            cancels=[
-                editor_preview_event,
-                editor_line_draft_event,
-                editor_auto_advance_event,
-            ],
-        )
-        undo_editor_event = editor_undo_line_action.click(
-            undo_editor_line_action,
-            inputs=[
-                editor_payload,
-                editor_lines,
-                editor_line_number,
                 editor_line_undo_payload,
             ],
             outputs=editor_line_action_outputs,
@@ -10982,13 +8599,106 @@ def create_web_app(
                 editor_auto_advance_event,
             ],
         )
+        editor_toggle_line_event = editor_toggle_line_hidden.click(
+            lambda payload, table, line_number, token_json, whole, units, ripple, history: (
+                apply_editor_current_line_action_workspace(
+                    payload,
+                    table,
+                    line_number,
+                    token_json,
+                    whole,
+                    units,
+                    "toggle-hidden",
+                    ripple,
+                    history,
+                )
+            ),
+            inputs=[
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_ripple_following,
+                editor_line_undo_payload,
+            ],
+            outputs=editor_line_action_outputs,
+            queue=False,
+            cancels=[
+                editor_preview_event,
+                editor_line_draft_event,
+                editor_auto_advance_event,
+            ],
+        )
+        editor_delete_line_event = editor_delete_line.click(
+            lambda payload, table, line_number, token_json, whole, units, ripple, history: (
+                apply_editor_current_line_action_workspace(
+                    payload,
+                    table,
+                    line_number,
+                    token_json,
+                    whole,
+                    units,
+                    "delete",
+                    ripple,
+                    history,
+                )
+            ),
+            inputs=[
+                editor_payload,
+                editor_lines,
+                editor_line_number,
+                editor_token_json,
+                editor_whole_pronunciation,
+                editor_pronunciation_units,
+                editor_ripple_following,
+                editor_line_undo_payload,
+            ],
+            outputs=editor_line_action_outputs,
+            queue=False,
+            cancels=[
+                editor_preview_event,
+                editor_line_draft_event,
+                editor_auto_advance_event,
+            ],
+        )
+        history_events = []
+        for history_button, history_function in [
+            (editor_undo_line_action, undo_editor_line_action),
+            (editor_redo_line_action, redo_editor_line_action),
+        ]:
+            history_events.append(
+                history_button.click(
+                    history_function,
+                    inputs=[
+                        editor_payload,
+                        editor_lines,
+                        editor_line_number,
+                        editor_line_undo_payload,
+                        editor_token_json,
+                        editor_whole_pronunciation,
+                        editor_pronunciation_units,
+                        editor_ripple_following,
+                    ],
+                    outputs=editor_line_action_outputs,
+                    queue=False,
+                    show_progress="hidden",
+                    cancels=[
+                        editor_preview_event,
+                        editor_line_draft_event,
+                        editor_auto_advance_event,
+                    ],
+                )
+            )
         for editor_event in [
             editor_context_action_event,
             editor_toggle_line_event,
             editor_delete_line_event,
-            undo_editor_event,
+            *history_events,
         ]:
             refresh_audio_after_editor_event(editor_event)
+
         def listen_editor_line_for_mode(
             audio: object,
             payload: dict[str, Any],
@@ -11035,9 +8745,7 @@ def create_web_app(
             source_ids = _editor_row_source_ids(table, len(before.lines))
             original_selected = min(max(1, int(line_number)), len(before.lines))
             if source_ids.count(original_selected) != 1:
-                raise ValueError(
-                    "当前句已被删除或重复；请先应用全局表格修改，再选择要微调的歌词。"
-                )
+                raise ValueError("当前句已被删除或重复；请先应用全局表格修改，再选择要微调的歌词。")
             document, pending_snapshot = _editor_document_with_pending_changes(
                 payload,
                 table,
@@ -11071,9 +8779,7 @@ def create_web_app(
             line = after.lines[selected - 1]
             assert line.start is not None and line.end is not None
             ripple_note = (
-                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
-                if shifted_lines
-                else ""
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行" if shifted_lines else ""
             )
             result = (
                 after.to_dict(),
@@ -11091,13 +8797,17 @@ def create_web_app(
                 selected,
             )
             after = document_from_payload(result[0])
-            next_undo = (
-                pending_snapshot or _editor_undo_snapshot(before, int(line_number))
-                if after.to_dict() != before.to_dict()
-                else undo_state
+            next_undo = _editor_record_history(
+                undo_state,
+                (
+                    pending_snapshot or _editor_undo_snapshot(before, int(line_number))
+                    if after.to_dict() != before.to_dict()
+                    else None
+                ),
             )
             return (*result, token_timeline, token_json, next_undo)
 
+        editor_nudge_events = []
         for timing_button, timing_function in [
             (
                 editor_start_earlier,
@@ -11194,6 +8904,7 @@ def create_web_app(
                 ],
             )
             refresh_audio_after_editor_event(timing_event)
+            editor_nudge_events.append(timing_event)
 
         def save_editor_token_timing_workspace(
             payload: dict[str, Any],
@@ -11234,9 +8945,7 @@ def create_web_app(
             line = after.lines[selected - 1]
             assert line.start is not None and line.end is not None
             ripple_note = (
-                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行"
-                if shifted_lines
-                else ""
+                f"；已联动后移第 {shifted_lines[0]}–{shifted_lines[-1]} 行" if shifted_lines else ""
             )
             result = (
                 after.to_dict(),
@@ -11252,10 +8961,13 @@ def create_web_app(
                     f"整句范围：**{line.start:.2f}s → {line.end:.2f}s**{ripple_note}。"
                 ),
             )
-            next_undo = (
-                pending_snapshot or _editor_undo_snapshot(before, int(line_number))
-                if after.to_dict() != before.to_dict()
-                else undo_state
+            next_undo = _editor_record_history(
+                undo_state,
+                (
+                    pending_snapshot or _editor_undo_snapshot(before, int(line_number))
+                    if after.to_dict() != before.to_dict()
+                    else None
+                ),
             )
             return (*result, next_undo)
 
@@ -11292,7 +9004,7 @@ def create_web_app(
         )
         refresh_audio_after_editor_event(editor_save_tokens_event)
 
-        editor_save_pronunciation.click(
+        editor_save_pronunciation_event = editor_save_pronunciation.click(
             save_editor_pronunciation_workspace,
             inputs=[
                 editor_payload,
@@ -11331,6 +9043,7 @@ def create_web_app(
             output_name: str,
             token_timing_json: str | None,
             ripple_enabled: bool,
+            undo_state: dict[str, Any] | None = None,
         ) -> tuple[object, ...]:
             before = document_from_payload(payload)
             result = export_editor_project_for_web(
@@ -11359,7 +9072,13 @@ def create_web_app(
                 manifest_value = result[0].get("metadata", {}).get("workspace_manifest")
                 if manifest_value:
                     _allow_gradio_workspace_paths(app, manifest_value)
-            return result[0], result[1], selected, *result[2:]
+            history = _editor_record_history(
+                undo_state or {},
+                _editor_undo_snapshot(before, int(line_number))
+                if result[0].get("lines") != payload.get("lines")
+                else None,
+            )
+            return result[0], result[1], selected, *result[2:], history
 
         editor_export_event = editor_export.click(
             export_editor_project_workspace,
@@ -11372,6 +9091,7 @@ def create_web_app(
                 editor_name,
                 editor_token_json,
                 editor_ripple_following,
+                editor_line_undo_payload,
             ],
             outputs=[
                 editor_payload,
@@ -11380,6 +9100,7 @@ def create_web_app(
                 editor_status,
                 editor_downloads,
                 editor_output_directory,
+                editor_line_undo_payload,
             ],
             api_name="export_editor_project",
         )
@@ -11414,6 +9135,7 @@ def create_web_app(
             audio_file: object | None,
             token_timing_json: str,
             ripple_enabled: bool,
+            undo_state: dict[str, Any] | None = None,
         ) -> tuple[object, ...]:
             try:
                 before = document_from_payload(payload)
@@ -11456,6 +9178,7 @@ def create_web_app(
                     *result[2:],
                     gr.update(selected="make"),
                     True,
+                    _editor_record_history(undo_state or {}, _snapshot),
                 )
             except Exception as exc:
                 log_path = _record_web_error("editor-handoff", exc)
@@ -11471,6 +9194,7 @@ def create_web_app(
                     gr.skip(),
                     gr.skip(),
                     False,
+                    undo_state or {},
                 )
 
         editor_handoff_event = editor_handoff.click(
@@ -11485,6 +9209,7 @@ def create_web_app(
                 editor_audio,
                 editor_token_json,
                 editor_ripple_following,
+                editor_line_undo_payload,
             ],
             outputs=[
                 editor_payload,
@@ -11497,8 +9222,36 @@ def create_web_app(
                 make_audio,
                 main_tabs,
                 editor_handoff_ready,
+                editor_line_undo_payload,
             ],
         )
+
+        for mutation_event in [
+            editor_timing_mode_event,
+            editor_load_line_event,
+            editor_previous_line_event,
+            editor_next_line_event,
+            editor_global_edge_event,
+            editor_global_rows_event,
+            editor_global_shift_event,
+            editor_context_action_event,
+            editor_toggle_line_event,
+            editor_delete_line_event,
+            *history_events,
+            *editor_nudge_events,
+            editor_save_tokens_event,
+            editor_save_pronunciation_event,
+            editor_export_event,
+            editor_handoff_event,
+        ]:
+            # `.then` acknowledges failures as well as successful edits, so the
+            # browser can always release its mutation gate after this request.
+            mutation_event.then(
+                lambda: uuid4().hex,
+                outputs=editor_mutation_ack,
+                queue=False,
+                show_progress="hidden",
+            )
 
         def make_after_editor_handoff(
             handoff_ready: bool,
@@ -11700,8 +9453,17 @@ def create_web_app(
             outputs=make_lyrics_status,
             queue=False,
         )
-        font_name_event = make_font_files.change(
-            lambda files: _file_paths(files)[0].stem if _file_paths(files) else gr.skip(),
+
+        def use_uploaded_font(files: object) -> object:
+            paths = _file_paths(files)
+            if not paths:
+                return gr.skip()
+            font = paths[0].stem
+            persist_preference_patch({"font": font})
+            return font
+
+        font_name_event = make_font_files.upload(
+            use_uploaded_font,
             inputs=make_font_files,
             outputs=make_font,
             queue=False,

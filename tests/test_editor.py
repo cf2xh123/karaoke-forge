@@ -74,9 +74,7 @@ def test_editor_rejects_a_cleared_nonempty_line_until_it_is_deleted() -> None:
 
 
 def test_token_delete_preserves_an_untouched_source_overlap() -> None:
-    document = parse_yrc(
-        "[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n"
-    )
+    document = parse_yrc("[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n")
     entries = json.loads(token_timing_to_json(document.lines[0]))
     entries.pop(0)
 
@@ -93,9 +91,7 @@ def test_token_delete_preserves_an_untouched_source_overlap() -> None:
 
 
 def test_token_edit_still_rejects_a_new_overlap() -> None:
-    document = parse_yrc(
-        "[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n"
-    )
+    document = parse_yrc("[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n")
     entries = json.loads(token_timing_to_json(document.lines[0]))
     entries[-1]["start"] = 1.98
 
@@ -106,6 +102,39 @@ def test_token_edit_still_rejects_a_new_overlap() -> None:
             1,
             json.dumps(entries),
         )
+
+
+@pytest.mark.parametrize("changed_token", [1, 2])
+def test_text_edit_preserves_an_existing_overlap_and_the_line_interval(changed_token) -> None:
+    document = parse_yrc("[1000,3000](1000,900,0)A(1900,110,0),(2000,1000,0)B\n")
+    entries = json.loads(token_timing_to_json(document.lines[0]))
+    entries[changed_token]["text"] = "華"
+
+    edited = apply_token_timing(document, document_to_editor_rows(document), 1, json.dumps(entries))
+
+    assert edited.lines[0].tokens[changed_token].text == "華"
+    assert (edited.lines[0].start, edited.lines[0].end) == (1.0, 4.0)
+    assert [(token.start, token.end) for token in edited.lines[0].tokens] == [
+        (token.start, token.end) for token in document.lines[0].tokens
+    ]
+
+
+@pytest.mark.parametrize("change_time", [False, True])
+def test_text_only_token_edit_keeps_sentence_padding_but_timing_edit_updates_bounds(
+    change_time,
+) -> None:
+    document = parse_yrc("[1000,1800](1200,800,0)花(2000,600,0)開\n")
+    entries = json.loads(token_timing_to_json(document.lines[0]))
+    entries[0]["text"] = "華"
+    if change_time:
+        entries[0]["start"] = 1.1
+        entries[-1]["end"] = 2.9
+
+    edited = apply_token_timing(document, document_to_editor_rows(document), 1, json.dumps(entries))
+
+    assert edited.lines[0].text == "華開"
+    expected_bounds = (1.1, 2.9) if change_time else (1.0, 2.8)
+    assert (edited.lines[0].start, edited.lines[0].end) == pytest.approx(expected_bounds)
 
 
 def test_editor_scales_existing_tokens_when_line_time_changes() -> None:
@@ -125,10 +154,7 @@ def test_editor_scales_existing_tokens_when_line_time_changes() -> None:
 def test_editor_nudges_only_edge_tokens_and_keeps_the_interior_fixed() -> None:
     document = parse_lrc("[00:01.00]Hello brave world\n[00:04.00]Next\n")
     rows = document_to_editor_rows(document)
-    original = [
-        (token.start, token.end)
-        for token in document.lines[0].tokens
-    ]
+    original = [(token.start, token.end) for token in document.lines[0].tokens]
 
     edited = nudge_editor_line_timing(
         document,
@@ -207,9 +233,7 @@ def test_ripple_preserves_an_existing_overlap_instead_of_cleaning_the_document()
 
 
 def test_ripple_keeps_hidden_and_timed_blank_rows_on_the_same_timeline() -> None:
-    document = parse_lrc(
-        "[00:01.00]First\n[00:03.00]\n[00:04.00]Hidden cue\n[00:05.00]Last\n"
-    )
+    document = parse_lrc("[00:01.00]First\n[00:03.00]\n[00:04.00]Hidden cue\n[00:05.00]Last\n")
     document.lines[2].hidden = True
     old_starts = [line.start for line in document.lines]
     assert document.lines[0].end is not None
@@ -230,10 +254,7 @@ def test_ripple_keeps_hidden_and_timed_blank_rows_on_the_same_timeline() -> None
 
 
 def test_global_shift_moves_line_and_token_times_by_the_same_offset() -> None:
-    document = parse_yrc(
-        "[1000,1000](1000,500,0)A(1500,500,0)B\n"
-        "[3000,1000](3000,1000,0)C\n"
-    )
+    document = parse_yrc("[1000,1000](1000,500,0)A(1500,500,0)B\n[3000,1000](3000,1000,0)C\n")
 
     shifted, applied = shift_editor_timeline(
         document,
@@ -289,9 +310,7 @@ def test_global_timeline_uses_real_media_duration_for_intro_and_outro() -> None:
 
 
 def test_global_timeline_keeps_media_clock_separate_from_canvas_padding() -> None:
-    document = LyricsDocument(
-        lines=[LyricLine(text="Last line", start=18.0, end=19.5)]
-    )
+    document = LyricsDocument(lines=[LyricLine(text="Last line", start=18.0, end=19.5)])
 
     timeline = editor_global_timeline_html(document, 1, media_duration=20.0)
 
@@ -392,6 +411,9 @@ def test_editor_applies_visual_per_token_timing() -> None:
     assert 'data-line-number="1"' in preview
     assert 'data-line-count="1"' in preview
     assert "--kf-preview-font-size" in preview
+    # The host owns the user's zoom. An inline definition on the child stage
+    # would override that inherited preference and prevent Ctrl+wheel zoom.
+    assert "--kf-preview-font-size:" not in preview
 
 
 def test_editor_deletes_token_text_without_changing_other_token_times() -> None:

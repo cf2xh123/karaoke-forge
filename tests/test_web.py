@@ -66,8 +66,7 @@ def test_homepage_displays_current_version(monkeypatch, tmp_path) -> None:
     hero = next(
         component
         for component in app.blocks.values()
-        if type(component).__name__ == "HTML"
-        and "kf-hero" in str(getattr(component, "value", ""))
+        if type(component).__name__ == "HTML" and "kf-hero" in str(getattr(component, "value", ""))
     )
     footer = next(
         component
@@ -184,8 +183,17 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         if getattr(block_function.fn, "__name__", "") == "subtitle_preview_html"
     ]
     assert subtitle_preview_callbacks
+    assert all(translation_position in callback.inputs for callback in subtitle_preview_callbacks)
+    countdown_controls = [
+        component
+        for component in app.blocks.values()
+        if getattr(component, "label", None)
+        in {"长间奏结束前显示三音符开唱提示", "视为长间奏的空档（秒）"}
+    ]
+    assert len(countdown_controls) == 2
     assert all(
-        translation_position in callback.inputs for callback in subtitle_preview_callbacks
+        all(control in callback.inputs for control in countdown_controls)
+        for callback in subtitle_preview_callbacks
     )
     lyrics = tmp_path / "restored-project.json"
     lyrics.write_text(
@@ -195,20 +203,20 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         encoding="utf-8",
     )
     restored_files = {
-        "\N{CIRCLED DIGIT ONE}": tmp_path / "restored.wav",
-        "\N{CIRCLED DIGIT TWO}": tmp_path / "restored.mp4",
-        "\N{CIRCLED DIGIT THREE}": lyrics,
-        "\u6ca1\u6709 MV": tmp_path / "restored.jpg",
+        "make-audio-upload": tmp_path / "restored.wav",
+        "make-video-upload": tmp_path / "restored.mp4",
+        "make-lyrics-upload": lyrics,
+        "make-cover-upload": tmp_path / "restored.jpg",
     }
     for marker, path in restored_files.items():
-        if marker != "\N{CIRCLED DIGIT THREE}":
+        if marker != "make-lyrics-upload":
             path.write_bytes(b"restored")
     workspace = SimpleNamespace(
         manifest=tmp_path / "karaoke-forge-project.json",
         lyrics_project=lyrics,
-        audio=restored_files["\N{CIRCLED DIGIT ONE}"],
-        video=restored_files["\N{CIRCLED DIGIT TWO}"],
-        cover=restored_files["\u6ca1\u6709 MV"],
+        audio=restored_files["make-audio-upload"],
+        video=restored_files["make-video-upload"],
+        cover=restored_files["make-cover-upload"],
         font_files=(),
         settings={},
         name="Restored project",
@@ -231,7 +239,7 @@ def test_captured_netease_session_stays_in_server_state(monkeypatch, tmp_path) -
         index = next(
             index
             for index, output in enumerate(restore_callback.outputs)
-            if marker in str(getattr(output, "label", ""))
+            if marker == getattr(output, "elem_id", None)
         )
         assert restored[index] == str(expected)
         assert str(expected.resolve()) in app.allowed_paths
@@ -288,10 +296,11 @@ def test_saved_netease_session_is_restored_only_for_local_clients(monkeypatch) -
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "ensure_netease_session_for_download"
+        if getattr(block_function.fn, "__name__", "") == "ensure_netease_session_for_download"
     )
-    state_inputs = [component for component in callback.inputs if type(component).__name__ == "State"]
+    state_inputs = [
+        component for component in callback.inputs if type(component).__name__ == "State"
+    ]
     assert state_inputs
     assert state_inputs[0].value == ""
     assert secret not in json.dumps(app.config, ensure_ascii=False, default=str)
@@ -370,9 +379,7 @@ def test_saved_netease_session_is_restored_only_for_local_clients(monkeypatch) -
         if getattr(block_function.fn, "__name__", "") == "clear_netease_login_wrapper"
     )
     monkeypatch.setattr("karaoke_forge.web.clear_netease_login_profile", lambda: "cleared")
-    cleared = clear_callback.fn(
-        SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-    )
+    cleared = clear_callback.fn(SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")))
     assert cleared[:3] == ("", "", "")
 
     captured_credentials.clear()
@@ -448,8 +455,7 @@ def test_logout_wins_over_an_in_flight_netease_session_reuse(monkeypatch) -> Non
     ensure_callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "ensure_netease_session_for_download"
+        if getattr(block_function.fn, "__name__", "") == "ensure_netease_session_for_download"
     )
     clear_callback = next(
         block_function
@@ -538,8 +544,7 @@ def test_expired_saved_netease_session_is_acquired_only_when_audio_is_needed(
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "ensure_netease_session_for_download"
+        if getattr(block_function.fn, "__name__", "") == "ensure_netease_session_for_download"
     )
     calls: list[str] = []
     monkeypatch.setattr("karaoke_forge.web.managed_netease_profile_exists", lambda: True)
@@ -650,7 +655,7 @@ def test_token_timeline_script_supports_context_delete_and_drag_pan() -> None:
     assert "applyGlobalLineEdge" in TOKEN_TIMELINE_JS
     assert "pointerMoved && Math.abs(previewSeconds - original)" in TOKEN_TIMELINE_JS
     assert "__karaokeForgeCancelGlobalLineEdgeDrag" in TOKEN_TIMELINE_JS
-    assert '.kf-global-line-block, .kf-global-line-edge' in TOKEN_TIMELINE_JS
+    assert ".kf-global-line-block, .kf-global-line-edge" in TOKEN_TIMELINE_JS
     assert 'timeline.dataset.edgeSaving = "true"' in TOKEN_TIMELINE_JS
     poll_source = TOKEN_TIMELINE_JS.split("const pollWaveSurfer = () => {", 1)[1]
     assert poll_source.index("requestAnimationFrame(pollWaveSurfer)") < poll_source.index(
@@ -740,14 +745,11 @@ def test_workspace_link_matching_requires_one_exact_source(monkeypatch, tmp_path
         lambda _root: [workspace],
     )
 
-    assert (
-        _matching_workspace_manifest(
-            "https://music.163.com/song?id=42",
-            "",
-            "",
-        )
-        == str(workspace.manifest)
-    )
+    assert _matching_workspace_manifest(
+        "https://music.163.com/song?id=42",
+        "",
+        "",
+    ) == str(workspace.manifest)
     assert (
         _matching_workspace_manifest(
             "https://music.163.com/song?id=41",
@@ -803,9 +805,7 @@ def test_global_timeline_workspace_passes_real_media_duration(
 ) -> None:
     audio = tmp_path / "song.m4a"
     audio.write_bytes(b"audio")
-    document = LyricsDocument(
-        lines=[LyricLine(text="Line", start=1.0, end=2.0)]
-    )
+    document = LyricsDocument(lines=[LyricLine(text="Line", start=1.0, end=2.0)])
     captured: dict[str, object] = {}
 
     def fake_duration(path: str, modified_ns: int, size: int) -> float:
@@ -854,14 +854,16 @@ def test_global_editor_callbacks_match_signatures_and_row_selection_has_mode(
         "apply_global_rows_workspace": (9, 11),
         "apply_global_line_edge_workspace": (10, 11),
         "apply_global_shift_workspace": (11, 11),
-        "select_editor_row": (10, 11),
+        "select_editor_row": (10, 12),
         "load_editor_line_workspace": (8, 9),
         "advance_editor_line_after_playback": (11, 12),
-        "apply_editor_line_action_workspace": (8, 10),
+        "apply_editor_line_action_workspace": (9, 10),
         "save_editor_token_timing_workspace": (8, 10),
         "save_editor_pronunciation_workspace": (8, 8),
-        "export_editor_project_workspace": (8, 6),
-        "handoff_editor_wrapper": (9, 10),
+        "export_editor_project_workspace": (9, 7),
+        "handoff_editor_wrapper": (10, 11),
+        "undo_editor_line_action": (8, 10),
+        "redo_editor_line_action": (8, 10),
     }
 
     for name, (input_count, output_count) in expected_shapes.items():
@@ -1065,7 +1067,7 @@ def test_global_line_edge_drag_changes_only_the_edge_and_ripples_following_lines
     assert result[2] == 1
     assert "已拖动第 1 行句尾" in result[9]
     assert "联动后移第 2–2 行" in result[9]
-    assert result[10]["document"] == document.to_dict()
+    assert result[10]["past"][-1]["document"] == document.to_dict()
 
     restored = undo_editor_line_action(result[0], result[1], result[2], result[10])
     assert document_from_payload(restored[0]).to_dict() == document.to_dict()
@@ -1119,7 +1121,7 @@ def test_global_line_edge_drag_can_keep_overlap_and_maps_post_table_line_numbers
     assert edited.lines[0].end == pytest.approx(5.4)
     assert edited.lines[1].start == pytest.approx(5.0)
     assert result[2] == 1
-    assert result[10]["line_number"] == 2
+    assert result[10]["past"][-1]["line_number"] == 2
 
 
 def test_global_line_edge_drag_preserves_another_lines_pending_word_edit_and_undo(
@@ -1183,7 +1185,7 @@ def test_global_line_edge_drag_preserves_another_lines_pending_word_edit_and_und
     assert edited.lines[1].tokens[1].start == pytest.approx(3.4)
     assert edited.lines[1].tokens[1].end == pytest.approx(4.0)
     assert result[2] == 2
-    assert result[10]["document"] == document.to_dict()
+    assert result[10]["past"][-1]["document"] == document.to_dict()
 
     restored = undo_editor_line_action(result[0], result[1], result[2], result[10])
     assert document_from_payload(restored[0]).to_dict() == document.to_dict()
@@ -1360,8 +1362,7 @@ def test_line_action_maps_context_row_after_pending_deletion(
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "apply_editor_line_action_workspace"
+        if getattr(block_function.fn, "__name__", "") == "apply_editor_line_action_workspace"
     )
     document = LyricsDocument(
         lines=[
@@ -1388,7 +1389,7 @@ def test_line_action_maps_context_row_after_pending_deletion(
     assert [line.text for line in edited.lines] == ["B", "C"]
     assert edited.lines[0].hidden is False
     assert edited.lines[1].hidden is True
-    assert result[9]["line_number"] == 3
+    assert result[9]["past"][-1]["line_number"] == 3
 
 
 def test_deleting_an_extended_current_line_does_not_leave_a_ripple_behind(
@@ -1400,8 +1401,7 @@ def test_deleting_an_extended_current_line_does_not_leave_a_ripple_behind(
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "apply_editor_line_action_workspace"
+        if getattr(block_function.fn, "__name__", "") == "apply_editor_line_action_workspace"
     )
     document = LyricsDocument(
         lines=[
@@ -1539,8 +1539,7 @@ def test_global_sentence_click_loads_its_token_editor_without_rebuilding_payload
         document.to_dict(),
         document_to_editor_rows(document),
         1,
-        '[{"text":"A","start":1.0,"end":2.0},'
-        '{"text":"B","start":2.0,"end":3.0}]',
+        '[{"text":"A","start":1.0,"end":2.0},{"text":"B","start":2.0,"end":3.0}]',
         "",
         [],
         {},
@@ -1564,8 +1563,7 @@ def test_global_sentence_click_loads_its_token_editor_without_rebuilding_payload
         document.to_dict(),
         document_to_editor_rows(document),
         1,
-        '[{"text":"A","start":1.0,"end":2.0},'
-        '{"text":"B","start":2.0,"end":3.5}]',
+        '[{"text":"A","start":1.0,"end":2.0},{"text":"B","start":2.0,"end":3.5}]',
         "",
         [],
         {},
@@ -1608,13 +1606,9 @@ def test_repeated_global_row_edits_do_not_restore_stale_token_times(
     token_json = '[{"text":"A","start":1.0,"end":2.0}]'
     first_rows = document_to_editor_rows(document)
     first_rows[0][3] = 3.0
-    first_preview = preview_callback.fn(
-        document.to_dict(), first_rows, 1, token_json, "", []
-    )
+    first_preview = preview_callback.fn(document.to_dict(), first_rows, 1, token_json, "", [])
     token_after_first_preview = (
-        token_json
-        if first_preview[2] == {"__type__": "update"}
-        else first_preview[2]
+        token_json if first_preview[2] == {"__type__": "update"} else first_preview[2]
     )
     second_rows = [list(row) for row in first_rows]
     second_rows[0][3] = 4.0
@@ -1656,8 +1650,7 @@ def test_auto_advance_uses_the_mapped_current_line_after_pending_deletion(
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "advance_editor_line_after_playback"
+        if getattr(block_function.fn, "__name__", "") == "advance_editor_line_after_playback"
     )
     document = LyricsDocument(
         lines=[
@@ -1740,8 +1733,7 @@ def test_editor_export_allows_new_files_from_a_custom_workspace_created_after_la
     callback = next(
         block_function
         for block_function in app.fns.values()
-        if getattr(block_function.fn, "__name__", "")
-        == "export_editor_project_workspace"
+        if getattr(block_function.fn, "__name__", "") == "export_editor_project_workspace"
     )
 
     result = callback.fn(
@@ -1938,9 +1930,7 @@ def test_web_editor_loads_and_exports_hidden_rows(
 
 def test_web_editor_loads_a_workspace_manifest_directly(tmp_path: Path) -> None:
     lyrics = tmp_path / "lyrics.json"
-    document = LyricsDocument(
-        lines=[LyricLine(text="Manifest lyric", start=1.0, end=2.0)]
-    )
+    document = LyricsDocument(lines=[LyricLine(text="Manifest lyric", start=1.0, end=2.0)])
     lyrics.write_text(
         json.dumps(document.to_dict(), ensure_ascii=False),
         encoding="utf-8",
@@ -2126,7 +2116,7 @@ def test_pending_token_edit_is_saved_before_navigation_and_can_be_undone(
     assert snapshot is not None
     undone = undo_editor_line_action(
         changed.to_dict(),
-        [[1, "显示", 1.0, 2.98, "改", ""], [2, "显示", 3.0, 4.98, "B", ""]],
+        document_to_editor_rows(changed),
         2,
         snapshot,
     )
@@ -3047,6 +3037,62 @@ def test_web_style_builds_translation_position_and_instrumental_cue() -> None:
     assert style.countdown_gap_threshold == 12
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_subtitle_preview_shows_configured_vector_note_cue(enabled: bool) -> None:
+    preview = subtitle_preview_html(
+        "Arial",
+        88,
+        "#FFFFFF",
+        "#12ABCD",
+        72,
+        False,
+        38,
+        "#EAF4FF",
+        False,
+        40,
+        "#FFFFFF",
+        "First\nSecond",
+        "",
+        show_countdown=enabled,
+        countdown_gap_threshold=12,
+    )
+
+    assert f'data-kf-countdown="{str(enabled).lower()}"' in preview
+    assert preview.count('<svg class="kf-preview-note"') == (3 if enabled else 0)
+    assert "●" not in preview
+    if enabled:
+        assert "三个音符依次点亮并保持" in preview
+        assert "长间奏达到 12 秒" in preview
+        assert "--kf-cue-highlight:#12ABCD" in preview
+
+
+def test_initial_subtitle_preview_matches_saved_style_preferences(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr(
+        "karaoke_forge.web.load_preferences",
+        lambda: {
+            "font": "Arial",
+            "font_size": 88,
+            "highlight_color": "#12ABCD",
+            "show_countdown": False,
+            "show_pronunciation": False,
+        },
+    )
+    app = create_web_app()
+    preview = next(
+        component.value
+        for component in app.blocks.values()
+        if type(component).__name__ == "HTML"
+        and 'class="kf-subtitle-preview"' in str(getattr(component, "value", ""))
+    )
+
+    assert "font-family:'Arial'" in preview
+    assert "font-size:48px" in preview
+    assert "#12ABCD" in preview
+    assert 'data-kf-countdown="false"' in preview
+    assert '<ruby class="kf-lyric-ruby">' not in preview
+
+
 def test_subtitle_preview_sample_matches_ass_rows_and_token_progress() -> None:
     document = LyricsDocument(
         lines=[
@@ -3103,7 +3149,8 @@ def test_subtitle_preview_embeds_material_frame_and_preserves_row_parity() -> No
     assert 'data-kf-material="true"' in preview
     assert "MV &lt;01:20&gt;" in preview
     assert "让歌声与画面在这里相遇" not in preview
-    assert '<span style="color:#FFD54A;">Upper</span>' in preview
+    assert 'class="kf-preview-sung"' in preview
+    assert ">Upper</span>" in preview
     assert '<span style="color:#FFD54A;">Lower</span>' not in preview
 
 
