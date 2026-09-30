@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,10 +12,11 @@ pytest.importorskip("PySide6")
 pytest.importorskip("karaoke_forge.desktop")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QFontDatabase, QImage, QWheelEvent
+from PySide6.QtGui import QFont, QFontDatabase, QImage, QRawFont, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from karaoke_forge.ass import AssStyle, write_ass
 from karaoke_forge.desktop.timeline import (
     LyricPreviewWidget,
     TimelineWidget,
@@ -272,37 +274,307 @@ def test_highlighting_obeys_individual_token_times_and_gaps(app, document):
     widget.close()
 
 
-def test_native_preview_paints_readings_and_highlight_and_accepts_background_reset(app, document):
-    widget = show(LyricPreviewWidget(), app, height=300)
-    widget.set_document(document)
-    widget.set_style({"show_pronunciation": True, "show_translation": True})
+def _available_font_for(text):
+    families = QFontDatabase.families()
+    preferred = ["DejaVu Sans", "Liberation Sans", "Arial", "Microsoft YaHei"]
+    for family in [name for name in preferred if name in families] + families:
+        raw = QRawFont.fromFont(QFont(family, 20))
+        if raw.isValid() and all(raw.supportsCharacter(ord(char)) for char in set(text)):
+            return family
+    return None
+
+
+def _preview_fill_counts(image):
+    counts = {"waiting": 0, "sung": 0, "reading": 0}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            red, green, blue = color.red(), color.green(), color.blue()
+            counts["waiting"] += red > 180 and green > 180 and blue > 180
+            counts["sung"] += red > 180 and green > 130 and blue < 140
+            counts["reading"] += red < 80 and green > 180 and blue > 180
+    return counts
+
+
+def test_native_preview_paints_readings_and_highlight_and_accepts_background_reset(app):
+    # Exercise real glyph fills on every platform, without depending on a CJK
+    # font being installed or counting tiny fallback boxes in a scaled preview.
+    font = _available_font_for("Morning songMORNING")
+    assert font is not None, "The Qt test environment needs a font with Latin glyphs"
+    source = LyricsDocument(
+        [
+            LyricLine(
+                "Morning song", 1, 5,
+                [KaraokeToken("Morning ", 1, 2), KaraokeToken("song", 3, 5)],
+                pronunciation_units=[PronunciationSpan("Morning", "MORNING", 0, 7)],
+            )
+        ],
+        metadata={"auto_pronunciation": "false"},
+    )
+    widget = show(LyricPreviewWidget(), app, width=960, height=540)
+    widget.set_document(source)
+    style = {
+        "font": font, "resolution": (960, 540), "font_size": 88,
+        "pronunciation_font_size": 40, "pronunciation_color": "#00FFFF",
+        "show_pronunciation": True, "show_translation": False,
+    }
+    widget.set_style(style)
     widget.set_background(None)
-    widget.set_position(0)
+    widget.set_position(1)
     before = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     widget.set_position(4)
     after = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     assert before.size() == after.size()
-    changed = sum(
-        before.pixel(x, y) != after.pixel(x, y)
-        for x in range(before.width())
-        for y in range(before.height())
+    initial, progressed = _preview_fill_counts(before), _preview_fill_counts(after)
+    assert initial["waiting"] > 100
+    assert initial["reading"] > 100, "The saved reading must actually be painted"
+    assert initial["sung"] == 0
+    assert progressed["sung"] > initial["waiting"] * 0.4
+    assert progressed["reading"] < initial["reading"] * 0.1, "The reading must also highlight"
+    widget.set_position(1)
+    widget.set_style({**style, "show_pronunciation": False})
+    assert _preview_fill_counts(widget.grab().toImage())["reading"] == 0
+    widget.close()
+
+
+def test_native_preview_cjk_glyph_fills_survive_outlines_when_font_is_available(app, document):
+    font = _available_font_for("春の歌次")
+    if font is None:
+        pytest.skip("No installed Qt font provides the CJK glyphs used by this raster test")
+    widget = show(LyricPreviewWidget(), app, width=960, height=540)
+    widget.set_document(document)
+    widget.set_style({
+        "font": font, "resolution": (960, 540), "font_size": 88,
+        "show_pronunciation": False, "show_translation": False,
+    })
+    widget.set_position(1)
+    before = _preview_fill_counts(widget.grab().toImage())
+    widget.set_position(4)
+    after = _preview_fill_counts(widget.grab().toImage())
+    assert before["waiting"] > 100
+    assert before["sung"] == 0
+    assert after["sung"] > before["waiting"] * 0.25
+    widget.close()
+
+
+def _ass_seconds(value):
+    hours, minutes, seconds = value.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _visible_ass_rows(document, style, seconds):
+    rows = set()
+    index_by_text = {line.text: index for index, line in enumerate(document.lines)}
+    for event in write_ass(document, style).splitlines():
+        if not event.startswith("Dialogue:"):
+            continue
+        columns = event.split(",", 9)
+        if columns[3] not in {"Karaoke", "KaraokeLower", "KaraokeInactive", "KaraokeLowerInactive"}:
+            continue
+        if _ass_seconds(columns[1]) <= seconds < _ass_seconds(columns[2]):
+            text = re.sub(r"\{[^}]*\}", "", columns[9])
+            rows.add((int("Lower" in columns[3]), index_by_text[text]))
+    return rows
+
+
+def test_preview_rows_follow_exported_ass_events_across_overlap_blank_rows_and_long_breaks(app):
+    document = LyricsDocument(
+        [
+            LyricLine("", 0, 0.5),
+            LyricLine("first", 1, 5, [KaraokeToken("first", 1, 5)]),
+            LyricLine("hidden", 2, 4, hidden=True),
+            LyricLine("overlap", 3, 8, [KaraokeToken("overlap", 3, 8)]),
+            LyricLine("third", 6, 9, [KaraokeToken("third", 6, 9)]),
+            LyricLine("after break", 20, 22, [KaraokeToken("after break", 20, 22)]),
+        ]
     )
-    assert changed > 30
-    # Thin CJK glyphs must retain a light fill after their outline is painted.
-    light_pixels = sum(
-        before.pixelColor(x, y).red() > 180
-        and before.pixelColor(x, y).green() > 180
-        and before.pixelColor(x, y).blue() > 180
-        for x in range(20, 200)
-        for y in range(45, 100)
+    style = AssStyle(auto_pronunciation=False)
+    widget = show(LyricPreviewWidget(), app, height=400)
+    widget.set_document(document)
+    widget.set_style({"auto_pronunciation": False})
+    for seconds in (0, 1, 2, 3.5, 5.5, 6.1, 8.5, 9.5, 16.9, 17, 18.1, 19.9, 20, 22):
+        widget.set_position(seconds)
+        assert set(widget.preview_rows()) == _visible_ass_rows(document, style, seconds), seconds
+    widget.close()
+
+
+def test_countdown_stages_and_gap_threshold_match_the_exported_cues(app):
+    source = LyricsDocument([LyricLine("before", 0, 2), LyricLine("after", 20, 23)])
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_style({"auto_pronunciation": False})
+    widget.set_position(10)
+    assert widget.preview_rows() == []
+    assert widget.countdown_state() is None
+    for seconds, filled in ((17, 1), (18, 2), (19, 3)):
+        widget.set_position(seconds)
+        assert widget.preview_rows() == [(1, 1)]
+        assert widget.countdown_state() == (1, 1, filled)
+    with_cue = widget.grab().toImage()
+    widget.set_style({"auto_pronunciation": False, "show_countdown": False})
+    assert widget.preview_rows() == [(1, 1)]
+    assert widget.countdown_state() is None
+    assert widget.grab().toImage() != with_cue
+    widget.set_position(20)
+    assert widget.countdown_state() is None
+    widget.set_style({"auto_pronunciation": False, "countdown_gap_threshold": 20})
+    widget.set_position(10)
+    assert widget.preview_rows() == [(1, 1)]
+    assert _visible_ass_rows(source, AssStyle(countdown_gap_threshold=20), 10) == {(1, 1)}
+    widget.close()
+
+
+def _color_bounds(image, channel):
+    points = []
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if channel == "green":
+                selected = color.green() > 120 and color.red() < 70 and color.blue() < 70
+            else:
+                selected = color.red() > 180 and color.green() > 180 and color.blue() > 180
+            if selected:
+                points.append((x, y))
+    assert points, channel
+    return (
+        min(p[0] for p in points),
+        min(p[1] for p in points),
+        max(p[0] for p in points),
+        max(p[1] for p in points),
     )
-    sung_pixels = sum(
-        after.pixelColor(x, y).red() > 180
-        and after.pixelColor(x, y).green() > 130
-        and after.pixelColor(x, y).blue() < 140
-        for x in range(20, 200)
-        for y in range(45, 100)
+
+
+def test_translation_size_position_and_lyric_bottom_margin_change_actual_pixels(app):
+    widget = show(LyricPreviewWidget(), app, width=768, height=432)
+    widget.set_document(
+        LyricsDocument([LyricLine("Lyric text", 0, 10, translation="Translated words")])
     )
-    assert light_pixels > 20
-    assert sung_pixels > 20
+    style = {
+        "font_size": 80,
+        "translation_font_size": 24,
+        "translation_margin_v": 16,
+        "margin_v": 30,
+        "translation_color": "#00FF00",
+        "show_pronunciation": False,
+    }
+    widget.set_style(style)
+    widget.set_position(0)
+    # Plain ASS text uses the sung color when active; choose white for this geometry probe.
+    style["highlight_color"] = "#FFFFFF"
+    widget.set_style(style)
+    small = widget.grab().toImage()
+    small_translation = _color_bounds(small, "green")
+    first_main = _color_bounds(small, "white")
+    widget.set_style(
+        {**style, "translation_font_size": 58, "translation_margin_v": 400, "margin_v": 180}
+    )
+    large = widget.grab().toImage()
+    large_translation = _color_bounds(large, "green")
+    second_main = _color_bounds(large, "white")
+    assert large_translation[2] - large_translation[0] > 1.8 * (
+        small_translation[2] - small_translation[0]
+    )
+    assert large_translation[1] - small_translation[1] == pytest.approx((400 - 16) * 0.4, abs=8)
+    assert first_main[1] - second_main[1] == pytest.approx((180 - 30) * 0.4, abs=2)
+    widget.close()
+
+
+def test_english_pronunciation_switch_filters_saved_spans_and_legacy_whole_readings(app):
+    mixed = LyricLine(
+        "春hello",
+        0,
+        5,
+        pronunciation_units=[
+            PronunciationSpan("春", "はる", 0, 1),
+            PronunciationSpan("hello", "ハロー", 1, 6),
+        ],
+    )
+    source = LyricsDocument([mixed, LyricLine("hello", 6, 9, pronunciation="ハロー")])
+    before = source.to_dict()
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_style({"auto_english_pronunciation": True})
+    widget.set_position(1)
+    with_english = widget.grab().toImage()
+    widget.set_style({"auto_english_pronunciation": False})
+    assert [unit.reading for unit in widget._pronunciations[0].units] == ["はる"]
+    assert widget._pronunciations[1] is None
+    assert widget.grab().toImage() != with_english
+    assert source.to_dict() == before
+    widget.close()
+
+
+def test_plain_lrc_estimated_gap_and_same_row_replacement_use_ass_timing(app):
+    source = LyricsDocument([LyricLine("a", 0, 20), LyricLine("b", 20, 22)])
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_style({"auto_pronunciation": False})
+    widget.set_position(10)
+    assert widget.preview_rows() == []
+    assert _visible_ass_rows(source, AssStyle(auto_pronunciation=False), 10) == set()
+    source = LyricsDocument(
+        [
+            LyricLine("first", 0, 12, [KaraokeToken("first", 0, 12)]),
+            LyricLine("second", 2, 8),
+            LyricLine("third", 6, 10),
+        ]
+    )
+    widget.set_document(source)
+    widget.set_position(3)
+    assert widget.highlight_fractions(0) == [0.5]
+    assert set(widget.preview_rows()) == _visible_ass_rows(
+        source, AssStyle(auto_pronunciation=False), 3
+    )
+    widget.close()
+
+
+def test_preview_respects_video_aspect_ratio_at_small_window_sizes(app):
+    widget = show(LyricPreviewWidget(), app, width=260, height=170)
+    frame = widget.preview_rect()
+    assert frame.width() / frame.height() == pytest.approx(16 / 9)
+    assert widget.rect().contains(frame.toAlignedRect())
+    widget.set_style({"resolution": (1080, 1920)})
+    frame = widget.preview_rect()
+    assert frame.width() / frame.height() == pytest.approx(9 / 16)
+    assert widget.width() == 260
+    widget.close()
+
+
+def test_preview_respects_official_only_pronunciation_policy_without_dropping_saved_readings(
+    app, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        "karaoke_forge.ass.generate_pronunciation", lambda *args, **kwargs: calls.append(args)
+    )
+    source = LyricsDocument(
+        [
+            LyricLine("missing", 0, 2),
+            LyricLine("saved", 3, 5, pronunciation="セーブド"),
+        ],
+        metadata={"auto_pronunciation": " false "},
+    )
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_style({"font_size": 80})
+    assert calls == []
+    assert widget._pronunciations[0] is None
+    assert widget._pronunciations[1].text == "セーブド"
+    widget.close()
+
+
+def test_style_adjustments_reuse_readings_and_translation_wraps_unicode(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "karaoke_forge.ass.generate_pronunciation", lambda *args, **kwargs: calls.append(args)
+    )
+    source = LyricsDocument([LyricLine("original", 0, 10, translation="🎤✨ 雨と星 " * 25)])
+    widget = show(LyricPreviewWidget(), app, width=480, height=270)
+    widget.set_document(source)
+    widget.set_position(1)
+    before = len(calls)
+    widget.set_style({"font_size": 80, "translation_font_size": 58})
+    widget.set_style({"font_size": 80, "translation_font_size": 58, "margin_v": 120})
+    assert len(calls) == before
+    assert not widget.grab().toImage().isNull()
     widget.close()

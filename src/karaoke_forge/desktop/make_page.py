@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import copy
 import html
 import inspect
 import json
+import math
 import re
 import tempfile
 from collections.abc import Callable
@@ -13,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -49,12 +51,14 @@ from ..projects import (
     PROJECT_FILENAME,
     WorkspaceProject,
     load_workspace_project,
+    read_workspace_lyrics,
     save_workspace_project,
 )
 from ..web import (
     UiEditorPreparationResult,
     UiJobResult,
     _default_output_root,
+    _matching_workspace_manifest,
     prepare_make_editor_job,
     prepare_subtitle_material_preview,
     run_make_job,
@@ -123,10 +127,22 @@ def _native_job_arguments(arguments: dict[str, Any], directory: str) -> dict[str
     if isinstance(payload, dict) and payload.get("schema_version") == 1 and payload.get(
         "lyrics_project"
     ):
-        source = load_workspace_project(source).lyrics_project
-        payload = json.loads(source.read_text(encoding="utf-8-sig"))
+        workspace = load_workspace_project(source)
+        payload = read_workspace_lyrics(workspace).to_dict()
+        source = Path(directory) / f"source-{uuid4().hex}.json"
+        source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     metadata = payload.get("metadata") if isinstance(payload, dict) else None
     if isinstance(metadata, dict) and "workspace_manifest" in metadata:
+        manifest = Path(metadata["workspace_manifest"])
+        if not manifest.is_absolute():
+            manifest = Path(source_value).parent / manifest
+        try:
+            workspace = load_workspace_project(manifest)
+            if Path(source_value).resolve() == workspace.lyrics_project.resolve():
+                payload = read_workspace_lyrics(workspace).to_dict()
+                metadata = payload["metadata"]
+        except (OSError, TypeError, ValueError):
+            pass
         metadata.pop("workspace_manifest")
         source = Path(directory) / f"source-{uuid4().hex}.json"
         source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -168,6 +184,7 @@ class MakePage(QWidget):
     settings_changed = Signal(object)
     style_changed = Signal(object)
     material_preview_changed = Signal(object)
+    workspace_requested = Signal(str)
 
     def __init__(
         self, runner: object, parent: QWidget | None = None, *, embedded: bool = False
@@ -180,14 +197,22 @@ class MakePage(QWidget):
         self._temporary = tempfile.TemporaryDirectory(prefix="karaoke-forge-desktop-")
         self._workspace: WorkspaceProject | None = None
         self._editor_document: LyricsDocument | None = None
+        self._editor_source_settings: dict[str, Any] = {}
         self._render_lyrics_snapshot: Path | None = None
         self._restoring = False
+        self._matched_manifest: str | None = None
+        self._match_timer = QTimer(self)
+        self._match_timer.setSingleShot(True)
+        self._match_timer.setInterval(600)
+        self._match_timer.timeout.connect(self._match_online_project)
         self._task_buttons: list[QPushButton] = []
         self._build_ui()
         self._restore_values(load_preferences())
         self._initial_settings = self.get_settings()
         self._connect_style_controls()
         self._connect_settings_controls()
+        for key in ("netease_link", "qqmusic_link", "utaten_link"):
+            self.controls[key].textChanged.connect(self._schedule_link_match)
         self._set_sample()
         self._update_style()
         self.runner.busy_changed.connect(self._set_busy)
@@ -311,9 +336,10 @@ class MakePage(QWidget):
         tip = QLabel("当前预览用于确认布局。逐字时序请在歌词编辑器中结合音频校准。")
         tip.setWordWrap(True)
         preview_layout.addWidget(tip)
+        self._build_sample_controls(preview_layout)
         preview_layout.addStretch(1)
         if self.embedded:
-            preview_panel.hide()
+            self.tabs.addTab(preview_panel, "示例预览")
             layout.addWidget(self.tabs, 1)
         else:
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -428,6 +454,13 @@ class MakePage(QWidget):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        self.match_status = QLabel("粘贴单曲链接后，会自动查找本机已保存的同来源工程。")
+        self.match_status.setWordWrap(True)
+        layout.addWidget(self.match_status)
+        self.open_match_button = QPushButton("打开匹配工程")
+        self.open_match_button.setEnabled(False)
+        self.open_match_button.clicked.connect(self._open_matched_project)
+        layout.addWidget(self.open_match_button)
         form = self._group(layout, "网易云音乐")
         self._line(form, "netease_link", "单曲链接")
         self._check(form, "use_netease_lyrics", "没有上传歌词时导入网易云公开歌词")
@@ -480,6 +513,96 @@ class MakePage(QWidget):
         help_text.setWordWrap(True)
         form.addRow(help_text)
         layout.addStretch()
+
+    def _schedule_link_match(self, *_args: object) -> None:
+        if self._restoring:
+            return
+        self._matched_manifest = None
+        self.open_match_button.setEnabled(False)
+        self.match_status.setText("正在查找同来源的已保存工程…")
+        self._match_timer.start()
+
+    def _match_online_project(self) -> None:
+        if self.runner.is_busy:
+            self._match_timer.start()
+            return
+        keys = ("netease_link", "qqmusic_link", "utaten_link")
+        links = tuple(self.controls[key].text().strip() for key in keys)
+        if not any(links):
+            self.match_status.setText("粘贴单曲链接后，会自动查找本机已保存的同来源工程。")
+            return
+
+        def task(_log):
+            manifest = _matching_workspace_manifest(*links)
+            return (manifest, load_workspace_project(manifest).name) if manifest else (None, None)
+
+        def matched(result):
+            if links != tuple(self.controls[key].text().strip() for key in keys):
+                return
+            manifest, name = result
+            self._matched_manifest = manifest
+            self.open_match_button.setEnabled(bool(manifest))
+            self.match_status.setText(
+                f"已找到同来源工程：{name}。点击下方按钮可继续编辑。"
+                if manifest
+                else "没有找到同来源的已保存工程，可以继续创建新工程。"
+            )
+
+        self.runner.submit("查找链接对应工程", task, matched)
+
+    def _open_matched_project(self) -> None:
+        if self._matched_manifest and not self.runner.is_busy:
+            self.workspace_requested.emit(self._matched_manifest)
+
+    def _build_sample_controls(self, layout: QVBoxLayout) -> None:
+        self._sample_updating = False
+        form = self._group(layout, "可编辑预览样例（不改变工程歌词）")
+        self.sample_text = QPlainTextEdit()
+        self.sample_text.setMaximumHeight(100)
+        self.sample_text.setPlaceholderText("每行一句，可粘贴长句检查字号与换行")
+        form.addRow("示例歌词", self.sample_text)
+        self.sample_translation = QPlainTextEdit()
+        self.sample_translation.setMaximumHeight(74)
+        self.sample_translation.setPlaceholderText("每行对应一句翻译，可留空")
+        form.addRow("示例翻译", self.sample_translation)
+        self.sample_row = QSpinBox()
+        self.sample_row.setMinimum(1)
+        form.addRow("当前句", self.sample_row)
+        self.sample_progress = QDoubleSpinBox()
+        self.sample_progress.setRange(0, 100)
+        self.sample_progress.setSuffix(" %")
+        form.addRow("扫色进度", self.sample_progress)
+        self.sample_text.textChanged.connect(self._refresh_sample)
+        self.sample_translation.textChanged.connect(self._refresh_sample)
+        self.sample_row.valueChanged.connect(self._refresh_sample)
+        self.sample_progress.valueChanged.connect(self._refresh_sample)
+
+    def _refresh_sample(self, *_args: object) -> None:
+        if self._sample_updating:
+            return
+        lines = [line for line in self.sample_text.toPlainText().splitlines() if line.strip()]
+        translations = self.sample_translation.toPlainText().splitlines()
+        self._sample_updating = True
+        try:
+            self.sample_row.setMaximum(max(1, len(lines)))
+        finally:
+            self._sample_updating = False
+        document = LyricsDocument(
+            lines=[
+                LyricLine(
+                    text=line,
+                    translation=translations[index] if index < len(translations) else None,
+                    start=float(index * 5),
+                    end=float(index * 5 + 4),
+                    tokens=[KaraokeToken(line, index * 5, index * 5 + 4)],
+                )
+                for index, line in enumerate(lines)
+            ]
+        )
+        selected = self.sample_row.value() - 1
+        self.preview.set_document(document)
+        self.preview.set_current_line(selected)
+        self.preview.set_position(selected * 5 + self.sample_progress.value() / 100 * 4)
 
     def _build_style(self) -> None:
         layout = self._scroll_tab("字幕样式")
@@ -623,7 +746,26 @@ class MakePage(QWidget):
             values[key] = values[key] or None
         return values
 
+    def _validated_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Validate conversions before changing any of the current project's controls."""
+        normalized = dict(settings)
+        for old_key, value in settings.items():
+            widget = self.controls.get(_ALIASES.get(old_key, old_key))
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                try:
+                    number = float(value)
+                    if not math.isfinite(number):
+                        raise ValueError("not finite")
+                    number = max(widget.minimum(), min(widget.maximum(), number))
+                    normalized[old_key] = number if isinstance(widget, QDoubleSpinBox) else int(number)
+                except (ValueError, TypeError, OverflowError) as exc:
+                    raise ValueError(f"工程设置 {old_key} 需要有效数字，当前工程未更改。") from exc
+            elif isinstance(widget, QCheckBox) and isinstance(value, str):
+                normalized[old_key] = value.strip().lower() not in {"", "false", "0", "no", "off"}
+        return normalized
+
     def _restore_values(self, settings: dict[str, Any]) -> None:
+        settings = self._validated_settings(settings)
         for old_key, value in settings.items():
             key = _ALIASES.get(old_key, old_key)
             if key in _PRIVATE_FIELDS or key not in self.controls:
@@ -653,13 +795,15 @@ class MakePage(QWidget):
                 widget.setText(str(value or ""))
 
     def restore_workspace(self, workspace: WorkspaceProject) -> None:
+        settings = self._validated_settings(workspace.settings)
         self._restoring = True
         try:
             self._workspace = workspace
             self._editor_document = None
+            self._editor_source_settings = {}
             self._render_lyrics_snapshot = None
             self._restore_values(self._initial_settings)
-            self._restore_values(dict(workspace.settings))
+            self._restore_values(settings)
             self._restore_values(
                 {
                     "audio_file": workspace.audio,
@@ -687,6 +831,15 @@ class MakePage(QWidget):
         from ..editor import document_from_payload
 
         edited = document_from_payload(document.to_dict())
+        self._editor_source_settings = {}
+        if manifest := edited.metadata.get("workspace_manifest"):
+            try:
+                original = load_workspace_project(manifest)
+                refs = (original.settings or {}).get("source_refs")
+                if isinstance(refs, dict):
+                    self._editor_source_settings = {"source_refs": copy.deepcopy(refs)}
+            except (OSError, TypeError, ValueError):
+                pass
         # The web pipeline otherwise fills cleared media fields from this older
         # manifest. The controller already owns the current explicit selections.
         edited.metadata.pop("workspace_manifest", None)
@@ -706,15 +859,21 @@ class MakePage(QWidget):
                 workspace = load_workspace_project(manifest)
             except (OSError, TypeError, ValueError) as exc:
                 self._append_log(f"歌词关联工程不可用，已清除旧工程素材：{exc}")
+        workspace_settings = self._validated_settings(workspace.settings) if workspace else {}
         edited = document_from_payload(document.to_dict())
         snapshot = Path(self._temporary.name) / f"edited-{uuid4().hex}.json"
         snapshot.write_text(write_json(edited), encoding="utf-8")
         self._restoring = True
         try:
             self._workspace = workspace
+            refs = (workspace.settings or {}).get("source_refs") if workspace else None
+            self._editor_source_settings = (
+                {"source_refs": copy.deepcopy(refs)} if isinstance(refs, dict) else {}
+            )
             # An editor can load another song independently of this page. Drop
             # previous sources first, then restore only the new song's assets
             # and persisted settings. The caller may supply its chosen audio.
+            self._restore_values(self._initial_settings)
             self._restore_values(
                 {
                     "audio_file": "",
@@ -729,7 +888,7 @@ class MakePage(QWidget):
                 }
             )
             if workspace is not None:
-                self._restore_values(dict(workspace.settings))
+                self._restore_values(workspace_settings)
                 self._restore_values(
                     {
                         "audio_file": workspace.audio,
@@ -833,7 +992,7 @@ class MakePage(QWidget):
                     "utaten_pronunciation_only": False,
                 }
             )
-        settings = self.get_settings()
+        settings = {**self._editor_source_settings, **self.get_settings()}
         settings["timing_refinement"] = values["timing_refinement"]
         arguments = {key: value for key, value in values.items() if key in _RENDER_FIELDS}
         directory = self._temporary.name
@@ -922,49 +1081,25 @@ class MakePage(QWidget):
     def _preview_result(self, value: tuple) -> None:
         result, background = value
         text, translation, _data, badge, _material, progress, active_row, status = result
-        lines = [line for line in text.splitlines() if line.strip()]
-        document = LyricsDocument(
-            lines=[
-                LyricLine(
-                    text=line,
-                    translation=translation if index == 0 else None,
-                    start=float(index * 5),
-                    end=float(index * 5 + 4),
-                    tokens=[KaraokeToken(line, index * 5, index * 5 + 4)],
-                )
-                for index, line in enumerate(lines)
-            ]
-        )
-        if document.lines:
-            selected = min(len(document.lines) - 1, max(0, int(active_row) - 1))
-            self.preview.set_document(document)
-            self.preview.set_current_line(selected)
-            self.preview.set_position(selected * 5 + float(progress) * 4)
+        self._sample_updating = True
+        try:
+            self.sample_text.setPlainText(text)
+            self.sample_translation.setPlainText(translation)
+            self.sample_row.setMaximum(max(1, len(text.splitlines())))
+            self.sample_row.setValue(int(active_row))
+            self.sample_progress.setValue(float(progress) * 100)
+        finally:
+            self._sample_updating = False
+        self._refresh_sample()
         self.preview.set_background(background or "")
         self.material_preview_changed.emit(background)
         self.preview_status.setText(f"{_plain(badge)}\n{_plain(status)}")
         self._update_style()
 
     def _set_sample(self) -> None:
-        self.preview.set_document(
-            LyricsDocument(
-                lines=[
-                    LyricLine(
-                        text="夜空に響くメロディー",
-                        translation="旋律回荡在夜空",
-                        start=0,
-                        end=4,
-                        tokens=[
-                            KaraokeToken("夜空に", 0, 1.5),
-                            KaraokeToken("響く", 1.5, 2.5),
-                            KaraokeToken("メロディー", 2.5, 4),
-                        ],
-                    ),
-                    LyricLine(text="I hear the flowers whisper", start=5, end=9),
-                ]
-            )
-        )
-        self.preview.set_position(1.6)
+        self.sample_text.setPlainText("夜空に響くメロディー\nI hear the flowers whisper")
+        self.sample_translation.setPlainText("旋律回荡在夜空")
+        self.sample_progress.setValue(40)
 
     def _connect_style_controls(self) -> None:
         for key in _STYLE_FIELDS:
@@ -1018,6 +1153,7 @@ class MakePage(QWidget):
             return
         if key in {"lyrics_file", "pasted_lyrics"}:
             self._editor_document = None
+            self._editor_source_settings = {}
             self._render_lyrics_snapshot = None
         if key == "font_files":
             families = []

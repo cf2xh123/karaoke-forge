@@ -101,6 +101,56 @@ def test_windowed_streams_log_and_preserve_existing_streams(monkeypatch, tmp_pat
     assert len(owned_streams) == 1
 
 
+def test_frozen_existing_ansi_streams_are_normalized_to_utf8(monkeypatch):
+    stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+    stdout = io.TextIOWrapper(stdout_bytes, encoding="gbk")
+    stderr = io.TextIOWrapper(stderr_bytes, encoding="gbk")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    launcher.ensure_standard_streams()
+    message = "中文缓存/歌曲_🎵"
+    print(message, flush=True)
+    print(message, file=sys.stderr, flush=True)
+    assert stdout_bytes.getvalue().decode("utf-8").strip() == message
+    assert stderr_bytes.getvalue().decode("utf-8").strip() == message
+
+
+def test_successful_worker_roundtrips_non_ascii_path_in_real_process(tmp_path):
+    pytest.importorskip("faster_whisper")
+    from karaoke_forge.network import (
+        ModelDownloadSettings,
+        model_cache_directory,
+        save_model_download_settings,
+    )
+    from karaoke_forge.transcribe import PINNED_MODEL_REVISIONS
+
+    data = tmp_path / "中文缓存_🎵"
+    settings = ModelDownloadSettings(mode="offline")
+    save_model_download_settings(settings, settings_dir=data)
+    snapshot = (model_cache_directory(settings, settings_dir=data) / "hub"
+                / "models--Systran--faster-whisper-small" / "snapshots"
+                / PINNED_MODEL_REVISIONS["small"])
+    snapshot.mkdir(parents=True)
+    # Simulate the existing ANSI streams created by the windowed bootloader,
+    # then run the actual model worker against a local path-only cache fixture.
+    code = """
+import io, sys
+from karaoke_forge.desktop import launcher
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='gbk')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='gbk')
+sys.frozen = True
+launcher.ensure_standard_streams()
+raise SystemExit(launcher.dispatch_worker(['-m', 'karaoke_forge.model_worker', 'small']))
+"""
+    environment = {**os.environ, "KARAOKE_FORGE_SETTINGS_DIR": str(data), "HF_HUB_OFFLINE": "1"}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, check=True,
+                            env=environment, timeout=45)
+    returned = Path(result.stdout.decode("utf-8").strip().splitlines()[-1])
+    assert returned.resolve() == snapshot.resolve()
+    assert returned.is_dir()
+
+
 def test_worker_protocol_dispatches_only_known_model_commands(monkeypatch):
     calls = []
 
@@ -108,11 +158,13 @@ def test_worker_protocol_dispatches_only_known_model_commands(monkeypatch):
         calls.append(args)
         return 7
 
-    for name in ("karaoke_forge.model_worker", "karaoke_forge.cli"):
+    for name in ("karaoke_forge.model_worker", "karaoke_forge.cli", "demucs.separate"):
         monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(main=fake_main))
     assert launcher.dispatch_worker(["-m", "karaoke_forge.model_worker", "tiny"]) == 7
     assert launcher.dispatch_worker(["-m", "karaoke_forge", "model-download", "--mode", "status"]) == 7
-    assert calls == [["tiny"], ["model-download", "--mode", "status"]]
+    assert launcher.dispatch_worker(["-m", "demucs", "--two-stems", "vocals", "歌曲.wav"]) == 7
+    assert calls == [["tiny"], ["model-download", "--mode", "status"],
+                     ["--two-stems", "vocals", "歌曲.wav"]]
     assert launcher.dispatch_worker(["song.json"]) is None
     with pytest.raises(ValueError, match="Unsupported"):
         launcher.dispatch_worker(["-m", "os", "arbitrary"])
@@ -148,8 +200,9 @@ def test_build_command_keeps_paths_and_dynamic_dependencies(tmp_path):
     assert str(root / "src") in options("--paths")
     assert set(builder.COLLECT_ALL) <= set(options("--collect-all"))
     assert "PySide6" not in options("--collect-all")
-    assert {"torch", "demucs", "gradio", "PySide6.QtWebEngineCore"} <= set(
-        options("--exclude-module"))
+    assert {"gradio", "PySide6.QtWebEngineCore"} <= set(options("--exclude-module"))
+    assert not {"torch", "torchaudio", "demucs"} & set(options("--exclude-module"))
+    assert {"torch", "torchaudio", "demucs.separate"} <= set(options("--hidden-import"))
     assert f"{ffmpeg / 'bin/ffmpeg.exe'}:ffmpeg/bin" in options("--add-binary")
     assert command[-1] == str(root / "src/karaoke_forge/desktop/launcher.py")
 

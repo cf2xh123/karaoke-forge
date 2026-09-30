@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "karaoke-forge"
-version = "0.16.0"
+version = "1.0.0"
 description = "Turn a song, its lyrics, and an MV into a timed karaoke video."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Karaoke Forge contributors" }]
 keywords = ["karaoke", "lyrics", "lrc", "subtitle", "whisper", "ffmpeg"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Environment :: Web Environment",
   "Environment :: Win32 (MS Windows)",

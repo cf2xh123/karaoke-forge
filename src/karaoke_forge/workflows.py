@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -60,6 +61,9 @@ class MakeResult:
     audio_offset: float
     sync_result: AudioSyncResult | None
     timing_refinement_warning: str | None = None
+    # Editable lyrics use the source audio clock. The public subtitle exports
+    # and document above use the final video clock after synchronization.
+    source_document: LyricsDocument | None = None
 
 
 def make_karaoke_video(
@@ -218,6 +222,11 @@ def make_karaoke_video(
         )
         document = aligned.document
         report = aligned.report
+    editable_document = document
+    document = copy.deepcopy(document)
+    # Standalone subtitle exports are already on the video clock. Only the
+    # separate editable project JSON should restore audio-clock sync settings.
+    document.metadata.pop("workspace_manifest", None)
     if effective_offset:
         document = document.shifted(effective_offset)
         if progress:
@@ -283,4 +292,5 @@ def make_karaoke_video(
         audio_offset=effective_offset,
         sync_result=sync_result,
         timing_refinement_warning=timing_refinement_warning,
+        source_document=editable_document,
     )

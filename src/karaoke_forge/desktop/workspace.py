@@ -22,15 +22,16 @@ from PySide6.QtWidgets import (
 
 from ..ass import AssStyle
 from ..editor import document_from_payload
-from ..formats import export_formats, read_lyrics
+from ..formats import export_formats
 from ..models import LyricsDocument
 from ..projects import (
     PROJECT_FILENAME,
     WorkspaceProject,
     load_workspace_project,
+    read_workspace_lyrics,
     save_workspace_project,
 )
-from ..web import _default_output_root, _safe_stem
+from ..web import UiJobResult, _default_output_root, _safe_stem
 from .common import PathPicker
 
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
@@ -40,6 +41,13 @@ _LYRIC_SOURCES = ("lyrics_file", "pasted_lyrics", "netease_link", "qqmusic_link"
 def save_workspace_revision(document: LyricsDocument, settings: dict, directory: str):
     """Write the submitted lyrics, material choices and appearance as one project."""
     document = copy.deepcopy(document)
+    previous_settings = {}
+    if manifest := document.metadata.get("workspace_manifest"):
+        try:
+            previous_settings = load_workspace_project(manifest).settings
+        except (OSError, TypeError, ValueError):
+            pass
+    settings = {**previous_settings, **settings, "lyrics_timebase": "audio"}
     root = Path(directory).resolve()
     root.mkdir(parents=True, exist_ok=True)
     name = str(settings.get("output_name") or document.metadata.get("ti") or "歌词工程")
@@ -363,6 +371,10 @@ class WorkspacePage(QWidget):
         self.activity.setText("时间轴已生成 · 在当前工作台直接试听和调整，满意后导出视频。")
 
     def load_project(self, document, workspace: WorkspaceProject | None, source: str) -> None:
+        # Validate before replacing any part of the currently open project.
+        # A failed import must leave both the lyrics and its materials intact.
+        if not document.lines:
+            raise ValueError("歌词工程为空，当前工程未更改。")
         self._syncing = True
         try:
             if workspace:
@@ -385,6 +397,9 @@ class WorkspacePage(QWidget):
         self._settings_changed(self.make.get_settings())
         self.prepare_button.setText("重新载入 / 生成时间轴")
         self.activity.setText(f"已打开 {name} · 素材、样式和歌词在同一个工作台继续编辑。")
+        if warning := document.metadata.get("legacy_timing_warning"):
+            self.activity.setText(f"已打开 {name} · {warning}")
+            self.outputs.log.appendPlainText(warning)
 
     def render_video(self) -> None:
         if self.runner.is_busy:
@@ -427,7 +442,7 @@ class WorkspacePage(QWidget):
             return False
         try:
             workspace = load_workspace_project(manifest)
-            saved = read_lyrics(workspace.lyrics_project)
+            saved = read_workspace_lyrics(workspace)
             saved.metadata["workspace_manifest"] = str(workspace.manifest)
             if not self.editor.adopt_saved_revision(saved):
                 return False
@@ -487,9 +502,14 @@ class WorkspacePage(QWidget):
             self._saved_settings = copy.deepcopy(settings)
             self._update_dirty()
             suffix = "当前还有更新的未保存修改。" if not adopted or self.is_dirty else ""
-            self.activity.setText(
+            message = (
                 f"完整工程已保存至 {workspace.manifest.parent}，导出 {len(files)} 个歌词文件。{suffix}"
             )
+            self.outputs.show_result(UiJobResult(
+                message, None, [*files, str(workspace.manifest)], "", str(workspace.manifest.parent)
+            ))
+            self.results_button.setChecked(True)
+            self.activity.setText(message)
 
         return self.runner.submit("保存完整工程", task, saved)
 

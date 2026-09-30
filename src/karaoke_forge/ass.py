@@ -47,6 +47,13 @@ class AssStyle:
     pronunciation_gap: int = 4
 
 
+def document_auto_pronunciation(document: LyricsDocument, enabled: bool = True) -> bool:
+    """Honor saved official-only readings when rendering or preparing a project."""
+    return enabled and str(document.metadata.get("auto_pronunciation", "true")).strip().lower() not in {
+        "false", "0", "no", "off",
+    }
+
+
 # A single eighth note, shared by libass and the browser preview. Using a path
 # keeps the cue independent of the selected lyric font's musical glyphs.
 COUNTDOWN_NOTE_DRAWING = (
@@ -495,7 +502,7 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
         (
             _line_pronunciation(
                 line,
-                auto_pronunciation=style.auto_pronunciation,
+                auto_pronunciation=document_auto_pronunciation(document, style.auto_pronunciation),
                 auto_english_pronunciation=style.auto_english_pronunciation,
             )
             if style.show_pronunciation

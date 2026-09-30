@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,6 +13,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -21,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from .. import web
 from ..network import load_model_download_settings, test_model_download_network
+from ..projects import PROJECT_FILENAME
 from .common import JobRunner, PathPicker
 
 
@@ -46,6 +52,7 @@ class _Form(QWidget):
 
 class ToolsPage(QWidget):
     completed = Signal(object)
+    open_requested = Signal(str)
 
     def __init__(self, runner: JobRunner, parent=None) -> None:
         super().__init__(parent)
@@ -80,7 +87,69 @@ class ToolsPage(QWidget):
         convert_button.setProperty("primary", True)
         convert_button.clicked.connect(self.convert)
         self._add_tab(convert, "格式转换")
+        self.result_panel = QWidget()
+        result_layout = QVBoxLayout(self.result_panel)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        self.result_status = QTextBrowser()
+        self.result_status.setMaximumHeight(100)
+        result_layout.addWidget(self.result_status)
+        self.result_files = QListWidget()
+        self.result_files.setMaximumHeight(130)
+        self.result_files.itemDoubleClicked.connect(
+            lambda item: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(item.data(Qt.ItemDataRole.UserRole))
+            )
+        )
+        result_layout.addWidget(self.result_files)
+        result_actions = QHBoxLayout()
+        self.open_directory_button = QPushButton("打开输出文件夹")
+        self.open_directory_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self._result_directory))
+        )
+        result_actions.addWidget(self.open_directory_button)
+        self.continue_button = QPushButton("在工作台继续编辑")
+        self.continue_button.clicked.connect(lambda: self.open_requested.emit(self._result_project))
+        result_actions.addWidget(self.continue_button)
+        result_actions.addStretch()
+        result_layout.addLayout(result_actions)
+        outer.addWidget(self.result_panel)
+        self.result_panel.hide()
+        self._result_directory = ""
+        self._result_project = ""
         runner.busy_changed.connect(lambda busy: self.tabs.setEnabled(not busy))
+
+    def _show_result(self, result) -> None:
+        self.result_status.setMarkdown(result.status)
+        self._result_directory = result.output_dir or ""
+        self._result_project = ""
+        self.result_files.clear()
+        best_rank = 100
+        for filename in result.files:
+            item = QListWidgetItem(Path(filename).name)
+            item.setData(Qt.ItemDataRole.UserRole, filename)
+            item.setToolTip(filename)
+            self.result_files.addItem(item)
+            path = Path(filename)
+            # Jobs list plain LRC first, but continuing an edit must prefer the
+            # lossless project over interchange formats with fewer data fields.
+            rank = (
+                0
+                if path.name == PROJECT_FILENAME
+                else 1
+                if path.suffix.lower() == ".json"
+                else 2
+                if path.suffix.lower() == ".yrc"
+                else 3
+                if path.suffix.lower() == ".elrc" or path.name.lower().endswith(".enhanced.lrc")
+                else {".ass": 4, ".lrc": 5, ".srt": 6, ".vtt": 7}.get(path.suffix.lower(), 100)
+            )
+            if rank < best_rank:
+                best_rank = rank
+                self._result_project = filename
+        self.open_directory_button.setEnabled(bool(self._result_directory))
+        self.continue_button.setEnabled(bool(self._result_project))
+        self.result_panel.show()
+        self.completed.emit(result)
 
     def _add_tab(self, form: QWidget, label: str) -> None:
         scroll = QScrollArea()
@@ -170,14 +239,14 @@ class ToolsPage(QWidget):
         self.runner.submit(
             "生成歌词时间轴",
             lambda log: function(**args, progress_callback=log),
-            self.completed.emit,
+            self._show_result,
         )
 
     def _submit_qq(self, link: str, name: str, rights: bool) -> None:
         self.runner.submit(
             "获取 QQ 音乐歌词",
             lambda log: web.run_qqmusic_job(link, name, rights),
-            self.completed.emit,
+            self._show_result,
         )
 
     def convert(self) -> None:
@@ -186,7 +255,7 @@ class ToolsPage(QWidget):
         self.runner.submit(
             "转换歌词格式",
             lambda log: web.run_convert_job(source, output_format),
-            self.completed.emit,
+            self._show_result,
         )
 
 
@@ -238,10 +307,12 @@ class SettingsPage(QWidget):
         runner.busy_changed.connect(lambda busy: form.setEnabled(not busy))
 
     def reload_settings(self) -> None:
-        settings = load_model_download_settings()
-        self.mode.setCurrentIndex(max(0, self.mode.findData(settings.mode)))
-        self.proxy.setText(settings.proxy_url or "")
-        self.mirror.setChecked(settings.mirror_confirmed)
+        mode, proxy, mirror, message = web._model_network_form_defaults()
+        self.mode.setCurrentIndex(max(0, self.mode.findData(mode)))
+        self.proxy.setText(proxy)
+        self.mirror.setChecked(mirror)
+        if message:
+            self.report.setMarkdown(message)
 
     def save(self) -> None:
         values = (self.mode.currentData(), self.proxy.text(), self.mirror.isChecked())

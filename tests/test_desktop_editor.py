@@ -178,6 +178,70 @@ def test_live_cell_editor_is_included_in_close_checks_and_document_reads(page, a
     assert page.current_document().lines[0].translation == "live cell draft"
 
 
+@pytest.mark.parametrize("column,text", [(5, "live translation"), (2, "invalid time")])
+def test_undo_consumes_the_live_cell_draft_before_prior_history(page, app, column, text):
+    page.nudge("start", 0.1)
+    committed = page.current_document().to_dict()
+    past_before, _ = history_stacks(page._history)
+    page.show()
+    app.processEvents()
+    item = page.lines_table.item(0, column)
+    old_text = item.text()
+    page.lines_table.editItem(item)
+    app.processEvents()
+    editor = QApplication.focusWidget()
+    assert isinstance(editor, QLineEdit)
+    editor.selectAll()
+    QTest.keyClicks(editor, text)
+    assert item.text() == old_text
+    assert editor.hasFocus()
+    page.undo()
+    assert page.current_document().to_dict() == committed
+    past_after, _ = history_stacks(page._history)
+    assert len(past_after) == len(past_before)
+    page.undo()
+    assert page.current_document().lines[0].start == 1.0
+
+
+def test_first_live_cell_draft_enables_undo_without_stealing_focus(page, app):
+    page.show()
+    app.processEvents()
+    page.lines_table.editItem(page.lines_table.item(0, 5))
+    app.processEvents()
+    editor = QApplication.focusWidget()
+    assert isinstance(editor, QLineEdit)
+    editor.selectAll()
+    QTest.keyClicks(editor, "first draft")
+    assert page.undo_button.isEnabled()
+    assert editor.hasFocus()
+    page.undo()
+    assert not page.is_dirty
+    assert page.current_document().lines[0].translation == "你好世界"
+
+
+@pytest.mark.parametrize("open_manifest", [True, False])
+def test_editor_imports_legacy_render_project_on_the_audio_clock(page, document, tmp_path, open_manifest):
+    from karaoke_forge.formats import write_json
+
+    project = tmp_path / "mv-old"
+    assets = project / "Song.assets"
+    assets.mkdir(parents=True)
+    lyrics = assets / "Song.json"
+    rendered = document.shifted(2)
+    rendered.metadata["workspace_manifest"] = str(project / PROJECT_FILENAME)
+    lyrics.write_text(write_json(rendered), encoding="utf-8")
+    workspace = save_workspace_project(
+        project, name="Old rendered song", lyrics_project=lyrics,
+        settings={"audio_offset": 2, "auto_sync": False}, recent_root=tmp_path / "recent",
+    )
+    original = lyrics.read_bytes()
+    page.load_source(str(workspace.manifest if open_manifest else lyrics), confirm_replace=False)
+    assert page.current_document().lines[0].start == 1
+    assert page.current_document().lines[0].tokens[0].start == 1
+    assert not page.is_dirty
+    assert lyrics.read_bytes() == original
+
+
 def test_window_save_shortcut_remains_unambiguous_and_shift_z_redoes(page, app):
     window = QMainWindow()
     window.setCentralWidget(page)
