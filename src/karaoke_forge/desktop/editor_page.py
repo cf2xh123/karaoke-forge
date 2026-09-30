@@ -275,7 +275,9 @@ class EditorPage(QWidget):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         self.preview = LyricPreviewWidget()
-        self.preview.setMinimumHeight(170)
+        # Keep scaled video typography legible; the surrounding pane already
+        # scrolls when a small window cannot fit the detailed controls.
+        self.preview.setMinimumHeight(300)
         right_layout.addWidget(self.preview)
         player_row = QHBoxLayout()
         self.play_button = self._button("播放", self.toggle_playback, player_row)

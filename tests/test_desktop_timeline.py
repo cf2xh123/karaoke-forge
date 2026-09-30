@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("karaoke_forge.desktop")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QFontDatabase, QImage, QWheelEvent
+from PySide6.QtGui import QFont, QFontDatabase, QImage, QRawFont, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -274,39 +274,86 @@ def test_highlighting_obeys_individual_token_times_and_gaps(app, document):
     widget.close()
 
 
-def test_native_preview_paints_readings_and_highlight_and_accepts_background_reset(app, document):
-    widget = show(LyricPreviewWidget(), app, height=300)
-    widget.set_document(document)
-    widget.set_style({"show_pronunciation": True, "show_translation": True})
+def _available_font_for(text):
+    families = QFontDatabase.families()
+    preferred = ["DejaVu Sans", "Liberation Sans", "Arial", "Microsoft YaHei"]
+    for family in [name for name in preferred if name in families] + families:
+        raw = QRawFont.fromFont(QFont(family, 20))
+        if raw.isValid() and all(raw.supportsCharacter(ord(char)) for char in set(text)):
+            return family
+    return None
+
+
+def _preview_fill_counts(image):
+    counts = {"waiting": 0, "sung": 0, "reading": 0}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            red, green, blue = color.red(), color.green(), color.blue()
+            counts["waiting"] += red > 180 and green > 180 and blue > 180
+            counts["sung"] += red > 180 and green > 130 and blue < 140
+            counts["reading"] += red < 80 and green > 180 and blue > 180
+    return counts
+
+
+def test_native_preview_paints_readings_and_highlight_and_accepts_background_reset(app):
+    # Exercise real glyph fills on every platform, without depending on a CJK
+    # font being installed or counting tiny fallback boxes in a scaled preview.
+    font = _available_font_for("Morning songMORNING")
+    assert font is not None, "The Qt test environment needs a font with Latin glyphs"
+    source = LyricsDocument(
+        [
+            LyricLine(
+                "Morning song", 1, 5,
+                [KaraokeToken("Morning ", 1, 2), KaraokeToken("song", 3, 5)],
+                pronunciation_units=[PronunciationSpan("Morning", "MORNING", 0, 7)],
+            )
+        ],
+        metadata={"auto_pronunciation": "false"},
+    )
+    widget = show(LyricPreviewWidget(), app, width=960, height=540)
+    widget.set_document(source)
+    style = {
+        "font": font, "resolution": (960, 540), "font_size": 88,
+        "pronunciation_font_size": 40, "pronunciation_color": "#00FFFF",
+        "show_pronunciation": True, "show_translation": False,
+    }
+    widget.set_style(style)
     widget.set_background(None)
     widget.set_position(1)
     before = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     widget.set_position(4)
     after = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     assert before.size() == after.size()
-    changed = sum(
-        before.pixel(x, y) != after.pixel(x, y)
-        for x in range(before.width())
-        for y in range(before.height())
-    )
-    assert changed > 30
-    # Thin CJK glyphs must retain a light fill after their outline is painted.
-    light_pixels = sum(
-        before.pixelColor(x, y).red() > 180
-        and before.pixelColor(x, y).green() > 180
-        and before.pixelColor(x, y).blue() > 180
-        for x in range(before.width())
-        for y in range(before.height() // 2, before.height())
-    )
-    sung_pixels = sum(
-        after.pixelColor(x, y).red() > 180
-        and after.pixelColor(x, y).green() > 130
-        and after.pixelColor(x, y).blue() < 140
-        for x in range(after.width())
-        for y in range(after.height() // 2, after.height())
-    )
-    assert light_pixels > 20
-    assert sung_pixels > 20
+    initial, progressed = _preview_fill_counts(before), _preview_fill_counts(after)
+    assert initial["waiting"] > 100
+    assert initial["reading"] > 100, "The saved reading must actually be painted"
+    assert initial["sung"] == 0
+    assert progressed["sung"] > initial["waiting"] * 0.4
+    assert progressed["reading"] < initial["reading"] * 0.1, "The reading must also highlight"
+    widget.set_position(1)
+    widget.set_style({**style, "show_pronunciation": False})
+    assert _preview_fill_counts(widget.grab().toImage())["reading"] == 0
+    widget.close()
+
+
+def test_native_preview_cjk_glyph_fills_survive_outlines_when_font_is_available(app, document):
+    font = _available_font_for("春の歌次")
+    if font is None:
+        pytest.skip("No installed Qt font provides the CJK glyphs used by this raster test")
+    widget = show(LyricPreviewWidget(), app, width=960, height=540)
+    widget.set_document(document)
+    widget.set_style({
+        "font": font, "resolution": (960, 540), "font_size": 88,
+        "show_pronunciation": False, "show_translation": False,
+    })
+    widget.set_position(1)
+    before = _preview_fill_counts(widget.grab().toImage())
+    widget.set_position(4)
+    after = _preview_fill_counts(widget.grab().toImage())
+    assert before["waiting"] > 100
+    assert before["sung"] == 0
+    assert after["sung"] > before["waiting"] * 0.25
     widget.close()
 
 
