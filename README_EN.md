@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `1.0.0`. Windows users can extract the portable ZIP and run the
+> The current release is `1.0.1`. Windows users can extract the portable ZIP and run the
 > native workspace directly. Python, Qt, FFmpeg, and CPU vocal-separation runtimes are
 > included; recognition and separation models download on first use. Recognition models
 > default to anonymous ModelScope downloads, without administrator access or system `PATH` changes.
@@ -24,7 +24,7 @@ tools and desktop, alignment, online-source, and pronunciation dependencies as n
 It opens a native window without a browser or local HTTP server. The existing web launcher remains available; both UIs
 use the same project JSON and processing pipeline.
 
-The current source checkout starts with **New project (Ctrl+N)**: choose a project folder,
+The desktop workflow starts with **New project (Ctrl+N)**: choose a project folder,
 song/MV and lyric source, configure alignment and appearance, then save and enter the editor.
 Projects can be saved and reopened before timing is generated. Source links and initial
 processing options belong to **Project settings**, which can be reopened later.

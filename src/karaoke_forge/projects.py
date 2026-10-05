@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .models import LyricsDocument
 
 PROJECT_FILENAME = "karaoke-forge-project.json"
@@ -220,7 +221,7 @@ def save_workspace_project(
     manifest = root / PROJECT_FILENAME
     data = {
         "schema_version": 1,
-        "app_version": "1.0.0",
+        "app_version": __version__,
         "name": name,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "lyrics_project": _relative_or_absolute(lyrics, root),

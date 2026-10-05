@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import Request, urlopen
 
+from . import __version__
+
 
 class QQMusicLinkError(ValueError):
     pass
@@ -99,7 +101,7 @@ def resolve_qqmusic_song_url(value: str, *, timeout: float = 15.0) -> tuple[str,
 
     request = Request(
         url,
-            headers={"User-Agent": "Mozilla/5.0 Karaoke-Forge/1.0.0"},
+            headers={"User-Agent": f"Mozilla/5.0 Karaoke-Forge/{__version__}"},
         method="GET",
     )
     try:
@@ -116,7 +118,7 @@ def _download_public_json(url: str, *, timeout: float = 15.0) -> dict[str, objec
         headers={
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://y.qq.com/",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/1.0.0",
+            "User-Agent": f"Mozilla/5.0 Karaoke-Forge/{__version__}",
         },
     )
     try:
