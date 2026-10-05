@@ -24,9 +24,11 @@ tools and desktop, alignment, online-source, and pronunciation dependencies as n
 It opens a native window without a browser or local HTTP server. The existing web launcher remains available; both UIs
 use the same project JSON and processing pipeline.
 
-Import a song/MV and lyrics, prepare timing, then edit, preview and export in the same
-workspace. There is no manual handoff between a production page and a lyric editor.
-Material, style and advanced options expand when needed, while task results stay inline.
+The current source checkout starts with **New project (Ctrl+N)**: choose a project folder,
+song/MV and lyric source, configure alignment and appearance, then save and enter the editor.
+Projects can be saved and reopened before timing is generated. Source links and initial
+processing options belong to **Project settings**, which can be reopened later.
+Prepare timing, then edit, preview and export in the same workspace; task results stay inline.
 Lyric tools and environment settings remain available as auxiliary functions.
 Native tables and draggable timelines support
 word timings, pronunciation, hiding/inserting/deleting lines, ripple editing, 100-step
@@ -34,12 +36,18 @@ undo/redo, audio playback with looping and speed control, and subtitle export. P
 runs in background threads. Unsaved lyric edits are checked before replacing a project
 or closing; running jobs finish before the app exits.
 
+The current-line word timeline, song overview and advanced edits share one tabbed area.
+Drag the splitter to adjust preview and timing space. Space toggles playback while ordinary
+text inputs retain spaces. Word starts, ends and whole tokens can be adjusted independently,
+with linked boundaries available as an explicit option. Creating or saving settings does not
+fetch online content; preparation starts when generating the timeline.
+
 Opening another project restores its own assets and settings. Rendering the current
 project reads the latest lyrics and preserves current materials and style choices instead
 of restoring stale settings from disk. Rendering edited lyrics disables repeat
 timing refinement to preserve manual adjustments.
 
-NetEase authentication runs only after clicking **Connect account** or **Log in again**;
+NetEase authentication runs from the account menu's **Connect** or **Reconnect** actions;
 it may open a dedicated Edge window for the official login page. Starting the desktop
 workspace does not trigger login, and credentials are not saved in lyric projects or outputs.
 
@@ -54,12 +62,12 @@ instrumental exports. A source checkout still uses an optional dependency: run
 `安装人声分离（Demucs）.bat` on Windows, or install `python -m pip install -e ".[separate]"`
 on other platforms.
 
-Online links offer matching saved projects without replacing current edits automatically.
-Editable preview samples are available in Materials and Style before loading formal lyrics.
+Editable preview samples are available in Project settings before loading formal lyrics.
 Lyric utilities display their result, errors, and file links on the current tool page, with
 an action to continue editing in the song workspace.
 
-Use **File → Open** for existing projects and **Ctrl+S** to save the project and subtitles.
+Use **File → Open** for existing projects and **Ctrl+S** to save settings, assets and subtitles
+to the current project folder. **Save as** creates a separate project copy.
 The native preview shares layout, pronunciation, and long-gap rules with ASS. Font rasterization
 and video effects should still be checked in the final ASS/FFmpeg output.
 This is a Qt Widgets/QPainter/Qt Multimedia interface, without WebView or WebEngine.

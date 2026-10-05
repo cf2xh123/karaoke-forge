@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import threading
 import wave
 from dataclasses import replace
 from pathlib import Path
@@ -15,10 +17,10 @@ pytest.importorskip("PySide6")
 import karaoke_forge.desktop  # prepare Windows ICU before Qt
 
 # isort: split
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLineEdit, QMessageBox
 
 from karaoke_forge.desktop.app import MainWindow
 from karaoke_forge.desktop.workspace import save_workspace_revision
@@ -123,6 +125,149 @@ def audio_file(path):
         stream.setframerate(8000)
         stream.writeframes(b"\0\0" * 8000)
     return path
+
+
+def source_dialog(monkeypatch, *, accepted, settings=None):
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            self.original_settings = kwargs.get("settings")
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+        def material_settings(self):
+            return settings
+
+        def project_settings(self):
+            return settings
+
+        def project_directory(self):
+            return None
+
+    monkeypatch.setattr("karaoke_forge.desktop.app.ProjectDialog", Dialog)
+
+
+def test_new_project_cancel_leaves_document_materials_and_dirty_state_untouched(window, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.editor.lines_table.item(0, 5).setText("Unsaved translation")
+    before_document = window.editor.current_document().to_dict()
+    before_settings = window.make.get_settings()
+    source_dialog(monkeypatch, accepted=False)
+    monkeypatch.setattr(window, "_allow_replace", lambda: pytest.fail("cancel must not ask to discard"))
+    window.new_project_dialog()
+    assert window.editor.current_document().to_dict() == before_document
+    assert window.make.get_settings() == before_settings
+    assert window.workspace.is_dirty
+    assert not window.runner.jobs
+    monkeypatch.setattr(window, "_allow_replace", lambda: True)
+
+
+def test_new_project_confirmation_respects_rejected_discard(window, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    source_dialog(monkeypatch, accepted=True, settings={"lyrics_file": "replacement.lrc"})
+    monkeypatch.setattr(window, "_allow_replace", lambda: False)
+    before = window.make.get_settings()
+    window.new_project_dialog()
+    assert window.editor.current_document().to_dict() == document().to_dict()
+    assert window.make.get_settings() == before
+    assert not window.runner.jobs
+
+
+def test_new_online_project_clears_stale_content_and_applies_only_configuration(window, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.make.controls["lyrics_file"].set_value("previous.json")
+    window.make.controls["pasted_lyrics"].setPlainText("old pasted text")
+    window.make.controls["font_size"].setValue(77)
+    source_dialog(monkeypatch, accepted=True, settings={
+        "output_name": "New online song", "netease_link": "https://music.163.com/song?id=123",
+        "use_netease_lyrics": True, "rights_confirmed": True, "audio_file": "",
+    })
+    window.new_project_dialog()
+    values = window.make.get_settings()
+    assert values["netease_link"].endswith("123")
+    assert not any(values[key] for key in ("lyrics_file", "pasted_lyrics", "qqmusic_link", "utaten_link"))
+    assert values["font_size"] == 77
+    assert window.editor.lines_table.rowCount() == 0
+    assert not window.editor.is_dirty and window.workspace.is_dirty
+    assert not window.workspace._has_document
+    assert window.editor.player.source().isEmpty()
+    assert window.outputs.player.source().isEmpty()
+    assert not window.outputs.directory and not window.outputs.files.count()
+    assert not window.runner.jobs
+    assert window.navigation.currentRow() == 0
+    assert "网易云" in window.workspace.project_summary.text()
+    assert window.workspace.source_button.text() == "项目设置…"
+    assert window.workspace.lyrics_picker.isHidden()
+
+
+def test_change_sources_keeps_current_edits_and_requires_regeneration(window, monkeypatch, tmp_path):
+    window.workspace.adopt_prepared(preparation())
+    window.editor.lines_table.item(0, 5).setText("Keep this translation")
+    before = window.editor.current_document().to_dict()
+    source_dialog(monkeypatch, accepted=True, settings={
+        "lyrics_file": "", "pasted_lyrics": "New lyrics", "netease_link": "",
+        "qqmusic_link": "", "utaten_link": "", "audio_file": "",
+    })
+    destination = tmp_path / "saved-with-settings"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
+    window.edit_project_sources()
+    window.runner.finish()
+    assert window.editor.current_document().to_dict()["lines"] == before["lines"]
+    assert window.workspace.project_directory == str(destination)
+    assert "来源已更改" in window.workspace.document_status.text()
+    assert window.make.get_settings()["pasted_lyrics"] == "New lyrics"
+    assert not window.runner.jobs
+
+
+def test_ctrl_n_and_top_new_button_use_the_same_local_dialog(window, qt_app, monkeypatch):
+    source_dialog(monkeypatch, accepted=False)
+    calls = []
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.app.ProjectDialog.exec",
+        lambda self: calls.append("dialog") or QDialog.DialogCode.Rejected,
+    )
+    window.show()
+    window.activateWindow()
+    window.workspace.new_button.setFocus()
+    qt_app.processEvents()
+    QTest.keyClick(window.workspace.new_button, Qt.Key.Key_N, Qt.KeyboardModifier.ControlModifier)
+    QTest.mouseClick(window.workspace.new_button, Qt.MouseButton.LeftButton)
+    assert calls == ["dialog", "dialog"]
+
+
+def test_space_routes_to_output_player_and_keeps_text_input(window, qt_app, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.show()
+    window.activateWindow()
+    window.workspace.results_button.setChecked(True)
+    calls = []
+    monkeypatch.setattr(window.outputs, "toggle_playback", lambda: calls.append("output"))
+    monkeypatch.setattr(window.editor, "toggle_playback", lambda: calls.append("editor"))
+    window.outputs.play_button.setFocus()
+    qt_app.processEvents()
+    QTest.keyClick(window.outputs.play_button, Qt.Key.Key_Space)
+    assert calls == ["output"]
+    window.editor.whole_pronunciation.setFocus()
+    QTest.keyClick(window.editor.whole_pronunciation, Qt.Key.Key_Space)
+    assert calls == ["output"]
+    assert window.editor.whole_pronunciation.text().endswith(" ")
+
+
+def test_output_space_recovers_when_released_outside_the_application(window, qt_app, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.show()
+    window.activateWindow()
+    window.workspace.results_button.setChecked(True)
+    calls = []
+    monkeypatch.setattr(window.outputs, "toggle_playback", lambda: calls.append("output"))
+    window.outputs.play_button.setFocus()
+    qt_app.processEvents()
+    QTest.keyPress(window.outputs.play_button, Qt.Key.Key_Space)
+    QApplication.sendEvent(window, QEvent(QEvent.Type.WindowDeactivate))
+    # No release reaches the app while another window has focus.
+    QApplication.sendEvent(window, QEvent(QEvent.Type.WindowActivate))
+    QTest.keyClick(window.outputs.play_button, Qt.Key.Key_Space)
+    assert calls == ["output", "output"]
 
 
 def test_preparation_fills_the_existing_editor_without_navigation_or_resetting_style(
@@ -386,20 +531,27 @@ def test_export_uses_pending_manual_edits_and_current_assets_without_handoff(
     assert window.workspace.is_dirty
 
 
-def test_pending_new_lyrics_block_save_and_export_without_discarding_manual_edits(
-    window, monkeypatch
+def test_pending_new_lyrics_can_be_saved_but_block_export_without_discarding_manual_edits(
+    window, monkeypatch, tmp_path
 ):
     window.workspace.lyrics_picker.set_value("first.lrc")
     window._prepared(preparation())
     window.editor.lines_table.item(0, 5).setText("keep this draft")
-    window.workspace.lyrics_picker.set_value("second.lrc")
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: pytest.fail("no save"))
-    assert window.workspace.save_project() is False
+    replacement = tmp_path / "second.lrc"
+    replacement.write_text("[00:00.00]新しい夢", encoding="utf-8")
+    window.workspace.lyrics_picker.set_value(str(replacement))
+    destination = tmp_path / "pending"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
+    assert window.workspace.save_project()
+    window.runner.finish()
     window.workspace.render_video()
     assert window.runner.jobs == []
-    assert "先载入" in window.workspace.activity.text()
+    assert "重新生成时间轴" in window.workspace.activity.text()
     assert window.editor.current_document().lines[0].translation == "keep this draft"
-    assert window.workspace.is_dirty
+    assert not window.workspace.is_dirty
+    stored = load_workspace_project(destination / PROJECT_FILENAME)
+    assert stored.settings["pending_lyrics_source"]
+    assert read_workspace_lyrics(stored).lines[0].translation == "keep this draft"
 
 
 def successful_renderer(monkeypatch, tmp_path, settings):
@@ -554,6 +706,7 @@ def test_saving_into_another_project_directory_requires_explicit_overwrite(
 
 
 def test_workspace_inputs_fit_the_supported_minimum_window(window, qt_app):
+    window.workspace.adopt_prepared(preparation())
     window.setFont(QFont("Microsoft YaHei UI", 10))
     theme = Path(karaoke_forge.desktop.__file__).with_name("theme.qss")
     window.setStyleSheet(theme.read_text(encoding="utf-8"))
@@ -615,6 +768,7 @@ def test_saving_project_replaces_stale_result_files_and_directory(window, monkey
     window.workspace.show_result(
         UiJobResult("Earlier", None, [str(earlier / "old.ass")], "", str(earlier))
     )
+    window.workspace.results_button.setChecked(False)
     destination = tmp_path / "saved-now"
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
     assert window.workspace.save_project()
@@ -624,7 +778,7 @@ def test_saving_project_replaces_stale_result_files_and_directory(window, monkey
     assert "old.ass" not in names
     assert PROJECT_FILENAME in names
     assert len(names) == 7
-    assert window.workspace.results_button.isChecked()
+    assert not window.workspace.results_button.isChecked()
 
 
 @pytest.mark.parametrize("valid_source", [True, False])
@@ -723,3 +877,419 @@ def test_tools_continue_prioritizes_complete_manifest_regardless_of_result_order
         UiJobResult("Completed", None, ["song.lrc", "song.enhanced.lrc"], "", "")
     )
     assert window.tools._result_project == "song.enhanced.lrc"
+
+
+@pytest.mark.parametrize("source_kind", ["local", "paste", "netease"])
+def test_created_configuration_is_saved_and_reopens_before_any_timeline_exists(
+    window, tmp_path, source_kind
+):
+    audio = audio_file(tmp_path / "selected.wav")
+    settings = {"output_name": "Configured song", "audio_file": str(audio), "font_size": 67}
+    if source_kind == "local":
+        source = tmp_path / "lyrics.txt"
+        source.write_text("春の夢", encoding="utf-8")
+        settings["lyrics_file"] = str(source)
+    elif source_kind == "paste":
+        settings["pasted_lyrics"] = "春の夢\nsing with me"
+    else:
+        settings.update({"netease_link": "12345", "use_netease_lyrics": True})
+    destination = tmp_path / "configured"
+    assert window.workspace.start_project(settings, str(destination))
+    assert window.workspace.has_project and not window.workspace._has_document
+    assert not window.workspace.is_dirty
+    assert window.workspace.project_directory == str(destination)
+    assert not window.runner.jobs
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    pending = read_workspace_lyrics(saved)
+    assert pending.lines == [] and pending.metadata["project_state"] == "configured"
+    assert saved.audio.is_file() and saved.audio != audio
+    assert saved.settings["font_size"] == 67
+    audio.unlink()
+    if source_kind == "local":
+        source.unlink()
+    window.workspace.load_project(pending, saved, str(saved.manifest))
+    values = window.make.get_settings()
+    assert values["font_size"] == 67 and values["audio_file"] == str(saved.audio)
+    assert not window.workspace.is_dirty
+    assert not window.workspace.render_button.isEnabled()
+    assert window.workspace.pages.currentWidget() is window.workspace.empty_page
+    if source_kind == "local":
+        assert Path(values["lyrics_file"]).read_text(encoding="utf-8") == "春の夢"
+    elif source_kind == "paste":
+        assert values["pasted_lyrics"] == "春の夢\nsing with me"
+        assert values["lyrics_file"] == ""
+    else:
+        assert values["netease_link"] == "12345" and values["lyrics_file"] == ""
+
+
+def test_creation_save_failure_preserves_open_document_settings_and_history(
+    window, monkeypatch, tmp_path
+):
+    window.workspace.adopt_prepared(preparation())
+    window.editor.nudge("start", 0.1)
+    before = window.editor.current_document().to_dict()
+    controls = window.make.get_settings()
+    history = window.editor._history.copy()
+
+    def fail(*args, **kwargs):
+        raise OSError("read-only destination")
+
+    monkeypatch.setattr("karaoke_forge.desktop.workspace.save_workspace_revision", fail)
+    assert not window.workspace.start_project({"output_name": "Replacement"}, str(tmp_path / "new"))
+    assert window.editor.current_document().to_dict() == before
+    assert window.make.get_settings() == controls
+    assert window.editor._history == history
+    assert "当前工程仍保留" in window.workspace.activity.text()
+
+
+def test_configured_source_in_project_directory_is_not_overwritten_by_placeholder(
+    window, tmp_path
+):
+    destination = tmp_path / "created"
+    destination.mkdir()
+    source = destination / "Song.json"
+    original = write_json(document())
+    source.write_text(original, encoding="utf-8")
+    assert window.workspace.start_project(
+        {"output_name": "Song", "lyrics_file": str(source)}, str(destination)
+    )
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    assert source.read_text(encoding="utf-8") == original
+    assert saved.lyrics_project != source
+    assert saved.settings["lyrics_file"] == str(source)
+    assert not read_workspace_lyrics(saved).lines
+
+
+def test_configured_project_ctrl_s_saves_in_place_and_save_as_chooses_a_new_directory(
+    window, tmp_path, monkeypatch
+):
+    destination = tmp_path / "created"
+    assert window.workspace.start_project(
+        {"output_name": "Song", "pasted_lyrics": "春の夢"}, str(destination)
+    )
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: pytest.fail("no reprompt"))
+    window.make.controls["pasted_lyrics"].setPlainText("新しい夢")
+    assert window.workspace.save_project()
+    window.runner.finish()
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    assert saved.settings["pasted_lyrics"] == "新しい夢"
+    assert not window.workspace.is_dirty
+    copied = tmp_path / "copy"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(copied))
+    assert window.workspace.save_project(as_new=True)
+    window.runner.finish()
+    assert window.workspace.project_directory == str(copied)
+    assert load_workspace_project(copied / PROJECT_FILENAME).settings["pasted_lyrics"] == "新しい夢"
+
+
+@pytest.mark.parametrize("source_kind", ["local", "paste"])
+def test_changed_lyrics_source_is_saved_reopened_and_used_for_generation(
+    window, tmp_path, monkeypatch, source_kind
+):
+    destination = tmp_path / "song"
+    saved_document, saved, _ = save_workspace_revision(
+        document(), {"output_name": "Song"}, str(destination)
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    window.editor.lines_table.item(0, 5).setText("Keep the edited translation")
+    settings = window.make.get_settings()
+    if source_kind == "local":
+        source = tmp_path / "replacement.txt"
+        source.write_text("新しい夢", encoding="utf-8")
+        settings.update({"lyrics_file": str(source), "pasted_lyrics": ""})
+    else:
+        settings.update({"lyrics_file": "", "pasted_lyrics": "新しい夢"})
+    assert window.workspace.apply_project_settings(settings)
+    window.runner.finish()
+    stored = load_workspace_project(destination / PROJECT_FILENAME)
+    reopened = read_workspace_lyrics(stored)
+    assert reopened.lines[0].translation == "Keep the edited translation"
+    assert stored.settings["pending_lyrics_source"]
+    if source_kind == "local":
+        source.unlink()
+    window.workspace.load_project(reopened, stored, str(stored.manifest))
+    window.workspace.render_video()
+    assert not window.runner.jobs and "重新生成时间轴" in window.workspace.activity.text()
+    captured = []
+
+    def generate(**kwargs):
+        captured.append(kwargs)
+        return preparation()
+
+    monkeypatch.setattr("karaoke_forge.desktop.make_page.prepare_make_editor_job", generate)
+    window.workspace.prepare_project()
+    window.runner.finish()
+    if source_kind == "local":
+        assert Path(captured[0]["lyrics_file"]).read_text(encoding="utf-8") == "新しい夢"
+    else:
+        assert captured[0]["pasted_lyrics"] == "新しい夢" and captured[0]["lyrics_file"] is None
+    assert window.workspace.project_directory == str(destination)
+    assert window.editor.current_document().metadata["workspace_manifest"] == str(stored.manifest)
+    assert not load_workspace_project(stored.manifest).settings["pending_lyrics_source"]
+    assert not window.workspace.is_dirty
+
+
+def test_style_settings_save_keeps_lyrics_history_and_does_not_request_new_alignment(
+    window, tmp_path
+):
+    destination = tmp_path / "song"
+    saved_document, saved, _ = save_workspace_revision(
+        document(), {"output_name": "Song"}, str(destination)
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    window.editor.nudge("start", 0.1)
+    before = window.editor.current_document().to_dict()["lines"]
+    history = window.editor._history.copy()
+    assert window.workspace.apply_project_settings({"font_size": 72})
+    window.runner.finish()
+    assert window.editor.current_document().to_dict()["lines"] == before
+    assert window.editor._history == history
+    assert not window.workspace._source_pending()
+    assert not window.workspace.is_dirty
+    assert load_workspace_project(saved.manifest).settings["font_size"] == 72
+
+
+def test_generated_and_rendered_results_keep_the_created_project_directory(
+    window, monkeypatch, tmp_path
+):
+    destination = tmp_path / "project-home"
+    assert window.workspace.start_project(
+        {"output_name": "Song", "pasted_lyrics": "春"}, str(destination)
+    )
+    generated = tmp_path / "temporary-generation"
+    generated.mkdir()
+    intermediate, _saved, _files = save_workspace_revision(
+        document(), {"output_name": "Song"}, str(generated)
+    )
+    window.workspace.adopt_prepared(replace(preparation(intermediate), output_dir=str(generated)))
+    assert window.workspace.project_directory == str(destination)
+    assert window.editor.current_document().metadata["workspace_manifest"] == str(destination / PROJECT_FILENAME)
+    window.editor.lines_table.item(0, 5).setText("New saved translation")
+    successful_renderer(monkeypatch, tmp_path, window.make.get_settings())
+    window.workspace.render_video()
+    window.runner.finish()
+    assert window.workspace.project_directory == str(destination)
+    assert window.editor.current_document().metadata["workspace_manifest"] == str(destination / PROJECT_FILENAME)
+    assert read_workspace_lyrics(load_workspace_project(destination / PROJECT_FILENAME)).lines[0].translation == "New saved translation"
+    assert not window.workspace.is_dirty
+
+
+def test_editor_has_no_visible_project_setup_inputs(window, qt_app):
+    window.workspace.adopt_prepared(preparation())
+    window.show()
+    qt_app.processEvents()
+    assert window.workspace.project_name.isVisible()
+    assert window.workspace.source_button.isVisible()
+    assert window.workspace.source_button.text() == "项目设置…"
+    assert window.workspace.song_picker.isHidden()
+    assert window.workspace.lyrics_picker.isHidden()
+    assert window.workspace.name_edit.isHidden()
+    assert window.make.isHidden()
+
+
+def test_copied_project_restores_its_local_lyrics_source_inside_the_new_directory(
+    window, tmp_path
+):
+    source = tmp_path / "source.txt"
+    source.write_text("春の夢", encoding="utf-8")
+    original = tmp_path / "original"
+    assert window.workspace.start_project(
+        {"output_name": "Song", "lyrics_file": str(source)}, str(original)
+    )
+    copied = tmp_path / "copied"
+    shutil.copytree(original, copied)
+    moved = load_workspace_project(copied / PROJECT_FILENAME)
+    window.workspace.load_project(read_workspace_lyrics(moved), moved, str(moved.manifest))
+    restored = Path(window.make.get_settings()["lyrics_file"])
+    assert restored.is_relative_to(copied)
+    assert restored.read_text(encoding="utf-8") == "春の夢"
+    assert window.workspace.project_directory == str(copied)
+
+
+def test_opening_another_project_clears_previous_output_playback_and_files(window, tmp_path):
+    window.workspace.adopt_prepared(preparation())
+    earlier = tmp_path / "earlier"
+    window.workspace.show_result(
+        UiJobResult("Earlier", None, [str(earlier / "old.ass")], "", str(earlier))
+    )
+    saved_document, saved, _ = save_workspace_revision(
+        document(), {"output_name": "Another song"}, str(tmp_path / "another")
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    assert not window.outputs.files.count()
+    assert not window.outputs.directory
+    assert window.outputs.player.source().isEmpty()
+    assert not window.workspace.results_button.isChecked()
+
+
+def test_project_archive_keeps_event_loop_alive_and_cannot_be_abandoned(
+    window, qt_app, monkeypatch, tmp_path
+):
+    from karaoke_forge.desktop.workspace import _ArchiveProgress
+
+    ui_thread = threading.get_ident()
+    observed = []
+    heartbeat = threading.Event()
+
+    def archive(*args):
+        assert threading.get_ident() != ui_thread
+        assert heartbeat.wait(3), "GUI event loop did not process the heartbeat"
+        return "saved document", "saved workspace", []
+
+    def interact():
+        progress = QApplication.activeModalWidget()
+        if not isinstance(progress, _ArchiveProgress):
+            return
+        observed.append(window.workspace.is_saving_revision)
+        QTest.keyClick(progress, Qt.Key.Key_Escape)
+        assert progress.isVisible()
+        progress.close()
+        assert progress.isVisible()
+        timer.stop()
+        heartbeat.set()
+
+    monkeypatch.setattr("karaoke_forge.desktop.workspace.save_workspace_revision", archive)
+    timer = QTimer()
+    timer.timeout.connect(interact)
+    timer.start(10)
+    try:
+        result = window.workspace._save_revision_responsive(document(), {}, str(tmp_path))
+    finally:
+        timer.stop()
+    assert result == ("saved document", "saved workspace", [])
+    assert observed == [True]
+    assert not window.workspace.is_saving_revision
+
+
+def test_cancelled_project_settings_leave_lyrics_and_configuration_untouched(window, monkeypatch):
+    window.workspace.adopt_prepared(preparation())
+    window.editor.lines_table.item(0, 5).setText("Keep my draft")
+    before = window.editor.current_document().to_dict()
+    settings = window.make.get_settings()
+    source_dialog(monkeypatch, accepted=False)
+    window.edit_project_sources()
+    assert window.editor.current_document().to_dict() == before
+    assert window.make.get_settings() == settings
+    assert window.workspace.is_dirty
+    assert not window.runner.jobs
+
+
+def test_failed_project_settings_save_retains_open_and_saved_revision(window, tmp_path):
+    destination = tmp_path / "song"
+    saved_document, saved, _ = save_workspace_revision(
+        document(), {"output_name": "Song"}, str(destination)
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    window.editor.nudge("start", 0.1)
+    before = window.editor.current_document().to_dict()
+    history = window.editor._history.copy()
+    settings = window.make.get_settings()
+    manifest = saved.manifest.read_bytes()
+    lyrics = saved.lyrics_project.read_bytes()
+    assert window.workspace.apply_project_settings({
+        "lyrics_file": str(tmp_path / "missing-new-source.txt"), "font_size": 86,
+    })
+    with pytest.raises(FileNotFoundError, match="歌词文件不存在"):
+        window.runner.finish()
+    assert window.editor.current_document().to_dict() == before
+    assert window.editor._history == history
+    assert window.make.get_settings() == settings
+    assert window.workspace.is_dirty
+    assert saved.manifest.read_bytes() == manifest
+    assert saved.lyrics_project.read_bytes() == lyrics
+
+
+@pytest.mark.parametrize("new_name", ["Song", "Renamed"])
+def test_manifest_failure_restores_the_previous_lyrics_revision(monkeypatch, tmp_path, new_name):
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "recent"))
+    _document, saved, _files = save_workspace_revision(
+        document(), {"output_name": "Song"}, str(tmp_path)
+    )
+    before = {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+    original_save = save_workspace_project
+
+    def fail_after_manifest(*args, **kwargs):
+        original_save(*args, **kwargs)
+        raise OSError("catalog destination is unavailable")
+
+    monkeypatch.setattr("karaoke_forge.desktop.workspace.save_workspace_project", fail_after_manifest)
+    revised = document()
+    revised.lines[0].translation = "Must not replace the saved revision"
+    with pytest.raises(OSError, match="catalog destination"):
+        save_workspace_revision(revised, {"output_name": new_name}, str(tmp_path))
+    assert {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == before
+    assert read_workspace_lyrics(load_workspace_project(saved.manifest)).lines[0].translation == "spring"
+
+
+@pytest.mark.parametrize("choose_existing", [False, True])
+def test_settings_for_loose_lyrics_cancel_without_changing_the_open_document(
+    window, monkeypatch, tmp_path, choose_existing
+):
+    window.workspace.adopt_prepared(preparation())
+    window.editor.nudge("start", 0.1)
+    before = window.editor.current_document().to_dict()
+    controls = window.make.get_settings()
+    destination = tmp_path / "other-project"
+    if choose_existing:
+        save_workspace_revision(document(), {"output_name": "Other"}, str(destination))
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *args: str(destination) if choose_existing else ""
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
+    assert not window.workspace.apply_project_settings({"font_size": 78})
+    assert window.editor.current_document().to_dict() == before
+    assert window.make.get_settings() == controls
+    assert window.workspace.is_dirty
+    assert not window.workspace.project_directory
+    assert not window.runner.jobs
+
+
+def test_new_project_preserves_unrelated_same_name_lyrics_through_generation(window, tmp_path):
+    destination = tmp_path / "existing-material-folder"
+    destination.mkdir()
+    unrelated = destination / "Song.json"
+    unrelated.write_text("Unrelated original lyrics", encoding="utf-8")
+    assert window.workspace.start_project(
+        {"output_name": "Song", "pasted_lyrics": "春"}, str(destination)
+    )
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    assert saved.lyrics_project != unrelated
+    assert window.workspace.save_project()
+    window.runner.finish()
+    window.workspace.adopt_prepared(preparation())
+    assert unrelated.read_text(encoding="utf-8") == "Unrelated original lyrics"
+    assert read_workspace_lyrics(load_workspace_project(saved.manifest)).lines
+
+
+def test_changing_to_online_audio_requires_preparation_before_render(window, tmp_path):
+    saved_document, saved, _ = save_workspace_revision(
+        document(), {"output_name": "Song", "netease_link": "123"}, str(tmp_path / "song")
+    )
+    window.workspace.load_project(saved_document, saved, str(saved.manifest))
+    assert not window.workspace._source_pending()
+    assert window.workspace.apply_project_settings({"prefer_netease_audio": True})
+    window.runner.finish()
+    assert window.workspace._source_pending()
+    window.workspace.render_video()
+    assert not window.runner.jobs
+    assert "重新生成时间轴" in window.workspace.activity.text()
+    stored = load_workspace_project(saved.manifest)
+    assert stored.settings["pending_lyrics_source"]
+
+
+def test_first_generation_does_not_overwrite_an_unrelated_lrc_beside_the_placeholder(window, tmp_path):
+    destination = tmp_path / "materials"
+    destination.mkdir()
+    unrelated = destination / "Song.lrc"
+    unrelated.write_text("User's original subtitles", encoding="utf-8")
+    assert window.workspace.start_project(
+        {"output_name": "Song", "pasted_lyrics": "春"}, str(destination)
+    )
+    configured = load_workspace_project(destination / PROJECT_FILENAME)
+    assert configured.lyrics_project.name == "Song.json"
+    assert configured.settings["lyrics_export_formats"] == ["json"]
+    window.workspace.adopt_prepared(preparation())
+    assert unrelated.read_text(encoding="utf-8") == "User's original subtitles"
+    generated = load_workspace_project(configured.manifest)
+    assert generated.lyrics_project != configured.lyrics_project
+    assert read_workspace_lyrics(generated).lines

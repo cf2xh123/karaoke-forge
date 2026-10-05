@@ -5,14 +5,16 @@ from __future__ import annotations
 import copy
 import json
 import math
+import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -24,14 +26,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -235,6 +240,8 @@ class EditorPage(QWidget):
         self._saved_name = ""
         self._history: dict = {}
         self._selected = 0
+        self._selected_token = 0
+        self._token_selection_line = -1
         self._rendering = False
         self._dirty = False
         self._cell_draft = False
@@ -247,11 +254,23 @@ class EditorPage(QWidget):
         self._last_export_dir = ""
         self._review_summary = ""
         self._review_indexes: list[int] = []
+        self._shortcut_scope = self
+        self._shortcut_excluded: tuple[QWidget, ...] = ()
+        self._shortcut_guard: Callable[[], bool] | None = None
+        self._space_held = False
+        self._display_position_ms = 0
+        self._media_anchor_ms = 0
+        self._media_anchor_at = time.monotonic()
+        self._seek_target_ms: int | None = None
+        self._seek_deadline = 0.0
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.8)
         self._build_ui()
+        self._playhead_timer = QTimer(self)
+        self._playhead_timer.setInterval(33)
+        self._playhead_timer.timeout.connect(self._advance_playhead)
         self._configure_preferences()
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(lambda value: self.seek_slider.setRange(0, value))
@@ -270,6 +289,74 @@ class EditorPage(QWidget):
             shortcut.activated.connect(action)
             self._shortcuts.append(shortcut)
         self._render()
+        QApplication.instance().installEventFilter(self)
+
+    def set_playback_shortcut_scope(
+        self, scope: QWidget, *, excluded: tuple[QWidget, ...] = (),
+        guard: Callable[[], bool] | None = None,
+    ) -> None:
+        """Let a workspace own Space while leaving text and other players alone."""
+        self._shortcut_scope = scope
+        self._shortcut_excluded = excluded
+        self._shortcut_guard = guard
+
+    def _can_handle_space(self) -> bool:
+        focused = QApplication.focusWidget()
+        scope = self._shortcut_scope
+        if (
+            focused is None or not self.isVisible() or not self.isEnabled()
+            or not scope.isVisible() or not scope.isEnabled()
+            or QApplication.activeModalWidget() is not None
+            or QApplication.activePopupWidget() is not None
+            or focused.window() is not self.window()
+            or not (focused is scope or scope.isAncestorOf(focused))
+        ):
+            return False
+        if self._shortcut_guard is not None and not self._shortcut_guard():
+            return False
+        if any(focused is widget or widget.isAncestorOf(focused) for widget in self._shortcut_excluded):
+            return False
+        widget = focused
+        while widget is not None and widget is not scope.parentWidget():
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                return False
+            if isinstance(widget, QComboBox) and widget.isEditable():
+                return False
+            widget = widget.parentWidget()
+        return not any(
+            table.state() == QAbstractItemView.State.EditingState
+            for table in (self.lines_table, self.tokens_table, self.pronunciation_table)
+        )
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize and watched is self.lines_table.viewport():
+            self._fit_lyric_column()
+        if event.type() in (
+            QEvent.Type.FocusOut, QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate,
+        ):
+            # A release delivered to another application must not leave Space latched.
+            self._space_held = False
+        if (
+            event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease, QEvent.Type.ShortcutOverride)
+            and event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            if event.type() == QEvent.Type.KeyRelease and self._space_held:
+                if not event.isAutoRepeat():
+                    self._space_held = False
+                event.accept()
+                return True
+            if self._can_handle_space():
+                if event.type() == QEvent.Type.ShortcutOverride:
+                    event.accept()
+                    return True
+                if event.type() == QEvent.Type.KeyPress:
+                    if not event.isAutoRepeat() and not self._space_held:
+                        self._space_held = True
+                        self.toggle_playback()
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
 
     def _button(self, text: str, callback: Callable, layout) -> QPushButton:
         button = QPushButton(text)
@@ -323,6 +410,7 @@ class EditorPage(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
+        left.setMinimumWidth(330)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         row_actions = QHBoxLayout()
@@ -361,12 +449,14 @@ class EditorPage(QWidget):
         )
         left_layout.addWidget(self.review_bar)
         self.lines_table = self._table(["序号", "状态", "开始秒", "结束秒", "原文", "翻译"])
-        for column, width in enumerate((44, 54, 72, 72)):
+        for column, width in enumerate((32, 48, 60, 60, 140, 96)):
             self.lines_table.setColumnWidth(column, width)
-        for column in (4, 5):
-            self.lines_table.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Stretch
-            )
+        lyric_header = self.lines_table.horizontalHeader()
+        # Keep model indexes stable for editing/export, but identify the lyric
+        # before its timing fields when the user works in a narrow window.
+        lyric_header.setStretchLastSection(False)
+        lyric_header.moveSection(lyric_header.visualIndex(4), 1)
+        lyric_header.moveSection(lyric_header.visualIndex(1), 5)
         self.lines_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.lines_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.lines_table.currentCellChanged.connect(self._table_selection_changed)
@@ -376,11 +466,22 @@ class EditorPage(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        self.editing_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.editing_splitter.setChildrenCollapsible(False)
+        self.editing_splitter.setStyleSheet(
+            "QPushButton { padding: 4px 8px; min-height: 18px; }"
+            "QComboBox, QDoubleSpinBox { padding: 4px; }"
+            "QTabBar::tab { padding: 4px 10px; }"
+        )
+        preview_panel = QWidget()
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(4)
         self.preview = LyricPreviewWidget()
-        # Keep scaled video typography legible; the surrounding pane already
-        # scrolls when a small window cannot fit the detailed controls.
-        self.preview.setMinimumHeight(300)
-        right_layout.addWidget(self.preview)
+        # A splitter lets small windows trade preview space for calibration
+        # without putting the editing controls below a page scrollbar.
+        self.preview.setMinimumSize(200, 100)
+        preview_layout.addWidget(self.preview, 1)
         player_row = QHBoxLayout()
         self.play_button = self._button("播放", self.toggle_playback, player_row)
         self._button("停止", self.stop_playback, player_row)
@@ -388,7 +489,7 @@ class EditorPage(QWidget):
         player_row.addWidget(self.position_label)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setRange(0, 0)
-        self.seek_slider.sliderMoved.connect(self.player.setPosition)
+        self.seek_slider.sliderMoved.connect(lambda value: self.seek(value / 1000))
         player_row.addWidget(self.seek_slider, 1)
         self.speed = QComboBox()
         for value in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
@@ -398,24 +499,100 @@ class EditorPage(QWidget):
             lambda: self.player.setPlaybackRate(float(self.speed.currentData()))
         )
         player_row.addWidget(self.speed)
-        self.loop = QCheckBox("循环当前句")
+        self.loop = QCheckBox("循环本句")
         self.loop.toggled.connect(lambda _: setattr(self, "_loop_index", self._selected))
-        player_row.addWidget(self.loop)
-        right_layout.addLayout(player_row)
+        preview_layout.addLayout(player_row)
+
+        follow_row = QHBoxLayout()
+        self.follow_playback = QCheckBox("跟随播放头")
+        self.follow_playback.setChecked(True)
+        follow_row.addWidget(self.follow_playback)
+        self.return_playhead_button = self._button(
+            "回到播放头", self.return_to_playhead, follow_row
+        )
+        self.snap = QCheckBox("吸附句界")
+        self.snap.setChecked(True)
+        self.snap.toggled.connect(self._set_snap)
+        follow_row.addWidget(self.snap)
+        follow_row.addWidget(self.loop)
+        follow_row.addStretch()
+        preview_layout.addLayout(follow_row)
+        self.editing_splitter.addWidget(preview_panel)
+
+        self.time_tabs = QTabWidget()
+        self.time_tabs.setAccessibleName("校准工具")
 
         self.timeline = TimelineWidget()
-        self.timeline.lineSelected.connect(self.select_line)
+        self.timeline.lineSelected.connect(lambda index: self.select_line(index, seek=False))
         self.timeline.seekRequested.connect(self.seek)
         self.timeline.boundaryChanged.connect(self._boundary_changed)
-        right_layout.addWidget(self.timeline)
+        self.timeline.interactionStarted.connect(
+            lambda kind: self._timeline_interaction_started(self.timeline, kind)
+        )
+
+        self.token_panel = QWidget()
+        token_panel_layout = QVBoxLayout(self.token_panel)
+        token_panel_layout.setContentsMargins(4, 4, 4, 4)
+        token_panel_layout.setSpacing(4)
+        token_heading = QHBoxLayout()
+        self.token_boundary_mode = QComboBox()
+        self.token_boundary_mode.addItem("独立调整", False)
+        self.token_boundary_mode.addItem("联动相邻边界", True)
+        token_heading.addWidget(self.token_boundary_mode)
+        self.token_zoom = QComboBox()
+        for value in (1, 2, 4, 8):
+            self.token_zoom.addItem(f"逐词 {value:g}×", value)
+        token_heading.addWidget(self.token_zoom)
+        token_panel_layout.addLayout(token_heading)
+        self.token_timeline = TokenTimelineWidget()
+        # The canvas needs room for the ruler, 62 px words and its zoom scrollbar.
+        # Larger spare space belongs to the resizable preview, not a fixed minimum.
+        self.token_timeline.setMinimumHeight(126)
+        self.token_timeline.timingChanged.connect(self._tokens_changed)
+        self.token_timeline.seekRequested.connect(self.seek)
+        self.token_timeline.tokenSelected.connect(self.select_token)
+        self.token_timeline.interactionStarted.connect(
+            lambda kind: self._timeline_interaction_started(self.token_timeline, kind)
+        )
+        self.token_boundary_mode.currentIndexChanged.connect(
+            lambda: self.token_timeline.set_linked_boundaries(bool(self.token_boundary_mode.currentData()))
+        )
+        self.token_zoom.currentIndexChanged.connect(
+            lambda: self.token_timeline.set_zoom(float(self.token_zoom.currentData()))
+        )
+        token_panel_layout.addWidget(self.token_timeline, 1)
+        self.token_selection_label = QLabel("选中一个词；拖动两侧改词首/词尾，拖动词块整体移动。")
+        # Long lyric fragments stay available in the tooltip and word table;
+        # they must not take vertical space away from the draggable word blocks.
+        self.token_selection_label.setWordWrap(False)
+        self.token_selection_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        token_panel_layout.addWidget(self.token_selection_label)
+        token_nudges = QHBoxLayout()
+        self.token_adjust_edge = QComboBox()
+        for label, edge in (("词首", "start"), ("词尾", "end"), ("整词移动", "move")):
+            self.token_adjust_edge.addItem(label, edge)
+        token_nudges.addWidget(self.token_adjust_edge)
+        self.token_adjust_step = QDoubleSpinBox()
+        self.token_adjust_step.setRange(.001, 1.0)
+        self.token_adjust_step.setDecimals(3)
+        self.token_adjust_step.setSingleStep(.01)
+        self.token_adjust_step.setValue(.05)
+        self.token_adjust_step.setSuffix(" 秒")
+        token_nudges.addWidget(self.token_adjust_step)
+        self._button("−", lambda: self.adjust_selected_token(-1), token_nudges)
+        self._button("+", lambda: self.adjust_selected_token(1), token_nudges)
+        token_panel_layout.addLayout(token_nudges)
+        self.time_tabs.addTab(self.token_panel, "当前句逐词")
+
+        self.song_panel = QWidget()
+        song_layout = QVBoxLayout(self.song_panel)
+        song_layout.setContentsMargins(6, 6, 6, 6)
         timing_row = QHBoxLayout()
         self.ripple = QCheckBox("句尾延长时联动后续歌词")
         self.ripple.setChecked(True)
         timing_row.addWidget(self.ripple)
-        self.snap = QCheckBox("吸附句界")
-        self.snap.setChecked(True)
-        self.snap.toggled.connect(self._set_snap)
-        timing_row.addWidget(self.snap)
         self.zoom = QComboBox()
         for value in (1, 2, 4, 8):
             self.zoom.addItem(f"时间轴 {value:g}×", value)
@@ -424,26 +601,16 @@ class EditorPage(QWidget):
             lambda: self.timeline.set_zoom(float(self.zoom.currentData()))
         )
         timing_row.addWidget(self.zoom)
-        right_layout.addLayout(timing_row)
-        follow_row = QHBoxLayout()
-        self.follow_playback = QCheckBox("跟随播放头")
-        self.follow_playback.setChecked(True)
-        follow_row.addWidget(self.follow_playback)
-        self.return_playhead_button = self._button(
-            "回到播放头", self.return_to_playhead, follow_row
-        )
-        follow_row.addStretch()
-        right_layout.addLayout(follow_row)
+        song_layout.addLayout(timing_row)
+        timeline_scroll = QScrollArea()
+        timeline_scroll.setWidgetResizable(True)
+        timeline_scroll.setWidget(self.timeline)
+        song_layout.addWidget(timeline_scroll, 1)
+        self.time_tabs.addTab(self.song_panel, "整曲时间轴")
 
-        self.details_toggle = QPushButton("精细调整 · 逐词与注音")
-        self.details_toggle.setCheckable(True)
-        self.details_toggle.setChecked(True)
-        self.details_toggle.hide()
-        right_layout.addWidget(self.details_toggle)
         self.details_panel = QWidget()
         details_layout = QVBoxLayout(self.details_panel)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        self.details_toggle.toggled.connect(self.details_panel.setVisible)
+        details_layout.setContentsMargins(6, 6, 6, 6)
         shift_row = QHBoxLayout()
         self.shift_scope = QComboBox()
         self.shift_scope.addItems(["整首平移", "当前句及之后"])
@@ -466,15 +633,11 @@ class EditorPage(QWidget):
         ):
             self._button(label, lambda e=edge, d=delta: self.nudge(e, d), nudge_row)
         details_layout.addLayout(nudge_row)
-        self.token_timeline = TokenTimelineWidget()
-        self.token_timeline.timingChanged.connect(self._tokens_changed)
-        self.token_timeline.seekRequested.connect(self.seek)
-        details_layout.addWidget(self.token_timeline)
-
         tabs = QTabWidget()
         token_page = QWidget()
         token_layout = QVBoxLayout(token_page)
         self.tokens_table = self._table(["文本", "开始秒", "结束秒"])
+        self.tokens_table.currentCellChanged.connect(self._token_table_selection_changed)
         token_layout.addWidget(self.tokens_table)
         token_actions = QHBoxLayout()
         self._button("增加词块", self.add_token, token_actions)
@@ -498,29 +661,39 @@ class EditorPage(QWidget):
         pronunciation_layout.addLayout(pronunciation_actions)
         tabs.addTab(pronunciation_page, "逐词与整行注音")
         details_layout.addWidget(tabs, 1)
-        right_layout.addWidget(self.details_panel, 1)
-        right_layout.addStretch()
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setWidget(right)
-        splitter.addWidget(right_scroll)
+        details_scroll = QScrollArea()
+        details_scroll.setWidgetResizable(True)
+        details_scroll.setWidget(self.details_panel)
+        self.time_tabs.addTab(details_scroll, "更多调整")
+        self.editing_splitter.addWidget(self.time_tabs)
+        self.editing_splitter.setStretchFactor(0, 4)
+        self.editing_splitter.setStretchFactor(1, 3)
+        self.editing_splitter.setSizes([270, 280])
+        right_layout.addWidget(self.editing_splitter, 1)
+        splitter.addWidget(right)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([450, 720])
         layout.addWidget(splitter, 1)
         self.status = QLabel("载入歌词或已保存工程，使用原生时间轴校准。")
         self.status.setWordWrap(True)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.status)
 
     def set_workspace_mode(self, enabled: bool = True) -> None:
         """Let a containing workspace own import, save and export controls."""
-        for bar in (self.heading_bar, self.sources_bar, self.actions_bar):
+        for bar in (self.heading_bar, self.sources_bar, self.actions_bar, self.status):
             bar.setVisible(not enabled)
-        self.details_toggle.setVisible(enabled)
-        self.details_toggle.setChecked(not enabled)
-        self.details_panel.setVisible(not enabled)
         margin = 0 if enabled else 9
         self.layout().setContentsMargins(margin, margin, margin, margin)
+        self.layout().activate()
+
+    def _fit_lyric_column(self) -> None:
+        """Give spare table width to lyrics without squeezing them out of view."""
+        fixed_width = sum(self.lines_table.columnWidth(column) for column in (0, 1, 2, 3, 5))
+        width = max(140, self.lines_table.viewport().width() - fixed_width)
+        if self.lines_table.columnWidth(4) != width:
+            self.lines_table.setColumnWidth(4, width)
 
     def _table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
@@ -578,15 +751,68 @@ class EditorPage(QWidget):
             self.tokens_table, [[entry["text"], entry["start"], entry["end"]] for entry in tokens]
         )
         self._token_baseline = self._values(self.tokens_table)
+        if self._token_selection_line != self._selected:
+            self._selected_token = 0
+            self._token_selection_line = self._selected
+        self._selected_token = min(max(0, self._selected_token), max(0, len(tokens) - 1))
+        if tokens:
+            self.tokens_table.setCurrentCell(self._selected_token, 0)
         readings = document_pronunciation_to_editor_rows(self._document, line)
         self._fill(self.pronunciation_table, readings)
         self._pronunciation_baseline = self._values(self.pronunciation_table)
         self.whole_pronunciation.setText(line.pronunciation or "")
         self._whole_baseline = self.whole_pronunciation.text()
         self.token_timeline.set_line(line)
+        self.token_timeline.set_selected_token(self._selected_token)
+        self._update_token_selection_label()
         self.preview.set_current_line(self._selected)
         self.review_confirm_button.setEnabled(self._selected in self._review_indexes)
         self._rendering = previous_rendering
+
+    def _update_token_selection_label(self) -> None:
+        row = self._selected_token
+        if 0 <= row < self.tokens_table.rowCount():
+            text, start, end = self._values(self.tokens_table)[row]
+            self.token_selection_label.setText(f"第 {row + 1} 词：{text}  ·  {start}–{end} 秒")
+        else:
+            self.token_selection_label.setText("当前句没有逐词时间；可在逐词表格中增加词块。")
+        self.token_selection_label.setToolTip(self.token_selection_label.text())
+
+    def select_token(self, index: int) -> None:
+        if self._rendering:
+            return
+        if not self._guard(self._commit_pending):
+            blocked = self.tokens_table.blockSignals(True)
+            self.tokens_table.setCurrentCell(self._selected_token, 0)
+            self.tokens_table.blockSignals(blocked)
+            self.token_timeline.set_selected_token(self._selected_token)
+            return
+        if not 0 <= index < self.tokens_table.rowCount():
+            return
+        self._selected_token = index
+        blocked = self.tokens_table.blockSignals(True)
+        self.tokens_table.setCurrentCell(index, 0)
+        self.tokens_table.blockSignals(blocked)
+        self.token_timeline.set_selected_token(index)
+        self._update_token_selection_label()
+
+    def _token_table_selection_changed(self, row, _column, _old_row, _old_column) -> None:
+        if not self._rendering and row >= 0 and row != self._selected_token:
+            self.select_token(row)
+
+    def adjust_selected_token(self, direction: int) -> None:
+        self.token_timeline.adjust_selected(
+            str(self.token_adjust_edge.currentData()), direction * self.token_adjust_step.value()
+        )
+
+    def _timeline_interaction_started(self, timeline, kind: str) -> None:
+        if kind == "edit":
+            self.player.pause()
+        if not self._guard(self._commit_pending):
+            timeline.cancel_interaction()
+
+    def _timeline_interacting(self) -> bool:
+        return self.timeline.is_interacting or self.token_timeline.is_interacting
 
     def _has_pending(self) -> bool:
         return (
@@ -845,6 +1071,30 @@ class EditorPage(QWidget):
             return True
         return False
 
+    def clear_project(self) -> None:
+        """Discard the current project after the containing window has confirmed it."""
+        self.timeline.cancel_interaction()
+        self.token_timeline.cancel_interaction()
+        self.stop_playback()
+        self._rendering = True
+        self.player.setSource(QUrl())
+        self._document = LyricsDocument(lines=[])
+        self._saved_document = self._document.to_dict()
+        self._saved_audio = self._saved_name = ""
+        self._history = {}
+        self._selected = self._selected_token = self._loop_index = 0
+        self._token_selection_line = -1
+        self._cell_draft = False
+        self._last_export_dir = ""
+        self.name_edit.clear()
+        self.source_picker.set_value("")
+        self.audio_picker.set_value("")
+        self.preview.set_background(None)
+        self.seek_slider.setRange(0, 0)
+        self._render()
+        self._display_playhead(0, follow=False)
+        self._report("新工程 · 请选择歌曲与歌词。")
+
     def load_document(
         self, document: LyricsDocument, audio: str | None = None, name: str = ""
     ) -> None:
@@ -853,6 +1103,8 @@ class EditorPage(QWidget):
         self.stop_playback()
         self._document = _copy_document(document)
         self._selected = 0
+        self._selected_token = 0
+        self._token_selection_line = -1
         self._history = {}
         self._rendering = True
         self.name_edit.setText(
@@ -978,7 +1230,7 @@ class EditorPage(QWidget):
                 return
         restored, history = travel_history(self._history, self._snapshot())
         if restored is not None:
-            self.stop_playback()
+            self.player.pause()
             self._history = history
             self._document = _history_document(restored)
             self._selected = restored["selected"]
@@ -989,7 +1241,7 @@ class EditorPage(QWidget):
             return
         restored, history = travel_history(self._history, self._snapshot(), redo=True)
         if restored is not None:
-            self.stop_playback()
+            self.player.pause()
             self._history = history
             self._document = _history_document(restored)
             self._selected = restored["selected"]
@@ -998,7 +1250,7 @@ class EditorPage(QWidget):
     def _mutate(self, operation: Callable[[LyricsDocument], LyricsDocument], selected=None) -> None:
         def apply():
             self._commit_pending()
-            self.stop_playback()
+            self.player.pause()
             document = self.current_document()
             self._replace(operation(document), selected)
 
@@ -1163,6 +1415,15 @@ class EditorPage(QWidget):
             self.zoom.addItem(f"时间轴 {zoom:g}×", zoom)
             zoom_index = self.zoom.count() - 1
         self.zoom.setCurrentIndex(zoom_index)
+        token_zoom = max(1.0, float(preferences.get("token_zoom", 1.0)))
+        token_zoom_index = self.token_zoom.findData(token_zoom)
+        if token_zoom_index < 0:
+            self.token_zoom.addItem(f"逐词 {token_zoom:g}×", token_zoom)
+            token_zoom_index = self.token_zoom.count() - 1
+        self.token_zoom.setCurrentIndex(token_zoom_index)
+        self.token_boundary_mode.setCurrentIndex(
+            self.token_boundary_mode.findData(bool(preferences.get("linked_token_boundaries", False)))
+        )
         self.speed.currentIndexChanged.connect(
             lambda _: self._persist_preference("playback_rate", float(self.speed.currentData()))
         )
@@ -1175,6 +1436,14 @@ class EditorPage(QWidget):
         )
         self.zoom.currentIndexChanged.connect(
             lambda _: self._persist_preference("global_zoom", float(self.zoom.currentData()))
+        )
+        self.token_zoom.currentIndexChanged.connect(
+            lambda _: self._persist_preference("token_zoom", float(self.token_zoom.currentData()))
+        )
+        self.token_boundary_mode.currentIndexChanged.connect(
+            lambda _: self._persist_preference(
+                "linked_token_boundaries", bool(self.token_boundary_mode.currentData())
+            )
         )
 
     def _persist_preference(self, key: str, value: object) -> None:
@@ -1196,10 +1465,15 @@ class EditorPage(QWidget):
         self._sync_dirty()
 
     def seek(self, seconds: float) -> None:
-        self.player.setPosition(round(max(0, seconds) * 1000))
-        self.preview.set_position(seconds)
-        self.timeline.set_position(seconds)
-        self.token_timeline.set_position(seconds)
+        target = round(max(0, seconds) * 1000)
+        if self.player.duration() > 0:
+            target = min(target, self.player.duration())
+        self._seek_target_ms = target
+        self._seek_deadline = time.monotonic() + 1.0
+        self._media_anchor_ms = target
+        self._media_anchor_at = time.monotonic()
+        self._display_playhead(target, follow=False)
+        self.player.setPosition(target)
 
     def toggle_playback(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -1220,25 +1494,66 @@ class EditorPage(QWidget):
         self.player.play()
 
     def stop_playback(self) -> None:
+        self._playhead_timer.stop()
+        self._seek_target_ms = None
         self.player.stop()
+        self._media_anchor_ms = 0
+        self._media_anchor_at = time.monotonic()
+        self._display_playhead(0, follow=False)
 
     def _playback_state_changed(self, state) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._media_anchor_ms = (
+                self._seek_target_ms if self._seek_target_ms is not None else self.player.position()
+            )
+            self._media_anchor_at = time.monotonic()
+            self._playhead_timer.start()
+        else:
+            self._playhead_timer.stop()
         self.play_button.setText(
             "暂停" if state == QMediaPlayer.PlaybackState.PlayingState else "播放"
         )
 
     def _position_changed(self, milliseconds: int) -> None:
+        now = time.monotonic()
+        if self._seek_target_ms is not None:
+            # Backends can emit an old sample while an asynchronous seek is queued.
+            # Keep immediate scrub feedback until a nearby position acknowledges it.
+            if abs(milliseconds - self._seek_target_ms) > 250 and now < self._seek_deadline:
+                return
+            self._seek_target_ms = None
+        self._media_anchor_ms = milliseconds
+        self._media_anchor_at = now
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        if playing:
+            milliseconds = max(milliseconds, self._display_position_ms)
+        self._display_playhead(milliseconds, follow=playing)
+
+    def _advance_playhead(self) -> None:
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            return
+        if self._seek_target_ms is not None or self._timeline_interacting():
+            return
+        elapsed = min(.25, max(0.0, time.monotonic() - self._media_anchor_at))
+        position = self._media_anchor_ms + round(elapsed * self.player.playbackRate() * 1000)
+        if self.player.duration() > 0:
+            position = min(position, self.player.duration())
+        self._display_playhead(max(position, self._display_position_ms), follow=True)
+
+    def _display_playhead(self, milliseconds: int, *, follow: bool) -> None:
+        self._display_position_ms = milliseconds
         seconds = milliseconds / 1000
         self.position_label.setText(f"{int(seconds // 60):02}:{seconds % 60:05.2f}")
         if not self.seek_slider.isSliderDown():
             self.seek_slider.setValue(milliseconds)
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        if playing and self.loop.isChecked() and self._document.lines:
+        interacting = self._timeline_interacting()
+        if playing and not interacting and self.loop.isChecked() and self._document.lines:
             line = self._document.lines[min(self._loop_index, len(self._document.lines) - 1)]
             if line.end is not None and line.start is not None and seconds >= line.end:
-                self.player.setPosition(round(line.start * 1000))
+                self.seek(line.start)
                 return
-        if playing and not self.loop.isChecked() and not self._has_pending():
+        if playing and not interacting and not self.loop.isChecked() and not self._has_pending():
             active = next(
                 (
                     index
@@ -1255,7 +1570,7 @@ class EditorPage(QWidget):
         self.preview.set_position(seconds)
         self.timeline.set_position(seconds)
         self.token_timeline.set_position(seconds)
-        if playing and self.follow_playback.isChecked():
+        if follow and playing and not interacting and self.follow_playback.isChecked():
             self.timeline.reveal_position(seconds)
             self.token_timeline.reveal_position(seconds)
 

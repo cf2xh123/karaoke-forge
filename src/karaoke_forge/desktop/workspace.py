@@ -6,16 +6,20 @@ import copy
 from dataclasses import fields
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSplitter,
+    QStackedWidget,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +32,7 @@ from ..projects import (
     PROJECT_FILENAME,
     WorkspaceProject,
     load_workspace_project,
+    persist_project_asset,
     read_workspace_lyrics,
     safe_lyrics_export_stem,
     save_workspace_project,
@@ -35,9 +40,62 @@ from ..projects import (
 )
 from ..web import UiJobResult, _default_output_root, _safe_stem
 from .common import PathPicker
+from .project_dialog import lyrics_source_summary
 
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 _LYRIC_SOURCES = ("lyrics_file", "pasted_lyrics", "netease_link", "qqmusic_link", "utaten_link")
+
+
+class _SummaryLabel(QLabel):
+    """Keep long paths and progress messages from shrinking the timeline."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setToolTip(text)
+
+    def setText(self, text) -> None:
+        super().setText(text)
+        self.setToolTip(text)
+
+    def paintEvent(self, _event) -> None:
+        rectangle = self.contentsRect()
+        text = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, rectangle.width()
+        )
+        painter = QStylePainter(self)
+        painter.drawItemText(
+            rectangle, int(self.alignment()), self.palette(), self.isEnabled(), text,
+            QPalette.ColorRole.WindowText,
+        )
+
+
+class _RevisionWriter(QThread):
+    """Archive large project assets without blocking the GUI event loop."""
+
+    def __init__(self, document: LyricsDocument, settings: dict, directory: str):
+        super().__init__()
+        self.document = copy.deepcopy(document)
+        self.settings = copy.deepcopy(settings)
+        self.directory = directory
+        self.result = None
+        self.error = None
+
+    def run(self) -> None:
+        try:
+            self.result = save_workspace_revision(self.document, self.settings, self.directory)
+        except Exception as exc:  # noqa: BLE001 - propagate worker failures on the GUI thread
+            self.error = exc
+
+
+class _ArchiveProgress(QProgressDialog):
+    """Do not let Escape or close abandon an in-flight asset copy."""
+
+    def reject(self) -> None:
+        pass
+
+    def closeEvent(self, event) -> None:
+        event.ignore()
 
 
 def save_workspace_revision(document: LyricsDocument, settings: dict, directory: str):
@@ -49,31 +107,104 @@ def save_workspace_revision(document: LyricsDocument, settings: dict, directory:
             previous_settings = load_workspace_project(manifest).settings
         except (OSError, TypeError, ValueError):
             pass
-    settings = {**previous_settings, **settings, "lyrics_timebase": "audio"}
+    settings = {
+        **previous_settings, **settings, "lyrics_timebase": "audio", "preserve_lyrics_source": True,
+    }
     validate_project_assets(
         audio=settings.get("audio_file"), video=settings.get("video_file"),
         cover=settings.get("cover_file"), font_files=tuple(settings.get("font_files") or ()),
     )
     root = Path(directory).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    settings["lyrics_source_asset"] = ""
+    if source := settings.get("lyrics_file"):
+        if Path(source).is_file():
+            local_source = persist_project_asset(source, root, "source-lyrics")
+            settings["lyrics_file"] = str(local_source)
+            settings["lyrics_source_asset"] = local_source.relative_to(root).as_posix()
+        elif document.metadata.get("project_state") == "configured" or settings.get("pending_lyrics_source"):
+            raise FileNotFoundError(f"所选歌词文件不存在，请重新选择后保存工程：{source}")
+    for key, role in (("audio_file", "audio"), ("video_file", "video"), ("cover_file", "cover")):
+        if settings.get(key):
+            settings[key] = str(persist_project_asset(settings[key], root, role))
+    if settings.get("font_files"):
+        settings["font_files"] = [
+            str(persist_project_asset(font, root, f"font-{index}"))
+            for index, font in enumerate(settings["font_files"], 1)
+        ]
     name = str(settings.get("output_name") or document.metadata.get("ti") or "歌词工程")
     document.metadata["workspace_manifest"] = str(root / PROJECT_FILENAME)
     formats = ["lrc", "elrc", "srt", "vtt", "ass", "json"] if document.is_timed else ["json"]
     style_fields = {field.name for field in fields(AssStyle)}
     style = AssStyle(**{key: value for key, value in settings.items() if key in style_fields})
     stem = safe_lyrics_export_stem(root, _safe_stem(name))
-    exports = export_formats(document, root, stem, formats, ass_style=style)
-    workspace = save_workspace_project(
-        root,
-        name=name,
-        lyrics_project=exports["json"],
-        audio=settings.get("audio_file") or None,
-        video=settings.get("video_file") or None,
-        cover=settings.get("cover_file") or None,
-        font_files=tuple(settings.get("font_files") or ()),
-        settings=settings,
-        recent_root=_default_output_root(),
-    )
+
+    def export_paths(basename, selected_formats=None):
+        return [
+            root / (f"{basename}.enhanced.lrc" if fmt == "elrc" else f"{basename}.{fmt}")
+            for fmt in (formats if selected_formats is None else selected_formats)
+        ]
+
+    owned_paths = set()
+    if (root / PROJECT_FILENAME).is_file():
+        existing = load_workspace_project(root / PROJECT_FILENAME)
+        if existing.lyrics_project.parent == root:
+            owned_formats = (existing.settings or {}).get("lyrics_export_formats")
+            if not isinstance(owned_formats, list):
+                placeholder = read_workspace_lyrics(existing).metadata.get("project_state") == "configured"
+                owned_formats = ["json"] if placeholder else formats
+            owned_paths.update(export_paths(
+                existing.lyrics_project.stem, [fmt for fmt in formats if fmt in owned_formats]
+            ))
+            if existing.name == name:
+                stem = existing.lyrics_project.stem
+    source_path = Path(settings["lyrics_file"]).resolve() if settings.get("lyrics_file") else None
+    if source_path in export_paths(stem):
+        # A local source may live in the chosen project folder. Its contents
+        # must survive both the initial placeholder and later generated lyrics.
+        stem = safe_lyrics_export_stem(root, f"{stem}-edited")
+    base_stem, suffix = stem, 2
+    while any(
+        path == source_path or (path.exists() and path not in owned_paths)
+        for path in export_paths(stem)
+    ):
+        stem = f"{base_stem}-{suffix}"
+        suffix += 1
+    # A later manifest failure must not leave an older project pointing at a
+    # partially written lyric revision. Media is already validated/archived.
+    previous_files = {
+        path: path.read_bytes() if path.is_file() else None
+        for path in [*export_paths(stem), root / PROJECT_FILENAME]
+    }
+    settings["lyrics_export_formats"] = list(formats)
+    try:
+        exports = export_formats(document, root, stem, formats, ass_style=style)
+        workspace = save_workspace_project(
+            root,
+            name=name,
+            lyrics_project=exports["json"],
+            audio=settings.get("audio_file") or None,
+            video=settings.get("video_file") or None,
+            cover=settings.get("cover_file") or None,
+            font_files=tuple(settings.get("font_files") or ()),
+            settings=settings,
+            recent_root=_default_output_root(),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        failed_restores = []
+        for path, content in previous_files.items():
+            try:
+                if content is None:
+                    path.unlink(missing_ok=True)
+                elif not path.is_file() or path.read_bytes() != content:
+                    path.write_bytes(content)
+            except OSError:
+                failed_restores.append(path.name)
+        if failed_restores:
+            raise OSError(
+                "工程保存失败，部分原文件无法恢复：" + "、".join(failed_restores)
+            ) from exc
+        raise
     return document, workspace, [str(path) for path in exports.values()]
 
 
@@ -82,6 +213,8 @@ class WorkspacePage(QWidget):
 
     changed = Signal(bool)
     open_requested = Signal()
+    new_requested = Signal()
+    source_requested = Signal()
 
     def __init__(self, make, editor, outputs, runner, parent=None):
         super().__init__(parent)
@@ -94,6 +227,10 @@ class WorkspacePage(QWidget):
         self._dirty = False
         self._preview_materials = None
         self._render_settings = None
+        self._project_directory: Path | None = None
+        self._configured_document: LyricsDocument | None = None
+        self._pending_lyrics_source = False
+        self.is_saving_revision = False
         self._saved_settings = copy.deepcopy(make.get_settings())
         self._active_lyrics_sources = self._lyrics_sources(self._saved_settings)
         self._build_ui()
@@ -117,50 +254,46 @@ class WorkspacePage(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         self.input_bar = QWidget()
         input_layout = QVBoxLayout(self.input_bar)
         input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(4)
         toolbar = QHBoxLayout()
         title = QLabel("歌曲工作台")
         title.setObjectName("pageTitle")
+        title.setStyleSheet("font-size: 18px; font-weight: 700; padding: 0;")
         toolbar.addWidget(title)
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("工程 / 成片名称")
-        self.name_edit.textEdited.connect(self._name_changed)
-        toolbar.addWidget(self.name_edit, 1)
-        self._button("打开工程", self.open_requested.emit, toolbar)
+        self.project_name = _SummaryLabel("尚未打开工程")
+        self.project_name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        toolbar.addWidget(self.project_name, 1)
         self.save_button = self._button("保存工程", self.save_project, toolbar)
+        self.source_button = self._button("项目设置…", self.source_requested.emit, toolbar)
         self.render_button = self._button("导出视频", self.render_video, toolbar)
         self.render_button.setProperty("primary", True)
         input_layout.addLayout(toolbar)
-        imports = QHBoxLayout()
-        imports.addWidget(QLabel("歌曲 / 有声 MV"))
-        self.song_picker = PathPicker(
+        summary = QHBoxLayout()
+        self.project_summary = _SummaryLabel("创建工程时选择歌曲、歌词来源和制作设置，然后开始编辑。")
+        summary.addWidget(self.project_summary, 1)
+        self.prepare_button = self._button("生成时间轴", self.prepare_project, summary)
+        input_layout.addLayout(summary)
+        # Keep the legacy adapters available for integrations. Project materials
+        # are configured in the project dialog and never occupy the editor area.
+        self.name_edit = QLineEdit(self)
+        self.name_edit.textEdited.connect(self._name_changed)
+        self.song_picker = PathPicker(parent=self,
             filter="歌曲与视频 (*.wav *.mp3 *.flac *.m4a *.ogg *.aac *.mp4 *.mkv *.mov *.webm *.avi);;所有文件 (*)"
         )
         self.song_picker.changed.connect(self._song_changed)
-        imports.addWidget(self.song_picker, 2)
-        imports.addWidget(QLabel("歌词"))
-        self.lyrics_picker = PathPicker(
+        self.lyrics_picker = PathPicker(parent=self,
             filter="歌词与字幕 (*.txt *.lrc *.elrc *.yrc *.srt *.vtt *.ass *.json);;所有文件 (*)"
         )
         self.lyrics_picker.changed.connect(self._lyrics_changed)
-        imports.addWidget(self.lyrics_picker, 2)
-        self.prepare_button = self._button("载入 / 生成时间轴", self.prepare_project, imports)
-        input_layout.addLayout(imports)
-        context = QHBoxLayout()
-        self._button("添加 MV / 封面", self.choose_visual, context)
-        self.visual_summary = QLabel("画面：默认动态背景")
-        self.visual_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        context.addWidget(self.visual_summary, 1)
-        self._button("撤销", self.editor.undo, context)
-        self._button("重做", self.editor.redo, context)
-        self.settings_button = self._button("素材与样式…", self.show_settings, context)
-        input_layout.addLayout(context)
+        self.visual_summary = QLabel("画面：默认动态背景", self)
+        for adapter in (self.name_edit, self.song_picker, self.lyrics_picker, self.visual_summary):
+            adapter.hide()
         layout.addWidget(self.input_bar)
-        self.document_status = QLabel("选择歌曲与歌词，载入时间轴后在下方直接试听、校准和导出。")
-        self.document_status.setWordWrap(True)
+        self.document_status = _SummaryLabel("先创建或打开工程。")
         layout.addWidget(self.document_status)
         self.content = QSplitter(Qt.Orientation.Vertical)
         self.content.addWidget(self.editor)
@@ -168,34 +301,57 @@ class WorkspacePage(QWidget):
         self.content.setStretchFactor(0, 4)
         self.content.setStretchFactor(1, 1)
         self.outputs.hide()
-        layout.addWidget(self.content, 1)
+        self.pages = QStackedWidget()
+        self.empty_page = QWidget()
+        empty_layout = QVBoxLayout(self.empty_page)
+        empty_layout.addStretch()
+        self.empty_title = QLabel("开始制作一首歌")
+        self.empty_title.setObjectName("pageTitle")
+        self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self.empty_title)
+        self.empty_description = QLabel("创建工程，依次选择歌词来源、处理方式与外观；保存后进入编辑。")
+        self.empty_description.setWordWrap(True)
+        self.empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self.empty_description)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.new_button = self._button("新建工程", self.new_requested.emit, actions)
+        self.open_button = self._button("打开工程", self.open_requested.emit, actions)
+        actions.addStretch()
+        empty_layout.addLayout(actions)
+        empty_layout.addStretch()
+        self.pages.addWidget(self.empty_page)
+        self.pages.addWidget(self.content)
+        layout.addWidget(self.pages, 1)
         progress = QHBoxLayout()
         self.results_button = QPushButton("展开结果与日志")
         self.results_button.setCheckable(True)
         self.results_button.toggled.connect(self._show_results)
         progress.addWidget(self.results_button)
-        self.activity = QLabel("就绪")
-        self.activity.setWordWrap(True)
+        self.activity = _SummaryLabel("就绪")
         progress.addWidget(self.activity, 1)
         layout.addLayout(progress)
-        self.settings_dialog = QDialog(self)
-        self.settings_dialog.setWindowTitle("当前工程 · 素材与样式")
-        self.settings_dialog.resize(720, 720)
-        settings_layout = QVBoxLayout(self.settings_dialog)
-        settings_layout.addWidget(self.make)
-        buttons = QHBoxLayout()
-        self._button("刷新画面预览", self.make.refresh_preview, buttons)
-        buttons.addStretch()
-        self._button("完成", self.settings_dialog.hide, buttons)
-        settings_layout.addLayout(buttons)
+        self.make.setParent(self)
+        self.make.hide()
 
     @staticmethod
     def _lyrics_sources(settings):
-        return tuple(settings.get(key) or "" for key in _LYRIC_SOURCES)
+        return (
+            *(settings.get(key) or "" for key in _LYRIC_SOURCES),
+            bool(settings.get("prefer_netease_audio")),
+        )
 
     @property
     def is_dirty(self) -> bool:
         return self.editor.is_dirty or self.make.get_settings() != self._saved_settings
+
+    @property
+    def project_directory(self) -> str:
+        return str(self._project_directory or "")
+
+    @property
+    def has_project(self) -> bool:
+        return self._has_document or self._configured_document is not None
 
     def _update_dirty(self) -> None:
         dirty = self.is_dirty
@@ -203,12 +359,10 @@ class WorkspacePage(QWidget):
             self._dirty = dirty
             self.changed.emit(dirty)
         if self._has_document:
-            pending_source = (
-                self._lyrics_sources(self.make.get_settings()) != self._active_lyrics_sources
-            )
+            pending_source = self._source_pending()
             if pending_source:
                 self.document_status.setText(
-                    "歌词来源已更改；点击“载入 / 生成时间轴”采用新歌词。当前编辑内容仍保留。"
+                    "歌词来源已更改；重新生成时间轴后采用新歌词。当前编辑内容和设置均可保存。"
                 )
             else:
                 self.document_status.setText(
@@ -216,6 +370,10 @@ class WorkspacePage(QWidget):
                     if dirty
                     else "歌词已就绪 · 可直接校准；导出视频会使用当前歌词与素材。"
                 )
+        elif self.has_project:
+            self.document_status.setText(
+                "● 有未保存的项目设置。" if dirty else "项目设置已保存；生成时间轴后开始编辑。"
+            )
 
     def _settings_changed(self, settings) -> None:
         if self._syncing:
@@ -225,8 +383,39 @@ class WorkspacePage(QWidget):
             self.song_picker.set_value(
                 str(settings.get("audio_file") or settings.get("video_file") or "")
             )
+            self.song_picker.edit.setPlaceholderText(
+                "网易云在线音频（载入时获取）"
+                if settings.get("netease_link") and not (
+                    settings.get("audio_file") or settings.get("video_file")
+                )
+                else "选择或拖入本地文件…"
+            )
             self.lyrics_picker.set_value(str(settings.get("lyrics_file") or ""))
+            source = lyrics_source_summary(settings)
+            self.source_button.setText("项目设置…")
+            self.source_button.setToolTip("修改这个工程的歌词来源、处理方式、素材与外观")
             self.name_edit.setText(str(settings.get("output_name") or ""))
+            self.project_name.setText(str(settings.get("output_name") or "尚未打开工程"))
+            song = settings.get("audio_file") or settings.get("video_file")
+            self.project_summary.setText(
+                f"{source} · {Path(song).name if song else '尚未配置音频'}"
+                if self.has_project else "创建工程时选择歌曲、歌词来源和制作设置，然后开始编辑。"
+            )
+            self.project_summary.setToolTip(
+                f"{self.project_summary.text()}\n{self.project_directory}".rstrip()
+            )
+            self.pages.setCurrentWidget(self.content if self._has_document else self.empty_page)
+            self.save_button.setEnabled(self.has_project and not self.runner.is_busy)
+            self.source_button.setEnabled(self.has_project and not self.runner.is_busy)
+            self.render_button.setEnabled(self._has_document and not self.runner.is_busy)
+            self.prepare_button.setVisible(self.has_project)
+            self.prepare_button.setText("重新生成时间轴" if self._has_document else "生成时间轴")
+            self.empty_title.setText("工程已创建" if self.has_project else "开始制作一首歌")
+            self.empty_description.setText(
+                "项目配置已保存。点击上方“生成时间轴”，完成后直接进入歌词编辑。"
+                if self.has_project else
+                "创建工程，依次选择歌词来源、处理方式与外观；保存后进入编辑。"
+            )
             visual = settings.get("video_file") or settings.get("cover_file")
             self.visual_summary.setText(
                 f"画面：{Path(visual).name}" if visual else "画面：默认动态背景"
@@ -271,11 +460,28 @@ class WorkspacePage(QWidget):
 
     def _lyrics_changed(self, path: str) -> None:
         if not self._syncing:
-            self.make.controls["lyrics_file"].set_value(path)
+            # Picking a local file explicitly switches away from online / pasted text.
+            self.make.apply_material_settings({
+                **dict.fromkeys(_LYRIC_SOURCES, ""),
+                "lyrics_file": path,
+                "use_netease_lyrics": False,
+                "use_qqmusic_lyrics": False,
+                "use_utaten_lyrics": False,
+                "utaten_pronunciation_only": False,
+            })
 
     def _name_changed(self, name: str) -> None:
         if not self._syncing:
-            self.make.controls["output_name"].setText(name)
+            # Keep the user's cursor and spaces while typing; get_settings trims
+            # the saved value, so reflecting it into this edit would eat spaces.
+            self._syncing = True
+            try:
+                self.make.controls["output_name"].setText(name)
+                if self._has_document:
+                    self.editor.name_edit.setText(name)
+            finally:
+                self._syncing = False
+            self._update_dirty()
 
     def choose_visual(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -299,9 +505,28 @@ class WorkspacePage(QWidget):
             self._settings_changed(self.make.get_settings())
 
     def show_settings(self) -> None:
-        self.settings_dialog.show()
-        self.settings_dialog.raise_()
-        self.settings_dialog.activateWindow()
+        self.source_requested.emit()
+
+    def _source_pending(self) -> bool:
+        return self._has_document and (
+            self._pending_lyrics_source
+            or self._lyrics_sources(self.make.get_settings()) != self._active_lyrics_sources
+        )
+
+    def _document_for_save(self) -> LyricsDocument:
+        if self._has_document:
+            return self.editor.current_document()
+        if self._configured_document is not None:
+            return copy.deepcopy(self._configured_document)
+        raise ValueError("请先新建或打开工程。")
+
+    def _adopt_saved_document(self, document: LyricsDocument) -> bool:
+        if self._has_document:
+            return self.editor.adopt_saved_revision(document)
+        if self._configured_document is None:
+            return False
+        self._configured_document = copy.deepcopy(document)
+        return True
 
     def _busy_changed(self, busy: bool) -> None:
         self.input_bar.setEnabled(not busy)
@@ -330,11 +555,146 @@ class WorkspacePage(QWidget):
     def prepare_project(self) -> None:
         self.make.prepare_project()
 
+    def _save_revision_responsive(self, document, settings, directory):
+        """Keep setup's transactional return value while large assets are copied."""
+        progress = _ArchiveProgress("正在归档工程素材并保存设置……", "", 0, 0, self)
+        progress.setWindowTitle("保存工程")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint
+        )
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        worker = _RevisionWriter(document, settings, directory)
+        worker.finished.connect(progress.accept)
+        self.is_saving_revision = True
+        try:
+            worker.start()
+            progress.exec()
+            worker.wait()
+            if worker.error is not None:
+                raise worker.error
+            return worker.result
+        finally:
+            worker.wait()
+            self.is_saving_revision = False
+            worker.deleteLater()
+            progress.deleteLater()
+
+    def start_project(self, settings: dict, directory: str | None = None) -> bool:
+        """Replace a project only after the main window has approved the replacement."""
+        if self.runner.is_busy:
+            return False
+        try:
+            normalized = self.make.new_project_settings(settings)
+            configured = LyricsDocument([], metadata={"project_state": "configured"})
+            saved = None
+            if directory:
+                manifest = Path(directory).resolve() / PROJECT_FILENAME
+                if manifest.exists():
+                    self.activity.setText("此目录已有工程，请选择一个新的工程目录。")
+                    return False
+                configured, saved, _files = self._save_revision_responsive(
+                    configured, normalized, directory
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            self.activity.setText(f"工程未创建，当前工程仍保留：{exc}")
+            return False
+        self._syncing = True
+        try:
+            if saved:
+                self.make.restore_workspace(saved, configured=True)
+            else:
+                self.make.reset_project(normalized)
+            self.editor.clear_project()
+            self.outputs.clear_project()
+            self._has_document = False
+            self._pending_lyrics_source = False
+            self._configured_document = configured
+            self._project_directory = saved.manifest.parent if saved else None
+            self._render_settings = None
+            self._preview_materials = None
+            self._saved_settings = copy.deepcopy(self.make.get_settings()) if saved else {}
+            self._active_lyrics_sources = self._lyrics_sources(self.make.get_settings())
+        finally:
+            self._syncing = False
+        self._settings_changed(self.make.get_settings())
+        self.results_button.setChecked(False)
+        self.activity.setText(
+            f"工程配置已保存至 {self.project_directory}；生成时间轴后开始编辑。"
+            if saved else "工程配置已应用；保存工程或生成时间轴后继续。"
+        )
+        return True
+
+    def apply_project_settings(self, settings: dict) -> bool:
+        """Save source and style choices without replacing the lyrics being edited."""
+        if self.runner.is_busy or not self.has_project:
+            return False
+        try:
+            normalized = self.make._validated_settings(settings)
+            document = self._document_for_save()
+        except (OSError, TypeError, ValueError) as exc:
+            self.activity.setText(f"项目设置未更改：{exc}")
+            return False
+        merged = {**self.make.get_settings(), **normalized}
+        submitted_controls = copy.deepcopy(self.make.get_settings())
+        pending_source = self._has_document and (
+            self._pending_lyrics_source or self._lyrics_sources(merged) != self._active_lyrics_sources
+        )
+        merged["pending_lyrics_source"] = pending_source
+        directory = self.project_directory
+        if not directory:
+            directory = QFileDialog.getExistingDirectory(
+                self, "保存完整工程与项目设置", str(_default_output_root())
+            )
+            if not directory:
+                return False
+            if (Path(directory).resolve() / PROJECT_FILENAME).exists():
+                overwrite = QMessageBox.question(
+                    self, "此目录已有其他工程",
+                    "所选目录已包含另一份工程。继续将替换其中的工程索引。是否覆盖？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if overwrite != QMessageBox.StandardButton.Yes:
+                    return False
+
+        def task(log):
+            log("正在保存项目设置与当前歌词……")
+            return save_workspace_revision(document, merged, directory)
+
+        def saved(result):
+            saved_document, workspace, _files = result
+            unchanged = self.make.get_settings() == submitted_controls
+            self._syncing = True
+            try:
+                if unchanged:
+                    self.make.apply_material_settings(workspace.settings or merged)
+                self._pending_lyrics_source = pending_source
+                if not pending_source and unchanged:
+                    self._active_lyrics_sources = self._lyrics_sources(self.make.get_settings())
+            finally:
+                self._syncing = False
+            self._project_directory = workspace.manifest.parent
+            self._settings_changed(self.make.get_settings())
+            self._adopt_saved_document(saved_document)
+            self._saved_settings = copy.deepcopy(self.make.get_settings() if unchanged else merged)
+            self._update_dirty()
+            self.activity.setText("项目设置已保存；当前歌词仍保留。更改歌词来源后可重新生成时间轴。")
+
+        return self.runner.submit("保存项目设置", task, saved)
+
+    def apply_material_settings(self, settings: dict) -> None:
+        self.make.apply_material_settings(settings)
+        self.activity.setText("素材来源已更改；点击载入 / 生成时间轴后采用新歌词。")
+
     def adopt_prepared(self, result) -> None:
         if not result.payload or not result.payload.get("lines"):
             self.activity.setText(result.status)
             return
         document = document_from_payload(result.payload)
+        project_directory = self._project_directory
+        project_save_failed = False
         self._syncing = True
         try:
             self.make.stage_editor_document(document)
@@ -366,15 +726,33 @@ class WorkspacePage(QWidget):
             if not settings.get("audio_file") and not settings.get("video_file") and result.audio:
                 self.make.controls["audio_file"].set_value(result.audio)
             settings = self.make.get_settings()
+            self._pending_lyrics_source = False
+            if project_directory:
+                try:
+                    document, saved, _files = self._save_revision_responsive(
+                        document,
+                        {**settings, "pending_lyrics_source": False},
+                        str(project_directory),
+                    )
+                    # Generation output is an intermediate result. The created
+                    # project remains the document's home throughout editing.
+                    self.make.apply_material_settings(saved.settings or settings)
+                except (OSError, TypeError, ValueError) as exc:
+                    document.metadata["workspace_manifest"] = str(project_directory / PROJECT_FILENAME)
+                    self.outputs.log.appendPlainText(f"时间轴已生成，原工程目录保存失败：{exc}")
+                    project_save_failed = True
+            settings = self.make.get_settings()
             audio = settings.get("audio_file") or settings.get("video_file") or result.audio
             self.editor.load_document(document, audio, name)
             self._has_document = True
-            self._saved_settings = copy.deepcopy(self.make.get_settings())
-            self._active_lyrics_sources = self._lyrics_sources(self._saved_settings)
+            self._configured_document = None
+            if not project_directory and document.metadata.get("workspace_manifest"):
+                self._project_directory = Path(document.metadata["workspace_manifest"]).resolve().parent
+            self._saved_settings = {} if project_save_failed else copy.deepcopy(settings)
+            self._active_lyrics_sources = self._lyrics_sources(settings)
         finally:
             self._syncing = False
         self._settings_changed(self.make.get_settings())
-        self.prepare_button.setText("重新载入 / 生成时间轴")
         self.activity.setText(
             f"时间轴已生成 · 有 {self.editor.review_count} 句待核对，可用待核对句按钮定位。"
             if self.editor.review_count
@@ -384,12 +762,13 @@ class WorkspacePage(QWidget):
     def load_project(self, document, workspace: WorkspaceProject | None, source: str) -> None:
         # Validate before replacing any part of the currently open project.
         # A failed import must leave both the lyrics and its materials intact.
-        if not document.lines:
+        configured = not document.lines and document.metadata.get("project_state") == "configured"
+        if not document.lines and (not configured or workspace is None):
             raise ValueError("歌词工程为空，当前工程未更改。")
         self._syncing = True
         try:
             if workspace:
-                self.make.restore_workspace(workspace)
+                self.make.restore_workspace(workspace, configured=configured)
                 audio = str(workspace.audio or workspace.video or "") or None
                 name = workspace.name
             else:
@@ -399,15 +778,29 @@ class WorkspacePage(QWidget):
                 audio = settings.get("audio_file") or settings.get("video_file") or None
                 name = settings.get("output_name") or Path(source).stem
                 self.make.controls["output_name"].setText(name)
-            self.editor.load_document(document, audio, name)
-            self._has_document = True
+            if configured:
+                self.editor.clear_project()
+                self._configured_document = copy.deepcopy(document)
+            else:
+                self.editor.load_document(document, audio, name)
+                self._configured_document = None
+            self._has_document = bool(document.lines)
+            self.outputs.clear_project()
+            self.results_button.setChecked(False)
+            self._pending_lyrics_source = bool(
+                workspace and (workspace.settings or {}).get("pending_lyrics_source")
+            )
+            manifest = workspace.manifest if workspace else document.metadata.get("workspace_manifest")
+            self._project_directory = Path(manifest).resolve().parent if manifest else None
             self._saved_settings = copy.deepcopy(self.make.get_settings())
             self._active_lyrics_sources = self._lyrics_sources(self._saved_settings)
         finally:
             self._syncing = False
         self._settings_changed(self.make.get_settings())
-        self.prepare_button.setText("重新载入 / 生成时间轴")
-        self.activity.setText(f"已打开 {name} · 素材、样式和歌词在同一个工作台继续编辑。")
+        self.activity.setText(
+            f"已打开 {name} · 项目配置已恢复，生成时间轴后开始编辑。"
+            if configured else f"已打开 {name} · 继续试听和校准当前歌词。"
+        )
         if warning := document.metadata.get("legacy_timing_warning"):
             self.activity.setText(f"已打开 {name} · {warning}")
             self.outputs.log.appendPlainText(warning)
@@ -416,9 +809,9 @@ class WorkspacePage(QWidget):
         if self.runner.is_busy:
             return
         if self._has_document:
-            if self._lyrics_sources(self.make.get_settings()) != self._active_lyrics_sources:
+            if self._source_pending():
                 self.activity.setText(
-                    "请先载入新选择的歌词来源，再导出视频；原有编辑内容尚未被替换。"
+                    "请先重新生成时间轴，采用新选择的歌词来源，再导出视频；当前编辑内容仍保留。"
                 )
                 return
             try:
@@ -454,37 +847,54 @@ class WorkspacePage(QWidget):
         try:
             workspace = load_workspace_project(manifest)
             saved = read_workspace_lyrics(workspace)
-            saved.metadata["workspace_manifest"] = str(workspace.manifest)
+            if self._project_directory:
+                saved, workspace, _files = self._save_revision_responsive(
+                    saved,
+                    {**submitted, "pending_lyrics_source": False},
+                    str(self._project_directory),
+                )
+            else:
+                saved.metadata["workspace_manifest"] = str(workspace.manifest)
+            self._syncing = True
+            try:
+                self.make.apply_material_settings(workspace.settings or submitted)
+                self._active_lyrics_sources = self._lyrics_sources(self.make.get_settings())
+            finally:
+                self._syncing = False
+            self._settings_changed(self.make.get_settings())
             if not self.editor.adopt_saved_revision(saved):
                 return False
         except (OSError, ValueError, TypeError) as exc:
             self.outputs.log.appendPlainText(f"成片已输出，工程保存状态需手动确认：{exc}")
             return False
-        self._saved_settings = copy.deepcopy(submitted)
+        self._project_directory = workspace.manifest.parent
+        self._saved_settings = copy.deepcopy(self.make.get_settings())
         self._update_dirty()
         return True
 
-    def save_project(self) -> bool:
+    def save_project(self, *, as_new: bool = False) -> bool:
         if self.runner.is_busy:
             return False
-        if self._has_document and (
-            self._lyrics_sources(self.make.get_settings()) != self._active_lyrics_sources
-        ):
-            self.activity.setText("请先载入新选择的歌词来源，再保存完整工程；当前编辑内容仍保留。")
-            return False
         try:
-            document = self.editor.current_document()
+            document = self._document_for_save()
         except (ValueError, TypeError) as exc:
             self.activity.setText(f"请先载入或修正歌词：{exc}")
             return False
         settings = copy.deepcopy(self.make.get_settings())
-        directory = QFileDialog.getExistingDirectory(
-            self, "保存完整工程", str(_default_output_root())
-        )
+        pending_source = self._source_pending()
+        save_settings = {**settings, "pending_lyrics_source": pending_source}
+        directory = self.project_directory if not as_new else ""
+        if not directory:
+            directory = QFileDialog.getExistingDirectory(
+                self, "另存完整工程" if as_new else "保存完整工程", str(_default_output_root())
+            )
         if not directory:
             return False
         target_manifest = Path(directory).resolve() / PROJECT_FILENAME
-        current_manifest = document.metadata.get("workspace_manifest")
+        current_manifest = (
+            self._project_directory / PROJECT_FILENAME if self._project_directory
+            else document.metadata.get("workspace_manifest")
+        )
         same_project = bool(
             current_manifest and Path(current_manifest).resolve() == target_manifest
         )
@@ -502,15 +912,28 @@ class WorkspacePage(QWidget):
 
         def task(log):
             log("正在保存歌词、素材与当前样式……")
-            return save_workspace_revision(document, settings, directory)
+            return save_workspace_revision(document, save_settings, directory)
 
         def saved(result):
             saved_document, workspace, files = result
+            unchanged = settings == self.make.get_settings()
+            if unchanged:
+                self._syncing = True
+                try:
+                    self.make.apply_material_settings(workspace.settings or settings)
+                    if not pending_source:
+                        self._active_lyrics_sources = self._lyrics_sources(self.make.get_settings())
+                finally:
+                    self._syncing = False
+                self._settings_changed(self.make.get_settings())
             try:
-                adopted = self.editor.adopt_saved_revision(saved_document)
+                adopted = self._adopt_saved_document(saved_document)
             except (ValueError, TypeError):
                 adopted = False
-            self._saved_settings = copy.deepcopy(settings)
+            self._project_directory = workspace.manifest.parent
+            self._pending_lyrics_source = pending_source
+            self._saved_settings = copy.deepcopy(self.make.get_settings() if unchanged else settings)
+            self._settings_changed(self.make.get_settings())
             self._update_dirty()
             suffix = "当前还有更新的未保存修改。" if not adopted or self.is_dirty else ""
             message = (
@@ -519,7 +942,6 @@ class WorkspacePage(QWidget):
             self.outputs.show_result(UiJobResult(
                 message, None, [*files, str(workspace.manifest)], "", str(workspace.manifest.parent)
             ))
-            self.results_button.setChecked(True)
             self.activity.setText(message)
 
         return self.runner.submit("保存完整工程", task, saved)
