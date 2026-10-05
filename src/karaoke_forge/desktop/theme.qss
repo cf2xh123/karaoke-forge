@@ -22,6 +22,7 @@ QPushButton:pressed { background: #d6e9ee; }
 QPushButton:disabled { background: #eef1f4; color: #94a0aa; border-color: #dfe5e9; }
 QPushButton[primary="true"], QPushButton#primary, QPushButton#primary-button { background: #f2af3e; color: #392b13; border-color: #e3a137; font-weight: 600; }
 QPushButton[primary="true"]:hover { background: #ffbf52; }
+QPushButton[primary="true"]:disabled, QPushButton#primary:disabled, QPushButton#primary-button:disabled { background: #eef1f4; color: #94a0aa; border-color: #dfe5e9; }
 QTabWidget::pane { border: 1px solid #dce3ea; background: white; border-radius: 5px; }
 QTabBar::tab { padding: 10px 14px; color: #667785; background: #eef2f6; }
 QTabBar::tab:selected { color: #115d71; background: white; border-bottom: 2px solid #247b8f; }
