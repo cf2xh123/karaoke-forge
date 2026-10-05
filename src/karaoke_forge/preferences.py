@@ -34,6 +34,7 @@ _BOOLEANS = {
     "ripple_following",
     "snap_enabled",
     "follow_playback",
+    "linked_token_boundaries",
 }
 _COLORS = {"text_color", "highlight_color", "translation_color", "pronunciation_color"}
 

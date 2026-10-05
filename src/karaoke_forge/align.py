@@ -32,6 +32,7 @@ class AlignmentReport:
     exact_units: int
     coverage: float
     mean_similarity: float
+    # Zero-based indexes into the returned document (not filtered source rows).
     unmatched_line_indexes: tuple[int, ...] = ()
     trusted_timing_units: int = 0
     timing_anchor_lines: int = 0
@@ -101,15 +102,14 @@ def _match_score(similarity: float, confidence: float | None = None) -> float:
 
 def _expand_recognized(words: list[RecognizedWord]) -> list[_RecognizedUnit]:
     expanded: list[_RecognizedUnit] = []
-    recognized_cursor = 0.0
     for word in words:
         units = split_display_units(word.text)
         if not units:
             continue
-        # Whisper can occasionally return overlapping or backwards word spans.
-        # Keep the decoder order, but make its timing monotonic before those
-        # spans become lyric anchors.
-        word_start = max(0.0, recognized_cursor, word.start)
+        # Keep decoder order for text matching, but do not let an unmatched
+        # hallucination's end push every later acoustic word forward. Normalize
+        # overlaps only after choosing the words that actually match the lyrics.
+        word_start = max(0.0, word.start)
         word_end = max(word_start + 0.02, word.end)
         duration = word_end - word_start
         weights = [max(1, len(unit.key)) for unit in units]
@@ -131,13 +131,14 @@ def _expand_recognized(words: list[RecognizedWord]) -> list[_RecognizedUnit]:
             cursor = end
             total_weight -= weight
             duration = max(0.01, word_end - cursor)
-        recognized_cursor = word_end
     return expanded
 
 
 def _flatten_target(document: LyricsDocument) -> list[_TargetUnit]:
     target: list[_TargetUnit] = []
     for line_index, line in enumerate(document.lines):
+        if line.hidden:
+            continue
         units = split_display_units(line.text)
         for unit_index, unit in enumerate(units):
             source_start: float | None = None
@@ -167,6 +168,7 @@ def _sequence_alignment(
     recognized: list[_RecognizedUnit],
     *,
     timing_prior: float = 0.0,
+    line_start_prior: float | None = None,
 ) -> tuple[dict[int, tuple[int, float]], int]:
     rows = len(target) + 1
     columns = len(recognized) + 1
@@ -201,6 +203,12 @@ def _sequence_alignment(
             recognized_unit = recognized[column - 1]
             similarity = _similarity(target_key, recognized_unit.key)
             match_score = _match_score(similarity, recognized_unit.confidence)
+            if line_start_prior is not None and row == 1:
+                # Repeated choruses can have identical text scores inside an
+                # expanded local window. Prefer the occurrence nearest this
+                # (already drift-corrected) line, without banning large offsets
+                # when it is the only textual match.
+                match_score -= min(0.75, abs(recognized_unit.start - line_start_prior) * 0.15)
             if target_progress is not None and recognized_progress is not None:
                 match_score -= timing_prior * abs(
                     target_progress[row - 1] - recognized_progress[column - 1]
@@ -267,7 +275,7 @@ def _interpolate_timings(
     cursor = max(0.0, first_start - default_duration * first)
     for index in range(first):
         remaining = first - index
-        step = max(0.03, (first_start - cursor) / remaining)
+        step = max(0.01, (first_start - cursor) / remaining)
         values[index] = (cursor, min(first_start, cursor + step), None)
         cursor += step
 
@@ -275,13 +283,17 @@ def _interpolate_timings(
         missing = right_index - left_index - 1
         if missing <= 0:
             continue
-        left_start = values[left_index][0]  # type: ignore[index]
+        left_end = values[left_index][1]  # type: ignore[index]
         right_start = values[right_index][0]  # type: ignore[index]
-        span = max(0.03 * (missing + 1), right_start - left_start)
-        step = span / (missing + 1)
-        for offset in range(1, missing + 1):
-            start = min(right_start - 0.01, left_start + step * offset)
-            values[left_index + offset] = (max(0.0, start), max(0.01, start + step), None)
+        # Missing words belong in the free gap, not inside the preceding
+        # trusted word's sung duration. If there is no room, use minimum-length
+        # estimates; the caller handles the resulting overlap conservatively.
+        available = right_start - left_end
+        step = max(0.01, available / (missing + 1))
+        leading_gap = step if available >= (missing + 1) * 0.01 else 0.0
+        for offset in range(missing):
+            start = left_end + leading_gap + step * offset
+            values[left_index + offset + 1] = (start, start + step, None)
 
     last = anchors[-1]
     cursor = values[last][1]  # type: ignore[index]
@@ -290,6 +302,40 @@ def _interpolate_timings(
         cursor += default_duration
 
     return [value for value in values if value is not None]
+
+
+def _monotonic_timings(
+    timings: list[tuple[float, float, float | None]],
+) -> list[tuple[float, float, float | None]]:
+    """Repair selected overlaps minimally while preserving real pauses/ends."""
+    output = []
+    cursor = 0.0
+    for raw_start, raw_end, confidence in timings:
+        start = max(cursor, raw_start)
+        end = max(start + 0.01, raw_end)
+        if max(abs(start - raw_start), abs(end - raw_end)) > 0.05:
+            # The text probability no longer describes this repaired span.
+            # Like interpolation, expose it as estimated timing for review.
+            confidence = None
+        output.append((start, end, confidence))
+        cursor = end
+    return output
+
+
+def _retains_acoustic_spans(
+    timings: list[tuple[float, float, float | None]], tokens: list[KaraokeToken],
+) -> bool:
+    """Clamping cannot turn an outside/mostly discarded word into evidence."""
+    for (raw_start, raw_end, _confidence), token in zip(timings, tokens):
+        overlap = max(0.0, min(raw_end, token.end) - max(raw_start, token.start))
+        duration = max(0.01, raw_end - raw_start)
+        if overlap <= 0:
+            return False
+        # Permit timestamp rounding and small boundary corrections, but not a
+        # long recognized word compressed into a nominal 10 ms karaoke token.
+        if overlap < duration * 0.5 and duration - overlap > 0.05:
+            return False
+    return True
 
 
 def _uniform_fallback_timings(
@@ -550,7 +596,7 @@ def _correct_timeline_drift(
 ) -> LyricsDocument:
     corrected = copy.deepcopy(lyrics)
     for line in corrected.lines:
-        if line.start is None or line.end is None:
+        if line.hidden or line.start is None or line.end is None:
             continue
         line.start = _warp_time(line.start, anchors)
         line.end = max(line.start + 0.01, _warp_time(line.end, anchors))
@@ -597,6 +643,7 @@ def align_document(
         if timing_mapping
         else _uniform_fallback_timings(len(target), recognized)
     )
+    timings = _monotonic_timings(timings)
     line_tokens: list[list[KaraokeToken]] = [[] for _ in lyrics.lines]
     similarities: list[float] = []
     for index, (target_unit, timing) in enumerate(zip(target, timings)):
@@ -613,14 +660,15 @@ def align_document(
             similarities.append(mapping[index][1])
 
     aligned_lines: list[LyricLine] = []
+    output_line_indexes: dict[int, int] = {}
     for line_index, source_line in enumerate(lyrics.lines):
+        if source_line.hidden:
+            aligned_lines.append(copy.deepcopy(source_line))
+            continue
         tokens = line_tokens[line_index]
         if not tokens:
             continue
-        for token_index in range(len(tokens) - 1):
-            tokens[token_index].end = max(
-                tokens[token_index].start + 0.01, tokens[token_index + 1].start
-            )
+        output_line_indexes[line_index] = len(aligned_lines)
         aligned_lines.append(
             LyricLine(
                 text=source_line.text,
@@ -634,8 +682,9 @@ def align_document(
             )
         )
 
-    for index, line in enumerate(aligned_lines[:-1]):
-        next_start = aligned_lines[index + 1].start
+    visible_lines = [line for line in aligned_lines if not line.hidden]
+    for index, line in enumerate(visible_lines[:-1]):
+        next_start = visible_lines[index + 1].start
         assert next_start is not None and line.start is not None and line.end is not None
         if next_start > line.start + 0.1:
             line.end = min(line.end, max(line.start + 0.1, next_start - 0.02))
@@ -652,10 +701,18 @@ def align_document(
         exact_units=exact,
         coverage=coverage,
         mean_similarity=sum(similarities) / len(similarities) if similarities else 0.0,
-        unmatched_line_indexes=_unmatched_line_indexes(lyrics, target, mapping),
+        unmatched_line_indexes=tuple(
+            output_line_indexes[index]
+            for index in _unmatched_line_indexes(lyrics, target, mapping)
+        ),
         trusted_timing_units=len(trusted_mapping),
     )
     metadata = dict(lyrics.metadata)
+    for key in (
+        "audio_refined_lines", "audio_preserved_lines", "audio_refined_line_indices",
+        "timeline_correction", "timeline_anchor_lines", "timeline_median_shift", "timeline_max_shift",
+    ):
+        metadata.pop(key, None)
     metadata["alignment_trusted_timing_units"] = str(len(trusted_mapping))
     return (
         LyricsDocument(lines=aligned_lines, metadata=metadata, source_format="aligned"),
@@ -721,7 +778,11 @@ def refine_timed_document(
 
     refined_lines: list[LyricLine] = []
     refined_count = 0
+    refined_line_indices: list[str] = []
     for line_index, source in enumerate(working_lyrics.lines):
+        if source.hidden:
+            refined_lines.append(copy.deepcopy(source))
+            continue
         assert source.start is not None and source.end is not None
         display_units = split_display_units(source.text)
         if not display_units:
@@ -751,7 +812,9 @@ def refine_timed_document(
             continue
 
         line_target = [_TargetUnit(line_index=0, unit=unit) for unit in display_units]
-        line_mapping, line_exact = _sequence_alignment(line_target, candidates)
+        line_mapping, line_exact = _sequence_alignment(
+            line_target, candidates, line_start_prior=source.start,
+        )
         if not line_mapping:
             refined_lines.append(copy.deepcopy(source))
             continue
@@ -813,7 +876,7 @@ def refine_timed_document(
         if any(right.start < left.end - 1e-9 for left, right in pairwise(tokens)):
             refined_lines.append(copy.deepcopy(source))
             continue
-        if source.tokens and clamped_boundaries > max(1, len(tokens) // 4):
+        if clamped_boundaries > len(tokens) * 0.25 or not _retains_acoustic_spans(timings, tokens):
             refined_lines.append(copy.deepcopy(source))
             continue
 
@@ -855,11 +918,13 @@ def refine_timed_document(
             )
         )
         refined_count += 1
+        refined_line_indices.append(str(line_index + 1))
 
     metadata = dict(working_lyrics.metadata)
     if refined_count or anchors:
         metadata["word_timing"] = "audio-refined"
     metadata["audio_refined_lines"] = str(refined_count)
+    metadata["audio_refined_line_indices"] = ",".join(refined_line_indices)
     metadata["audio_preserved_lines"] = str(len(lyrics.lines) - refined_count)
     return (
         LyricsDocument(
@@ -888,6 +953,7 @@ def apply_forced_line_alignments(
     lyrics.require_timed()
     output = copy.deepcopy(lyrics)
     accepted_lines = 0
+    accepted_line_indices: list[int] = []
     for line_index, recognized_words in recognized_by_line.items():
         if not 0 <= line_index < len(output.lines):
             continue
@@ -956,7 +1022,7 @@ def apply_forced_line_alignments(
 
         if any(right.start < left.end - 1e-9 for left, right in pairwise(tokens)):
             continue
-        if clamped_boundaries > max(1, len(tokens) // 4):
+        if clamped_boundaries > len(tokens) * 0.25 or not _retains_acoustic_spans(timings, tokens):
             continue
         if protect_existing_word_timing and source.tokens:
             same_tokenization = len(source.tokens) == len(tokens) and all(
@@ -989,8 +1055,12 @@ def apply_forced_line_alignments(
             hidden=source.hidden,
         )
         accepted_lines += 1
+        accepted_line_indices.append(line_index + 1)
 
     output.metadata["forced_alignment_accepted_lines"] = str(accepted_lines)
+    output.metadata["forced_alignment_accepted_line_indices"] = ",".join(
+        str(index) for index in sorted(accepted_line_indices)
+    )
     if accepted_lines:
         output.metadata["word_timing"] = "audio-forced"
     return output, accepted_lines

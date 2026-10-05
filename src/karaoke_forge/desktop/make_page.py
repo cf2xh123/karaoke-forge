@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -187,11 +189,13 @@ class MakePage(QWidget):
     workspace_requested = Signal(str)
 
     def __init__(
-        self, runner: object, parent: QWidget | None = None, *, embedded: bool = False
+        self, runner: object, parent: QWidget | None = None, *, embedded: bool = False,
+        settings_only: bool = False,
     ) -> None:
         super().__init__(parent)
         self.runner = runner
         self.embedded = embedded
+        self.settings_only = settings_only
         self.before_prepare: Callable[[], bool] | None = None
         self.controls: dict[str, QWidget] = {}
         self._temporary = tempfile.TemporaryDirectory(prefix="karaoke-forge-desktop-")
@@ -211,8 +215,9 @@ class MakePage(QWidget):
         self._initial_settings = self.get_settings()
         self._connect_style_controls()
         self._connect_settings_controls()
-        for key in ("netease_link", "qqmusic_link", "utaten_link"):
-            self.controls[key].textChanged.connect(self._schedule_link_match)
+        if not self.settings_only:
+            for key in ("netease_link", "qqmusic_link", "utaten_link"):
+                self.controls[key].textChanged.connect(self._schedule_link_match)
         self._set_sample()
         self._update_style()
         self.runner.busy_changed.connect(self._set_busy)
@@ -305,7 +310,7 @@ class MakePage(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        if self.embedded:
+        if self.embedded or self.settings_only:
             layout.setContentsMargins(0, 0, 0, 0)
         else:
             heading = QLabel("制作卡拉 OK 视频")
@@ -321,6 +326,8 @@ class MakePage(QWidget):
         self._build_style()
         self._build_advanced()
         self._build_results()
+        if self.settings_only:
+            self._arrange_settings_tabs()
 
         preview_panel = QWidget(self)
         preview_layout = QVBoxLayout(preview_panel)
@@ -329,16 +336,20 @@ class MakePage(QWidget):
         self.preview.setMinimumSize(300, 220)
         self.preview.setMaximumHeight(360)
         preview_layout.addWidget(self.preview)
-        self.preview_status = QLabel("选择素材后点击刷新预览，可查看实际 MV 或唱片背景。")
+        self.preview_status = QLabel(
+            "这里使用示例歌词检查字幕样式；实际歌曲画面将在编辑器预览。"
+            if self.settings_only else "选择素材后点击刷新预览，可查看实际 MV 或唱片背景。"
+        )
         self.preview_status.setWordWrap(True)
         preview_layout.addWidget(self.preview_status)
-        preview_layout.addWidget(self._button("刷新素材预览", self.refresh_preview))
+        if not self.settings_only:
+            preview_layout.addWidget(self._button("刷新素材预览", self.refresh_preview))
         tip = QLabel("当前预览用于确认布局。逐字时序请在歌词编辑器中结合音频校准。")
         tip.setWordWrap(True)
         preview_layout.addWidget(tip)
         self._build_sample_controls(preview_layout)
         preview_layout.addStretch(1)
-        if self.embedded:
+        if self.embedded or self.settings_only:
             self.tabs.addTab(preview_panel, "示例预览")
             layout.addWidget(self.tabs, 1)
         else:
@@ -359,7 +370,7 @@ class MakePage(QWidget):
         self.render_button.setObjectName("primary-button")
         actions.addWidget(self.prepare_button, 1)
         actions.addWidget(self.render_button, 1)
-        if self.embedded:
+        if self.embedded or self.settings_only:
             self.status.hide()
             action_panel.hide()
         else:
@@ -447,9 +458,45 @@ class MakePage(QWidget):
         self._check(form, "cover_waveform", "显示音乐波形 / 频谱")
         layout.addStretch()
 
+    def _arrange_settings_tabs(self) -> None:
+        """Reuse every configuration field without duplicating the source wizard."""
+        self.tabs.setTabText(0, "画面与视频")
+        self.tabs.setTabText(1, "官方注音")
+        # Source selection is transactional in ProjectDialog. Its explicit fields
+        # replace these hidden originals when the final settings are collected.
+        for key in ("audio_file", "video_file", "lyrics_file", "cover_file", "pasted_lyrics"):
+            group = self.controls[key].parentWidget()
+            if isinstance(group, QGroupBox):
+                group.hide()
+        form = self.controls["output_name"].parentWidget().layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self.controls["output_name"], False)
+        # Accounts belong to the running application session, not saved projects.
+        for key in ("netease_link", "qqmusic_link", "rights_confirmed"):
+            group = self.controls[key].parentWidget()
+            if isinstance(group, QGroupBox):
+                group.hide()
+        self.match_status.hide()
+        self.open_match_button.hide()
+        utaten_group = self.controls["utaten_link"].parentWidget()
+        utaten_group.setTitle("已有歌词：补充 UtaTen 官方注音（可选）")
+        utaten_group.layout().setRowVisible(self.controls["use_utaten_lyrics"], False)
+        note = QLabel("已有本地 / 粘贴歌词时，可填写 UtaTen 页面并开启仅补充官方注音。")
+        note.setWordWrap(True)
+        utaten_group.layout().insertRow(0, note)
+        self.controls["rights_confirmed"].setText("我确认拥有所导入歌词及注音的使用权")
+        utaten_group.layout().addRow(self.controls["rights_confirmed"])
+        # Keep the manual subtitle library available without displaying account
+        # and primary source forms again in the processing step.
+        library = QPushButton("打开 Vmoe 字幕库")
+        library.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://karaoke.vmoe.info/")))
+        utaten_group.layout().addRow(library)
+
     def _build_online(self) -> None:
         layout = self._scroll_tab("在线来源")
         note = QLabel(
+            "主歌词来源已在第一步选择；这里可配置已有歌词的官方注音补充。"
+            if self.settings_only else
             "一次选择一个在线来源；QQ 音乐和 UtaTen 只提供歌词，请同时选择本地音频或有声 MV。"
         )
         note.setWordWrap(True)
@@ -464,6 +511,8 @@ class MakePage(QWidget):
         form = self._group(layout, "网易云音乐")
         self._line(form, "netease_link", "单曲链接")
         self._check(form, "use_netease_lyrics", "没有上传歌词时导入网易云公开歌词")
+        self._check(form, "prefer_netease_audio", "使用网易云音频，独立 MV 仅提供画面", False)
+        form.setRowVisible(self.controls["prefer_netease_audio"], False)
         login_actions = QHBoxLayout()
         login_actions.addWidget(self._button("连接网易云账号", self.login_netease))
         login_actions.addWidget(self._button("重新登录", lambda: self.login_netease(relogin=True)))
@@ -697,7 +746,7 @@ class MakePage(QWidget):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(3000)
         layout.addWidget(self.log, 2)
-        if self.embedded:
+        if self.embedded or self.settings_only:
             panel.hide()
         else:
             self.tabs.addTab(panel, "结果与日志")
@@ -794,8 +843,19 @@ class MakePage(QWidget):
             elif isinstance(widget, QLineEdit):
                 widget.setText(str(value or ""))
 
-    def restore_workspace(self, workspace: WorkspaceProject) -> None:
+    def restore_workspace(self, workspace: WorkspaceProject, *, configured: bool = False) -> None:
         settings = self._validated_settings(workspace.settings)
+        preserve_source = configured or bool(
+            settings.get("preserve_lyrics_source") or settings.get("pending_lyrics_source")
+        )
+        source_lyrics = settings.get("lyrics_file", "")
+        if preserve_source and settings.get("lyrics_source_asset"):
+            root = workspace.manifest.parent.resolve()
+            source_lyrics = (root / settings["lyrics_source_asset"]).resolve()
+            try:
+                source_lyrics.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("工程歌词来源路径超出项目文件夹，当前工程未更改。") from exc
         self._restoring = True
         try:
             self._workspace = workspace
@@ -808,17 +868,71 @@ class MakePage(QWidget):
                 {
                     "audio_file": workspace.audio,
                     "video_file": workspace.video,
-                    "lyrics_file": workspace.lyrics_project,
+                    "lyrics_file": source_lyrics if preserve_source else workspace.lyrics_project,
                     "cover_file": workspace.cover,
                     "font_files": workspace.font_files,
                     "output_name": workspace.name,
-                    "pasted_lyrics": "",
+                    "pasted_lyrics": settings.get("pasted_lyrics", "") if preserve_source else "",
                 }
             )
         finally:
             self._restoring = False
         self._update_style()
         self.status.setText(f"已恢复工程：{workspace.name}")
+
+    def apply_material_settings(self, settings: dict[str, Any]) -> None:
+        """Apply a source choice together, retaining the lyrics being edited."""
+        if self.runner.is_busy:
+            raise ValueError("请等待当前任务完成后再更改工程来源。")
+        normalized = self._validated_settings(settings)
+        self._match_timer.stop()
+        previous = self._restoring
+        blocked = self.blockSignals(True)
+        self._restoring = True
+        try:
+            self._restore_values(normalized)
+            self._matched_manifest = None
+            self.open_match_button.setEnabled(False)
+            self.match_status.setText("来源已设置；载入歌词或生成时间轴后开始校准。")
+        finally:
+            self._restoring = previous
+            self.blockSignals(blocked)
+        self._update_style()
+
+    def new_project_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Validate a new project's complete configuration before it is saved."""
+        if self.runner.is_busy:
+            raise ValueError("请等待当前任务完成后再新建工程。")
+        normalized = self._validated_settings(settings)
+        current = self.get_settings()
+        preferred = {
+            key: current[key]
+            for key in _STYLE_FIELDS | {"model", "device", "language", "output_root"}
+            if key in current
+        }
+        empty = {
+            key: "" for key in (
+                "audio_file", "video_file", "lyrics_file", "cover_file", "pasted_lyrics",
+                "output_name", "netease_link", "qqmusic_link", "utaten_link",
+            )
+        }
+        empty.update({"font_files": [], "utaten_pronunciation_only": False})
+        return {
+            key: value for key, value in {**self._initial_settings, **preferred, **empty, **normalized}.items()
+            if key not in _PRIVATE_FIELDS
+        }
+
+    def reset_project(self, settings: dict[str, Any]) -> None:
+        """Start with new materials and discard all previous lyric/render snapshots."""
+        values = self.new_project_settings(settings)
+        self._workspace = None
+        self._editor_document = None
+        self._editor_source_settings = {}
+        self._render_lyrics_snapshot = None
+        self.apply_material_settings(values)
+        self.preview.set_background("")
+        self._set_sample()
+        self.status.setText("新工程已就绪，载入歌词或生成时间轴后开始校准。")
 
     def stage_editor_document(self, document: LyricsDocument) -> None:
         """Freeze current lyrics for rendering without reloading project settings.
@@ -958,6 +1072,8 @@ class MakePage(QWidget):
         log("已保存完整字幕、识别和导出设置。")
 
     def prepare_project(self) -> None:
+        if self.settings_only:
+            return
         if self.before_prepare is not None and not self.before_prepare():
             return
         values = self._job_values()
@@ -978,6 +1094,8 @@ class MakePage(QWidget):
         self.runner.submit("生成可编辑歌词工程", task, self._prepared_result)
 
     def render_video(self) -> None:
+        if self.settings_only:
+            return
         values = self._job_values()
         if self._editor_document is not None:
             if self._render_lyrics_snapshot is not None:
@@ -1044,6 +1162,8 @@ class MakePage(QWidget):
         self.rendered.emit(result)
 
     def refresh_preview(self) -> None:
+        if self.settings_only:
+            return
         values = self._job_values()
         arguments = {
             key: values[key]
@@ -1143,10 +1263,11 @@ class MakePage(QWidget):
         if not self._restoring:
             self.style_changed.emit(style)
             self.settings_changed.emit(settings)
-            try:
-                save_preferences({key: settings[key] for key in _STYLE_FIELDS})
-            except OSError as exc:
-                self._append_log(f"偏好设置未保存：{exc}")
+            if not self.settings_only:
+                try:
+                    save_preferences({key: settings[key] for key in _STYLE_FIELDS})
+                except OSError as exc:
+                    self._append_log(f"偏好设置未保存：{exc}")
 
     def _materials_changed(self, key: str) -> None:
         if self._restoring or not hasattr(self, "preview_status"):
@@ -1155,7 +1276,7 @@ class MakePage(QWidget):
             self._editor_document = None
             self._editor_source_settings = {}
             self._render_lyrics_snapshot = None
-        if key == "font_files":
+        if key == "font_files" and not self.settings_only:
             families = []
             for path in self.controls[key].paths():
                 font_id = QFontDatabase.addApplicationFont(path)
@@ -1163,9 +1284,72 @@ class MakePage(QWidget):
                     families.extend(QFontDatabase.applicationFontFamilies(font_id))
             if families:
                 self.controls["font"].setCurrentText(families[0])
-        self.preview_status.setText("素材已更新，点击“刷新素材预览”查看实际画面。")
+        self.preview_status.setText(
+            "字幕配置已更新；实际歌曲画面将在编辑器预览。"
+            if self.settings_only else "素材已更新，点击“刷新素材预览”查看实际画面。"
+        )
+
+    def show_account_settings(self, parent: QWidget | None = None) -> int:
+        """Edit account options in this session without saving them in a project."""
+        if self.settings_only:
+            return QDialog.DialogCode.Rejected
+        dialog = QDialog(parent or self)
+        dialog.setWindowTitle("网易云账号 · 本次会话")
+        dialog.resize(540, 360)
+        layout = QVBoxLayout(dialog)
+        note = QLabel("账号与登录凭据仅用于本次应用会话，不写入工程或工程设置。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        browser = QComboBox()
+        actual_browser = self.controls["cookie_browser"]
+        for index in range(actual_browser.count()):
+            browser.addItem(actual_browser.itemText(index), actual_browser.itemData(index))
+        browser.setCurrentIndex(actual_browser.currentIndex())
+        profile = QLineEdit(self.controls["cookie_browser_profile"].text())
+        token = QLineEdit(self.controls["music_u"].text())
+        token.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("兼容：浏览器登录", browser)
+        form.addRow("浏览器配置（可选）", profile)
+        form.addRow("手动 MUSIC_U（排障用）", token)
+        layout.addLayout(form)
+        account_status = QLabel(self.login_status.text())
+        account_status.setWordWrap(True)
+        layout.addWidget(account_status)
+        actions = QHBoxLayout()
+        for label, callback in (
+            ("连接网易云账号", self.login_netease),
+            ("重新登录", lambda: self.login_netease(relogin=True)),
+            ("退出账号", self.logout_netease),
+        ):
+            button = QPushButton(label)
+            button.setEnabled(not self.runner.is_busy)
+            button.clicked.connect(callback)
+            self.runner.busy_changed.connect(button.setDisabled)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        # Qt signals are automatically disconnected when this dialog is destroyed.
+        self.controls["music_u"].textChanged.connect(token.setText)
+        self.runner.message.connect(account_status.setText)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存本次会话设置")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("关闭")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            self.controls["cookie_browser"].setCurrentIndex(browser.currentIndex())
+            self.controls["cookie_browser_profile"].setText(profile.text())
+            self.controls["music_u"].setText(token.text())
+        dialog.deleteLater()
+        return result
 
     def login_netease(self, _checked: bool = False, *, relogin: bool = False) -> None:
+        if self.settings_only:
+            return
         def task(log):
             log("请在专用 Edge 窗口中完成网易云官方登录。")
             if relogin:
@@ -1183,6 +1367,8 @@ class MakePage(QWidget):
         self.runner.message.emit("网易云账号已连接。")
 
     def logout_netease(self) -> None:
+        if self.settings_only:
+            return
         def task(log):
             log("正在清除 Karaoke Forge 专用登录数据…")
             return clear_netease_login_profile()

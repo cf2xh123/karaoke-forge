@@ -11,7 +11,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -24,7 +24,7 @@ from PySide6.QtGui import (
     QTextOption,
     QTransform,
 )
-from PySide6.QtWidgets import QScrollBar, QWidget
+from PySide6.QtWidgets import QApplication, QScrollBar, QWidget
 
 from ..ass import (
     AssStyle,
@@ -68,6 +68,8 @@ class _ScrollableTimeline(QWidget):
     """Timeline canvas with its own horizontal scroll bar and anchored zoom."""
 
     seekRequested = Signal(float)
+    interactionStarted = Signal(str)
+    interactionFinished = Signal()
     LEFT = 16.0
     TOP = 40.0
 
@@ -78,14 +80,22 @@ class _ScrollableTimeline(QWidget):
         self._position = 0.0
         self._zoom = 1.0
         self.snap_enabled = True
+        self._interaction_kind: str | None = None
+        self._starting_interaction = False
+        self._cancelled_start = False
+        self._scrubbing = False
+        self._last_seek: float | None = None
+        self._gesture_scale = 1.0
+        self._snap_position = 0.0
         self._scroll = QScrollBar(Qt.Orientation.Horizontal, self)
         self._scroll.valueChanged.connect(lambda _: self.update())
         self.setMinimumSize(160, 176)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("歌词时间轴")
-        self.setToolTip("点击跳转；拖动边缘调整时间；Ctrl + 滚轮缩放；滚轮横向滚动")
+        self.setToolTip("拖动刻度或空白处试听定位；拖动边缘调整时间；Ctrl + 滚轮缩放；滚轮横向滚动")
         self._update_scroll()
+        QApplication.instance().installEventFilter(self)
 
     @property
     def pixels_per_second(self) -> float:
@@ -99,6 +109,8 @@ class _ScrollableTimeline(QWidget):
         return _clamp(seconds, self._start, self._start + self._duration)
 
     def set_position(self, seconds: float) -> None:
+        if self._scrubbing:
+            return
         self._position = max(0.0, _finite(seconds))
         self.update()
 
@@ -108,9 +120,69 @@ class _ScrollableTimeline(QWidget):
     def set_snap_enabled(self, enabled: bool) -> None:
         self.snap_enabled = bool(enabled)
 
+    @property
+    def is_interacting(self) -> bool:
+        return self._starting_interaction or self._interaction_kind is not None
+
+    def _begin_interaction(self, kind: str) -> bool:
+        # Let the editor validate/commit a table draft before taking the timing
+        # snapshot. It may call cancel_interaction() to veto invalid input.
+        self._starting_interaction = True
+        self._cancelled_start = False
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.interactionStarted.emit(kind)
+        self._starting_interaction = False
+        if self._cancelled_start:
+            self.interactionFinished.emit()
+            return False
+        self._interaction_kind = kind
+        self._gesture_scale = self.pixels_per_second
+        self._snap_position = self._position
+        self._last_seek = None
+        return True
+
+    def _finish_interaction(self) -> None:
+        active = self._interaction_kind is not None
+        self._interaction_kind = None
+        self._scrubbing = False
+        if active:
+            self.interactionFinished.emit()
+
+    def cancel_interaction(self) -> None:
+        if self._starting_interaction:
+            self._cancelled_start = True
+            return
+        self._cancel_edit()
+        self._finish_interaction()
+        self.update()
+
+    def _cancel_edit(self) -> None:
+        """Restore provisional edits, without committing or emitting a change."""
+
+    def _seek_to(self, x: float) -> None:
+        value = self.x_to_time(x)
+        self._position = value
+        if value != self._last_seek:
+            self._last_seek = value
+            self.seekRequested.emit(value)
+        self.update()
+
+    def _snap(self, value: float, candidates: list[float], original: float) -> float:
+        if not self.snap_enabled:
+            return value
+        # A six-pixel magnet must not become several seconds at song overview
+        # scale. Exclude the starting boundary so a tiny drag can create a gap.
+        candidates = [target for target in candidates if abs(target - original) > 0.0005]
+        if not candidates:
+            return value
+        nearest = min(candidates, key=lambda candidate: abs(candidate - value))
+        if abs(nearest - value) <= min(0.08, 6 / self._gesture_scale):
+            return nearest
+        return value
+
     def reveal_position(self, seconds: float | None = None, *, center: bool = False) -> None:
         """Reveal the playhead without seeking, changing selection or zooming."""
-        if getattr(self, "_drag", None):
+        if self.is_interacting:
             return
         value = self._position if seconds is None else _finite(seconds, self._position)
         value = _clamp(value, self._start, self._start + self._duration)
@@ -119,6 +191,8 @@ class _ScrollableTimeline(QWidget):
             self._scroll.setValue(round(self._scroll.value() + x - self.width() / 2))
 
     def _zoom_at(self, zoom: float, x: float) -> None:
+        if self.is_interacting:
+            return
         anchor = self.x_to_time(x)
         self._zoom = _clamp(zoom, 1.0, 64.0)
         self._update_scroll()
@@ -139,6 +213,9 @@ class _ScrollableTimeline(QWidget):
         super().resizeEvent(event)
 
     def wheelEvent(self, event: Any) -> None:
+        if self.is_interacting:
+            event.accept()
+            return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             steps = event.angleDelta().y() / 120
             self._zoom_at(self._zoom * (1.25**steps), event.position().x())
@@ -148,6 +225,32 @@ class _ScrollableTimeline(QWidget):
                 delta = (event.angleDelta().x() or event.angleDelta().y()) / 3
             self._scroll.setValue(self._scroll.value() - round(delta))
         event.accept()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.is_interacting:
+            self.cancel_interaction()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def hideEvent(self, event: Any) -> None:
+        self.cancel_interaction()
+        super().hideEvent(event)
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if self.is_interacting:
+            kind = event.type()
+            interrupted = (
+                kind == QEvent.Type.ApplicationDeactivate
+                or kind == QEvent.Type.ApplicationStateChange
+                and QApplication.applicationState() != Qt.ApplicationState.ApplicationActive
+                or kind == QEvent.Type.WindowDeactivate and watched is self.window()
+                or kind in (QEvent.Type.FocusOut, QEvent.Type.UngrabMouse) and watched is self
+                or kind == QEvent.Type.EnabledChange and watched is self and not self.isEnabled()
+            )
+            if interrupted:
+                self.cancel_interaction()
+        return super().eventFilter(watched, event)
 
     def _paint_base(self, painter: QPainter) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -204,6 +307,8 @@ class TimelineWidget(_ScrollableTimeline):
         self._drag_origin_x = 0.0
 
     def set_document(self, doc: LyricsDocument, selected: int = 0) -> None:
+        if self._interaction_kind is not None:
+            return
         self._document = doc
         self._selected = max(0, min(int(selected), len(doc.lines) - 1))
         timed = [
@@ -284,6 +389,10 @@ class TimelineWidget(_ScrollableTimeline):
             super().mousePressEvent(event)
             return
         hit = self._hit(event.position())
+        if not self._begin_interaction("edit" if hit and hit[1] else "seek"):
+            event.accept()
+            return
+        hit = self._hit(event.position())
         if hit:
             index, edge = hit
             self._selected = index
@@ -294,9 +403,11 @@ class TimelineWidget(_ScrollableTimeline):
                 self._drag_origin_x = event.position().x()
             self.lineSelected.emit(index)
             if edge is None:
-                self.seekRequested.emit(self.x_to_time(event.position().x()))
+                self._scrubbing = True
+                self._seek_to(event.position().x())
         else:
-            self.seekRequested.emit(self.x_to_time(event.position().x()))
+            self._scrubbing = True
+            self._seek_to(event.position().x())
         self.update()
         event.accept()
 
@@ -309,28 +420,30 @@ class TimelineWidget(_ScrollableTimeline):
             self._drag = (index, edge, self._drag_original)
             self.update()
             return
-        value = self._drag_original + (x - self._drag_origin_x) / self.pixels_per_second
-        if self.snap_enabled:
-            candidates = [self._position]
-            candidates += [
-                max(0.0, _finite(getattr(other, boundary)))
-                for i, other in enumerate(self._document.lines)
-                if i != index and other.is_timed and not other.hidden
-                for boundary in ("start", "end")
-            ]
-            nearest = min(candidates, key=lambda candidate: abs(candidate - value))
-            if abs(nearest - value) * self.pixels_per_second <= 7:
-                value = nearest
+        value = self._drag_original + (x - self._drag_origin_x) / self._gesture_scale
+        candidates = [self._snap_position] + [
+            max(0.0, _finite(getattr(other, boundary)))
+            for i, other in enumerate(self._document.lines)
+            if i != index and other.is_timed and not other.hidden
+            for boundary in ("start", "end")
+        ]
+        value = self._snap(value, candidates, self._drag_original)
         if edge == "start":
-            value = _clamp(value, 0.0, _finite(line.end) - MIN_TOKEN)
+            low, high = 0.0, _finite(line.end) - MIN_TOKEN
         else:
-            value = _clamp(value, _finite(line.start) + MIN_TOKEN, self._duration)
-        self._drag = (index, edge, round(value, 3))
+            low, high = _finite(line.start) + MIN_TOKEN, self._duration
+        self._drag = (index, edge, _clamp(round(value, 3), low, high))
         self.update()
 
     def mouseMoveEvent(self, event: Any) -> None:
+        if self.is_interacting and not event.buttons() & Qt.MouseButton.LeftButton:
+            self.cancel_interaction()
+            event.accept()
+            return
         if self._drag:
             self._drag_to(event.position().x())
+        elif self._scrubbing:
+            self._seek_to(event.position().x())
         else:
             hit = self._hit(event.position())
             self.setCursor(
@@ -345,21 +458,22 @@ class TimelineWidget(_ScrollableTimeline):
             self._drag_to(event.position().x())
             index, edge, value = self._drag
             self._drag = None
+            self._finish_interaction()
             if abs(value - self._drag_original) >= 0.0005:
                 self.boundaryChanged.emit(index, edge, value)
             self.update()
+        elif event.button() == Qt.MouseButton.LeftButton and self._scrubbing:
+            self._seek_to(event.position().x())
+            self._finish_interaction()
         event.accept()
 
-    def keyPressEvent(self, event: Any) -> None:
-        if event.key() == Qt.Key.Key_Escape and self._drag:
-            self._drag = None
-            self.update()
-        else:
-            super().keyPressEvent(event)
+    def _cancel_edit(self) -> None:
+        self._drag = None
 
 
 class TokenTimelineWidget(_ScrollableTimeline):
     timingChanged = Signal(list)
+    tokenSelected = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -368,10 +482,28 @@ class TokenTimelineWidget(_ScrollableTimeline):
         self._drag: tuple[int, str] | None = None
         self._before_drag: list[dict[str, Any]] = []
         self._drag_origin_x = 0.0
+        self._selected = 0
+        self.linked_boundaries = False
         self.setMinimumHeight(150)
         self.setAccessibleName("逐词时间轴")
+        self.setToolTip(
+            "点击词块选词；拖动左右边缘独立调整；拖动词块移动整词；"
+            "拖动刻度或空白处定位；Ctrl + 滚轮放大密集词；Esc 取消拖动"
+        )
+
+    def set_selected_token(self, index: int) -> None:
+        self._selected = max(0, min(int(index), len(self._tokens) - 1))
+        self.update()
+
+    def set_linked_boundaries(self, enabled: bool) -> None:
+        """Explicitly opt in to moving the two sides of an existing join."""
+        self.linked_boundaries = bool(enabled)
 
     def set_line(self, line: LyricLine | None) -> None:
+        if self._interaction_kind is not None:
+            return
+        if line is not self._line:
+            self._selected = 0
         self._line = line
         self._drag = None
         self._tokens = (
@@ -388,6 +520,7 @@ class TokenTimelineWidget(_ScrollableTimeline):
             else 5.0
         )
         self._duration = max(0.1, self._end - self._start)
+        self.set_selected_token(self._selected)
         self._update_scroll()
         self.update()
 
@@ -406,8 +539,9 @@ class TokenTimelineWidget(_ScrollableTimeline):
             if not rect.intersects(QRectF(self.rect())):
                 continue
             active = token["start"] <= self._position < token["end"]
+            selected = index == self._selected
             painter.setBrush(QColor("#126c77" if active else "#325b77"))
-            painter.setPen(QPen(QColor("#edac43" if active else "#7796ad"), 2 if active else 1))
+            painter.setPen(QPen(QColor("#edac43" if selected else "#7796ad"), 2 if selected else 1))
             painter.drawRoundedRect(rect.adjusted(1, 0, -1, 0), 5, 5)
             painter.save()
             painter.setClipRect(rect.adjusted(4, 3, -4, -3))
@@ -422,6 +556,10 @@ class TokenTimelineWidget(_ScrollableTimeline):
                 f"{token['start']:.2f}–{token['end']:.2f}",
             )
             painter.restore()
+            if selected:
+                painter.setPen(QPen(QColor("#ffe1a4"), 2))
+                for x in (rect.left() + 3, rect.right() - 3):
+                    painter.drawLine(QPointF(x, rect.top() + 16), QPointF(x, rect.bottom() - 16))
         self._paint_playhead(painter)
         painter.end()
 
@@ -431,42 +569,80 @@ class TokenTimelineWidget(_ScrollableTimeline):
             rect = self.token_rect(index)
             if not rect.top() <= point.y() <= rect.bottom():
                 continue
-            for edge, x in (("start", rect.left()), ("end", rect.right())):
-                if abs(x - point.x()) <= 7:
-                    candidates.append((abs(x - point.x()), index, edge))
+            # Leave a selectable/movable centre even for dense, narrow words.
+            width = self.time_to_x(self._tokens[index]["end"]) - rect.left()
+            tolerance = min(7.0, max(0.5, width / 4))
+            for edge in ("start", "end"):
+                x = self.time_to_x(self._tokens[index][edge])
+                if abs(x - point.x()) <= tolerance:
+                    candidates.append((abs(x - point.x()), index != self._selected, index, edge))
         if candidates:
-            _, index, edge = min(candidates)
+            _, _, index, edge = min(candidates)
             return index, edge
+        return None
+
+    def _body_at(self, point: QPointF) -> int | None:
+        candidates = [index for index in range(len(self._tokens)) if self.token_rect(index).contains(point)]
+        if candidates:
+            return min(candidates, key=lambda index: abs(self.token_rect(index).center().x() - point.x()))
         return None
 
     def mousePressEvent(self, event: Any) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
-        self._drag = self._edge_at(event.position())
-        if self._drag:
+        edge = self._edge_at(event.position())
+        body = self._body_at(event.position())
+        if not self._begin_interaction("edit" if edge or body is not None else "seek"):
+            event.accept()
+            return
+        edge = self._edge_at(event.position())
+        body = self._body_at(event.position())
+        self._drag = edge if edge else (body, "move") if body is not None else None
+        if self._drag is not None:
             self._before_drag = [dict(token) for token in self._tokens]
             self._drag_origin_x = event.position().x()
+            self._selected = self._drag[0]
+            self.tokenSelected.emit(self._selected)
         else:
-            self.seekRequested.emit(self.x_to_time(event.position().x()))
+            self._scrubbing = True
+            self._seek_to(event.position().x())
+        self.update()
         event.accept()
 
     def _drag_to(self, x: float) -> None:
         if not self._drag:
             return
         index, edge = self._drag
-        if abs(x - self._drag_origin_x) < 0.5:
+        if abs(x - self._drag_origin_x) < (3 if edge == "move" else 0.5):
             self._tokens = [dict(token) for token in self._before_drag]
             self.update()
             return
+        self._apply_delta(index, edge, (x - self._drag_origin_x) / self._gesture_scale)
+
+    def _apply_delta(self, index: int, edge: str, delta: float, *, snap: bool = True) -> None:
+        # Always evaluate against the press snapshot, so moving back after a
+        # clamp or linked edit does not inherit the previous mouse event's data.
+        self._tokens = [dict(token) for token in self._before_drag]
         token = self._tokens[index]
-        value = self._before_drag[index][edge] + (x - self._drag_origin_x) / self.pixels_per_second
+        original = token["start"] if edge == "move" else token[edge]
+        value = original + delta
+        if edge == "move":
+            duration = token["end"] - token["start"]
+            low = self._tokens[index - 1]["end"] if index else self._start
+            high = (self._tokens[index + 1]["start"] if index + 1 < len(self._tokens) else self._end) - duration
+            if snap:
+                value = self._snap(value, [low, high, self._snap_position, self._snap_position - duration], original)
+            token["start"] = _clamp(round(value, 3), low, high)
+            token["end"] = token["start"] + duration
+            self.update()
+            return
         neighbor: tuple[int, str] | None = None
         if edge == "start":
             low = self._tokens[index - 1]["end"] if index else self._start
             high = token["end"] - MIN_TOKEN
             if (
-                index
+                self.linked_boundaries and index
                 and abs(self._before_drag[index - 1]["end"] - self._before_drag[index]["start"])
                 < 0.001
             ):
@@ -476,29 +652,50 @@ class TokenTimelineWidget(_ScrollableTimeline):
             low = token["start"] + MIN_TOKEN
             high = self._tokens[index + 1]["start"] if index + 1 < len(self._tokens) else self._end
             if (
-                index + 1 < len(self._tokens)
+                self.linked_boundaries and index + 1 < len(self._tokens)
                 and abs(self._before_drag[index]["end"] - self._before_drag[index + 1]["start"])
                 < 0.001
             ):
                 neighbor = (index + 1, "start")
                 high = self._tokens[index + 1]["end"] - MIN_TOKEN
-        if self.snap_enabled:
-            for candidate in (low, high, self._position):
-                if abs(candidate - value) * self.pixels_per_second <= 6:
-                    value = candidate
-                    break
-        token[edge] = round(_clamp(value, low, high), 3)
+        if snap:
+            value = self._snap(value, [low, high, self._snap_position], original)
+        token[edge] = _clamp(round(value, 3), low, high)
         if neighbor:
             self._tokens[neighbor[0]][neighbor[1]] = token[edge]
         self.update()
 
+    def adjust_selected(self, edge: str, delta: float) -> None:
+        """Apply one precise button/keyboard nudge with the same drag constraints."""
+        if edge not in {"start", "end", "move"}:
+            raise ValueError("时间边缘必须为 start、end 或 move")
+        if self.is_interacting or not self._tokens or not self._begin_interaction("edit"):
+            return
+        if not self._tokens:
+            self._finish_interaction()
+            return
+        self._before_drag = [dict(token) for token in self._tokens]
+        self._apply_delta(self._selected, edge, _finite(delta), snap=False)
+        result = [dict(token) for token in self._tokens]
+        changed = result != self._before_drag
+        self._finish_interaction()
+        if changed:
+            self.timingChanged.emit(result)
+
     def mouseMoveEvent(self, event: Any) -> None:
+        if self.is_interacting and not event.buttons() & Qt.MouseButton.LeftButton:
+            self.cancel_interaction()
+            event.accept()
+            return
         if self._drag:
             self._drag_to(event.position().x())
+        elif self._scrubbing:
+            self._seek_to(event.position().x())
         else:
             self.setCursor(
                 Qt.CursorShape.SizeHorCursor
                 if self._edge_at(event.position())
+                else Qt.CursorShape.OpenHandCursor if self._body_at(event.position()) is not None
                 else Qt.CursorShape.PointingHandCursor
             )
         event.accept()
@@ -506,19 +703,26 @@ class TokenTimelineWidget(_ScrollableTimeline):
     def mouseReleaseEvent(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._drag:
             self._drag_to(event.position().x())
+            edge = self._drag[1]
             self._drag = None
-            if self._tokens != self._before_drag:
-                self.timingChanged.emit([dict(token) for token in self._tokens])
+            result = [dict(token) for token in self._tokens]
+            changed = result != self._before_drag
+            click = edge == "move" and abs(event.position().x() - self._drag_origin_x) < 3
+            if click:
+                self._seek_to(event.position().x())
+            self._finish_interaction()
+            if changed:
+                self.timingChanged.emit(result)
             self.update()
+        elif event.button() == Qt.MouseButton.LeftButton and self._scrubbing:
+            self._seek_to(event.position().x())
+            self._finish_interaction()
         event.accept()
 
-    def keyPressEvent(self, event: Any) -> None:
-        if event.key() == Qt.Key.Key_Escape and self._drag:
-            self._tokens = self._before_drag
+    def _cancel_edit(self) -> None:
+        if self._drag:
+            self._tokens = [dict(token) for token in self._before_drag]
             self._drag = None
-            self.update()
-        else:
-            super().keyPressEvent(event)
 
 
 class LyricPreviewWidget(QWidget):

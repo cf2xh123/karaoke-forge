@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from urllib.parse import unquote, urlsplit
 from urllib.request import Request, urlopen
 
+from . import __version__
 from .models import LyricLine, LyricsDocument, PronunciationSpan
 
 
@@ -490,7 +491,7 @@ def fetch_public_utaten_info(value: str, *, timeout: float = 20.0) -> UtaTenLyri
         headers={
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "ja,en;q=0.8",
-            "User-Agent": "Mozilla/5.0 Karaoke-Forge/1.0.0",
+            "User-Agent": f"Mozilla/5.0 Karaoke-Forge/{__version__}",
         },
         method="GET",
     )

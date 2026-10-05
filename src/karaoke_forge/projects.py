@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .models import LyricsDocument
 
 PROJECT_FILENAME = "karaoke-forge-project.json"
@@ -161,6 +162,34 @@ def persist_project_asset(
     return target.resolve()
 
 
+def validate_project_assets(
+    *,
+    audio: str | Path | None = None,
+    video: str | Path | None = None,
+    cover: str | Path | None = None,
+    font_files: tuple[str | Path, ...] = (),
+) -> None:
+    """Reject missing explicit selections before an existing project is overwritten."""
+    assets = [("音频", audio), ("MV", video), ("封面", cover)]
+    assets.extend((f"字体 {index}", path) for index, path in enumerate(font_files, 1))
+    for label, source in assets:
+        if source and not Path(source).is_file():
+            raise FileNotFoundError(f"所选{label}文件不存在，请重新选择或清空该素材后保存：{source}")
+
+
+def safe_lyrics_export_stem(directory: str | Path, stem: str) -> str:
+    """Keep lyric JSON separate from the manifest, without replacing a fallback file."""
+    if f"{stem}.json".casefold() != PROJECT_FILENAME.casefold():
+        return stem
+    root = Path(directory)
+    candidate = f"{stem}-lyrics"
+    number = 2
+    while any(root.glob(f"{candidate}.*")):
+        candidate = f"{stem}-lyrics-{number}"
+        number += 1
+    return candidate
+
+
 def save_workspace_project(
     project_dir: str | Path,
     *,
@@ -174,6 +203,9 @@ def save_workspace_project(
     recent_root: str | Path | None = None,
 ) -> WorkspaceProject:
     root = Path(project_dir).resolve()
+    validate_project_assets(audio=audio, video=video, cover=cover, font_files=font_files)
+    if Path(lyrics_project).resolve() == root / PROJECT_FILENAME:
+        raise ValueError("歌词文件与工程索引重名，请使用独立的歌词 JSON 文件名。")
     root.mkdir(parents=True, exist_ok=True)
     lyrics = persist_project_asset(lyrics_project, root, "lyrics")
     if lyrics is None:
@@ -189,7 +221,7 @@ def save_workspace_project(
     manifest = root / PROJECT_FILENAME
     data = {
         "schema_version": 1,
-        "app_version": "1.0.0",
+        "app_version": __version__,
         "name": name,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "lyrics_project": _relative_or_absolute(lyrics, root),

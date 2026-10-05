@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -475,10 +476,11 @@ def transcribe_with_faster_whisper(
         for segment in segments:
             if progress:
                 progress(f"正在识别 {segment.start:7.2f}s - {segment.end:7.2f}s")
+            segment_words: list[RecognizedWord] = []
             for word in segment.words or []:
                 if word.start is None or word.end is None:
                     continue
-                words.append(
+                segment_words.append(
                     RecognizedWord(
                         text=word.word,
                         start=float(word.start),
@@ -488,6 +490,7 @@ def transcribe_with_faster_whisper(
                         ),
                     )
                 )
+            words.extend(_merge_latin_subwords(segment_words, getattr(segment, "text", "")))
     except Exception as exc:
         raise TranscriptionError(f"Whisper 转写失败：{exc}") from exc
 
@@ -498,6 +501,58 @@ def transcribe_with_faster_whisper(
         detected_language=getattr(info, "language", None),
         language_probability=getattr(info, "language_probability", None),
     )
+
+
+def _merge_latin_subwords(
+    words: list[RecognizedWord], reference_text: str,
+) -> list[RecognizedWord]:
+    """Join Latin BPE fragments only across a proven in-word text boundary.
+
+    Japanese Whisper tokenization splits on Unicode boundaries rather than
+    spaces, so an English word may arrive as ``d`` + ``reaming``. The complete
+    segment/token text establishes the boundary: two independently supplied
+    words without leading spaces must remain separate when that text has a gap.
+    Japanese characters, punctuation-separated words, and segments never merge.
+    """
+    if len(words) < 2 or not reference_text:
+        return words
+    runs = list(re.finditer(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*", reference_text))
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for word in words:
+        start = reference_text.find(word.text, cursor)
+        if start < 0 or not word.text:
+            # An altered/incomplete transcript cannot prove a subword boundary.
+            return words
+        cursor = start + len(word.text)
+        spans.append((start, cursor))
+
+    merged = [words[0]]
+    merged_spans = [spans[0]]
+    for word, (start, end) in zip(words[1:], spans[1:]):
+        previous_start, previous_end = merged_spans[-1]
+        run = next((run for run in runs if run.start() < start < run.end()), None)
+        same_word = (
+            previous_end == start
+            and run is not None
+            and not any(char.isalnum() for char in reference_text[previous_start:run.start()])
+            and not any(char.isalnum() for char in reference_text[run.end():end])
+        )
+        previous = merged[-1]
+        if same_word and word.end >= previous.end and word.start >= previous.start:
+            confidence = (
+                min(previous.confidence, word.confidence)
+                if previous.confidence is not None and word.confidence is not None
+                else None
+            )
+            merged[-1] = RecognizedWord(
+                previous.text + word.text, previous.start, word.end, confidence,
+            )
+            merged_spans[-1] = (previous_start, end)
+        else:
+            merged.append(word)
+            merged_spans.append((start, end))
+    return merged
 
 
 def force_align_lyrics_with_faster_whisper(
@@ -744,6 +799,14 @@ def _native_alignment_words(
                     ),
                 }
             )
-        return converted
+        merged = _merge_latin_subwords(
+            [RecognizedWord(
+                str(word["word"]), float(word["start"]), float(word["end"]),
+                float(word["probability"]),
+            ) for word in converted],
+            "".join(str(word["word"]) for word in converted),
+        )
+        return [{"word": word.text, "start": word.start, "end": word.end,
+                 "probability": word.confidence} for word in merged]
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         raise ValueError(f"无法解析 CTranslate2 逐词对齐结果：{exc}") from exc

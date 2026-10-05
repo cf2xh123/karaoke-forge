@@ -11,8 +11,8 @@ import pytest
 pytest.importorskip("PySide6")
 pytest.importorskip("karaoke_forge.desktop")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QImage, QRawFont, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QFont, QFontDatabase, QImage, QMouseEvent, QRawFont, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -187,6 +187,7 @@ def test_shared_token_boundary_moves_both_tokens_without_overlap(app):
     line = LyricLine("ab", 0, 4, [KaraokeToken("a", 0, 2), KaraokeToken("b", 2, 4)])
     widget = show(TokenTimelineWidget(), app)
     widget.set_line(line)
+    widget.set_linked_boundaries(True)
     changes = []
     widget.timingChanged.connect(changes.append)
     initial = widget.token_rect(0).topRight().toPoint() + QPoint(0, 20)
@@ -197,6 +198,300 @@ def test_shared_token_boundary_moves_both_tokens_without_overlap(app):
     assert changes[0][0]["end"] == pytest.approx(3, abs=0.01)
     assert changes[0][0]["end"] == changes[0][1]["start"]
     assert changes[0][1]["end"] == 4
+    widget.close()
+
+
+def test_touching_tokens_can_be_shortened_independently_to_create_a_pause(app):
+    line = LyricLine("ab", 0, 4, [KaraokeToken("a", 0, 2), KaraokeToken("b", 2, 4)])
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(line)
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    initial = widget.token_rect(0).topRight().toPoint() + QPoint(0, 20)
+    target = QPoint(round(widget.time_to_x(1.5)), initial.y())
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=target)
+    assert changes[0][0]["end"] == pytest.approx(1.5, abs=0.01)
+    assert changes[0][1]["start"] == 2
+    assert line.tokens[0].end == 2
+    widget.close()
+
+
+@pytest.mark.parametrize("widget_type", [TimelineWidget, TokenTimelineWidget])
+def test_ruler_drag_seeks_continuously_and_never_edits(app, document, widget_type):
+    widget = show(widget_type(), app)
+    if isinstance(widget, TimelineWidget):
+        widget.set_document(document)
+    else:
+        widget.set_line(document.lines[0])
+    seeks = []
+    widget.seekRequested.connect(seeks.append)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=QPoint(150, 15))
+    QTest.mouseMove(widget, QPoint(220, 15))
+    QTest.mouseMove(widget, QPoint(280, 15))
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(320, 15))
+    assert len(seeks) >= 4
+    assert seeks == sorted(seeks)
+    assert seeks[-1] == pytest.approx(widget.x_to_time(320))
+    widget.close()
+
+
+def test_selecting_next_word_exposes_its_own_start_at_a_shared_boundary(app):
+    line = LyricLine("ab", 0, 4, [KaraokeToken("a", 0, 2), KaraokeToken("b", 2, 4)])
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(line)
+    changes, selections = [], []
+    widget.timingChanged.connect(changes.append)
+    widget.tokenSelected.connect(selections.append)
+    QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=widget.token_rect(1).center().toPoint())
+    assert selections == [1]
+    assert changes == []
+    initial = QPoint(round(widget.time_to_x(2)), 60)
+    target = QPoint(round(widget.time_to_x(2.5)), 60)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    assert widget._drag == (1, "start")
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=target)
+    assert len(changes) == 1
+    assert changes[0][0] == {"text": "a", "start": 0, "end": 2}
+    assert changes[0][1]["start"] == pytest.approx(2.5, abs=0.01)
+    widget.close()
+
+
+def test_dense_word_centre_selects_and_zoom_keeps_both_handles_reachable(app):
+    line = LyricLine("ab", 0, 10, [KaraokeToken("a", 1, 1.1), KaraokeToken("b", 1.1, 1.2)])
+    widget = show(TokenTimelineWidget(), app, width=320)
+    widget.set_line(line)
+    selections = []
+    widget.tokenSelected.connect(selections.append)
+    QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=widget.token_rect(1).center().toPoint())
+    assert selections == [1]
+    widget.set_zoom(16)
+    widget.reveal_position(1.15, center=True)
+    for edge in ("start", "end"):
+        assert widget._edge_at(QPointF(widget.time_to_x(getattr(line.tokens[1], edge)), 60)) == (1, edge)
+    widget.close()
+
+
+def test_dragging_word_body_preserves_duration_and_clamps_at_neighbors(app):
+    line = LyricLine("abc", 0, 6, [
+        KaraokeToken("a", 0, 1), KaraokeToken("b", 2, 3), KaraokeToken("c", 5, 6),
+    ])
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(line)
+    widget.set_snap_enabled(False)
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    initial = widget.token_rect(1).center().toPoint()
+    target = initial + QPoint(round(3 * widget.pixels_per_second), 0)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseMove(widget, target)
+    assert not changes
+    assert line.tokens[1].start == 2
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=target)
+    assert len(changes) == 1
+    assert changes[0][1] == {"text": "b", "start": 4, "end": 5}
+    assert changes[0][0]["end"] == 1 and changes[0][2]["start"] == 5
+    widget.close()
+
+
+def test_nudge_shares_independent_and_linked_constraints_without_mouse_rounding(app):
+    widget = show(TokenTimelineWidget(), app)
+    line = LyricLine("ab", 0, 4, [KaraokeToken("a", 0, 2), KaraokeToken("b", 2, 4)])
+    widget.set_line(line)
+    widget.set_selected_token(1)
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    widget.adjust_selected("start", 0.005)
+    assert changes[-1][1]["start"] == 2.005
+    assert changes[-1][0]["end"] == 2
+    widget.set_line(line)
+    widget.set_linked_boundaries(True)
+    widget.adjust_selected("start", 0.1)
+    assert changes[-1][0]["end"] == changes[-1][1]["start"] == 2.1
+    widget.set_line(line)
+    widget.set_linked_boundaries(False)
+    before = len(changes)
+    widget.adjust_selected("move", -1)
+    assert len(changes) == before
+    widget.adjust_selected("start", 20)
+    assert changes[-1][1]["end"] - changes[-1][1]["start"] == pytest.approx(0.01)
+    assert changes[-1][0]["end"] == 2
+    widget.close()
+
+
+@pytest.mark.parametrize("widget_type", [TimelineWidget, TokenTimelineWidget])
+def test_gesture_prevents_playback_follow_and_data_replacement_until_release(app, document, widget_type):
+    widget = show(widget_type(), app, width=400)
+    if isinstance(widget, TimelineWidget):
+        widget.set_document(document)
+        rect = widget.line_rect(0)
+        replace = lambda: widget.set_document(LyricsDocument([LyricLine("other", 20, 30)]))
+    else:
+        widget.set_line(document.lines[0])
+        rect = widget.token_rect(0)
+        replace = lambda: widget.set_line(document.lines[1])
+    initial = rect.topRight().toPoint() + QPoint(0, 20)
+    events = []
+    widget.interactionStarted.connect(events.append)
+    widget.interactionFinished.connect(lambda: events.append("finished"))
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    assert widget.is_interacting
+    original_duration = widget._duration
+    replace()
+    widget.set_zoom(16)
+    widget.reveal_position(30, center=True)
+    assert widget._duration == original_duration
+    assert widget._zoom == 1
+    assert widget._scroll.value() == 0
+    QTest.keyClick(widget, Qt.Key.Key_Escape)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=initial + QPoint(40, 0))
+    assert not widget.is_interacting
+    assert events == ["edit", "finished"]
+    replace()
+    assert widget._duration != original_duration
+    widget.close()
+
+
+def test_start_callback_can_commit_new_data_or_cancel_invalid_draft(app):
+    widget = show(TokenTimelineWidget(), app)
+    original = LyricLine("a", 0, 5, [KaraokeToken("a", 1, 3)])
+    committed = LyricLine("a", 0, 5, [KaraokeToken("a", 1, 4)])
+    widget.set_line(original)
+    changes = []
+    widget.timingChanged.connect(changes.append)
+
+    def commit(_kind):
+        assert widget.is_interacting
+        widget.set_line(committed)
+
+    widget.interactionStarted.connect(commit)
+    widget.adjust_selected("end", 0.1)
+    assert changes[-1][0]["end"] == 4.1
+    widget.interactionStarted.disconnect(commit)
+    widget.interactionStarted.connect(lambda _: widget.cancel_interaction())
+    widget.adjust_selected("end", 0.1)
+    assert len(changes) == 1
+    assert not widget.is_interacting
+    widget.close()
+
+
+def test_snap_does_not_jump_seconds_at_overview_scale_or_chase_a_moving_playhead(app):
+    widget = show(TimelineWidget(), app, width=700)
+    widget.set_document(LyricsDocument([LyricLine("a", 0, 100), LyricLine("b", 102, 600)]))
+    changes = []
+    widget.boundaryChanged.connect(lambda *args: changes.append(args))
+    initial = QPoint(round(widget.time_to_x(100)), 60)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=initial + QPoint(1, 0))
+    # At this scale one pixel is ~0.9s; the nearby 102s boundary is not a magnet.
+    assert changes[-1][2] == pytest.approx(100 + 1 / widget.pixels_per_second, abs=0.001)
+    widget.close()
+
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(LyricLine("a", 0, 4, [KaraokeToken("a", 1, 2)]))
+    widget.set_position(0)
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    initial = QPoint(round(widget.time_to_x(2)), 60)
+    target = initial + QPoint(20, 0)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    widget.set_position(2 + 20 / widget.pixels_per_second + 0.02)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=target)
+    assert changes[-1][0]["end"] == pytest.approx(2 + 20 / widget.pixels_per_second, abs=0.001)
+    widget.close()
+
+
+def test_nearest_snap_target_wins_and_original_join_does_not_trap_small_gap(app):
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(LyricLine("ab", 0, 40, [KaraokeToken("a", 1, 1.12), KaraokeToken("b", 1.18, 2)]))
+    widget.set_position(1.16)
+    widget._begin_interaction("edit")
+    widget._before_drag = [dict(token) for token in widget._tokens]
+    widget._apply_delta(0, "end", 0.03)
+    assert widget._tokens[0]["end"] == 1.16
+    widget.cancel_interaction()
+    widget.set_line(LyricLine("ab", 0, 4, [KaraokeToken("a", 0, 2), KaraokeToken("b", 2, 4)]))
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    initial = QPoint(round(widget.time_to_x(2)), 60)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=initial - QPoint(1, 0))
+    assert changes[-1][0]["end"] < 2
+    assert changes[-1][1]["start"] == 2
+    widget.close()
+
+
+def test_line_edge_minimum_duration_survives_submillisecond_source_times(app):
+    widget = show(TimelineWidget(), app)
+    widget.set_document(LyricsDocument([LyricLine("a", 1.0005, 3)]))
+    changes = []
+    widget.boundaryChanged.connect(lambda *args: changes.append(args))
+    initial = QPoint(round(widget.time_to_x(3)), 60)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(0, 60))
+    assert changes[-1][2] - 1.0005 == pytest.approx(0.01)
+    widget.close()
+
+
+def test_nudge_start_callback_may_remove_all_tokens_without_crashing(app):
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(LyricLine("a", 0, 3, [KaraokeToken("a", 1, 2)]))
+    widget.interactionStarted.connect(lambda _: widget.set_line(LyricLine("a", 0, 3)))
+    changes = []
+    widget.timingChanged.connect(changes.append)
+    widget.adjust_selected("end", 0.1)
+    assert changes == []
+    assert not widget.is_interacting
+    widget.close()
+
+
+@pytest.mark.parametrize("widget_type", [TimelineWidget, TokenTimelineWidget])
+@pytest.mark.parametrize("interruption", [
+    QEvent.Type.WindowDeactivate, QEvent.Type.UngrabMouse, QEvent.Type.FocusOut,
+    QEvent.Type.ApplicationDeactivate,
+])
+def test_focus_or_capture_loss_cancels_provisional_drag_once(app, document, widget_type, interruption):
+    widget = show(widget_type(), app)
+    changes, finished = [], []
+    if isinstance(widget, TimelineWidget):
+        widget.set_document(document)
+        rect = lambda: widget.line_rect(0)
+        widget.boundaryChanged.connect(lambda *args: changes.append(args))
+    else:
+        widget.set_line(document.lines[0])
+        rect = lambda: widget.token_rect(0)
+        widget.timingChanged.connect(changes.append)
+    widget.interactionFinished.connect(lambda: finished.append(True))
+    original = rect().right()
+    initial = rect().topRight().toPoint() + QPoint(0, 20)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseMove(widget, initial - QPoint(35, 0))
+    assert rect().right() < original
+    receiver = app if interruption == QEvent.Type.ApplicationDeactivate else widget
+    app.sendEvent(receiver, QEvent(interruption))
+    assert not widget.is_interacting
+    assert rect().right() == original
+    QTest.mouseMove(widget, initial - QPoint(80, 0))
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=initial - QPoint(80, 0))
+    assert changes == [] and finished == [True]
+    widget.close()
+
+
+def test_hover_after_a_missed_mouse_release_cancels_instead_of_editing(app, document):
+    widget = show(TokenTimelineWidget(), app)
+    widget.set_line(document.lines[0])
+    original = widget.token_rect(0).right()
+    initial = widget.token_rect(0).topRight().toPoint() + QPoint(0, 20)
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=initial)
+    QTest.mouseMove(widget, initial + QPoint(30, 0))
+    point = QPointF(initial + QPoint(50, 0))
+    event = QMouseEvent(
+        QEvent.Type.MouseMove, point, widget.mapToGlobal(point.toPoint()),
+        Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+    )
+    app.sendEvent(widget, event)
+    assert not widget.is_interacting
+    assert widget.token_rect(0).right() == original
     widget.close()
 
 

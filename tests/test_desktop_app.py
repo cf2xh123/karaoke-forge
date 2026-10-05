@@ -12,8 +12,9 @@ pytest.importorskip("PySide6")
 import karaoke_forge.desktop  # noqa: F401 - prepare Windows ICU before Qt
 
 # isort: split
-from PySide6.QtCore import QEventLoop, QThread, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QEventLoop, Qt, QThread, QTimer
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from karaoke_forge.cli import build_parser
 from karaoke_forge.desktop.app import MainWindow
@@ -201,3 +202,79 @@ def test_close_keeps_running_worker_alive_until_it_finishes(qt_app, monkeypatch,
     assert completed == [True]
     assert not window.runner.is_busy
     assert window.close() is True
+
+
+def test_playback_space_works_from_project_navigation_but_stays_on_active_page(
+    qt_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    window = MainWindow()
+    document = LyricsDocument([LyricLine("song", 0, 1)])
+    lyrics = tmp_path / "song.json"
+    lyrics.write_text(write_json(document), encoding="utf-8")
+    window.workspace.load_project(document, None, str(lyrics))
+    calls = []
+    monkeypatch.setattr(window.editor, "toggle_playback", lambda: calls.append("editor"))
+    window.show()
+    window.activateWindow()
+    window.navigation.setFocus()
+    qt_app.processEvents()
+    QTest.keyClick(window.navigation, Qt.Key.Key_Space)
+    assert calls == ["editor"]
+    window.navigation.setCurrentRow(1)
+    window.navigation.setFocus()
+    qt_app.processEvents()
+    QTest.keyClick(window.navigation, Qt.Key.Key_Space)
+    assert calls == ["editor"]
+    monkeypatch.setattr(window, "_allow_replace", lambda: True)
+    window.close()
+
+
+def test_new_project_save_failure_reopens_same_draft_and_keeps_previous_project(
+    qt_app, monkeypatch, tmp_path
+):
+    import karaoke_forge.desktop.workspace as workspace_module
+
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    window = MainWindow()
+    old_document = LyricsDocument([LyricLine("previous song", 0, 1)])
+    old_path = tmp_path / "previous.json"
+    old_path.write_text(write_json(old_document), encoding="utf-8")
+    window.workspace.load_project(old_document, None, str(old_path))
+    original_save = workspace_module.save_workspace_revision
+    saves, dialogs, prompts, warnings = [], [], [], []
+
+    def save(document, settings, directory):
+        saves.append(directory)
+        if len(saves) == 1:
+            raise PermissionError("temporary write failure")
+        return original_save(document, settings, directory)
+
+    def configure(dialog):
+        dialogs.append(dialog)
+        if len(dialogs) == 1:
+            dialog.name_edit.setText("New Japanese song")
+            dialog.directory_picker.set_value(str(tmp_path / "new-project"))
+            dialog.source.setCurrentIndex(dialog.source.findData("paste"))
+            dialog.pasted_lyrics.setPlainText("春の夢\nsing with me")
+        else:
+            assert dialogs[0] is dialog
+            assert dialog.name_edit.text() == "New Japanese song"
+            assert dialog.pasted_lyrics.toPlainText() == "春の夢\nsing with me"
+            assert window.editor.current_document().to_dict() == old_document.to_dict()
+        assert len(dialogs) <= 2
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(workspace_module, "save_workspace_revision", save)
+    monkeypatch.setattr("karaoke_forge.desktop.app.ProjectDialog.exec", configure)
+    monkeypatch.setattr(window, "_allow_replace", lambda: prompts.append(True) or True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    window.new_project_dialog()
+    assert len(dialogs) == 2 and len(prompts) == 1 and len(warnings) == 1
+    assert window.workspace.project_directory == str(tmp_path / "new-project")
+    assert window.make.get_settings()["pasted_lyrics"] == "春の夢\nsing with me"
+    assert not window.workspace.is_dirty
+    assert (tmp_path / "new-project" / "karaoke-forge-project.json").is_file()
+    window.close()

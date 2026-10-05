@@ -13,6 +13,12 @@ from .align import (
     apply_forced_line_alignments,
     refine_timed_document,
 )
+from .alignment_quality import (
+    annotate_alignment_review,
+    line_indices,
+    review_reasons,
+    store_review_reasons,
+)
 from .formats import read_lyrics
 from .media import MediaError, separate_vocals
 from .models import LyricsDocument
@@ -96,6 +102,7 @@ class AlignOptions:
     profile: str = "custom"
     forced_alignment: bool = False
     prefer_vocal_separation: bool = False
+    alignment_audio_is_vocals: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,8 @@ def _prepare_alignment_audio(
     work_dir: str | Path | None,
     progress: Callable[[str], None] | None,
 ) -> Path:
+    if options.alignment_audio_is_vocals:
+        return audio
     required = options.separate_vocals
     preferred = options.prefer_vocal_separation and not required
     if not required and not preferred:
@@ -170,6 +179,15 @@ def _apply_precise_forced_alignment(
     protect_existing_word_timing: bool,
     progress: Callable[[str], None] | None,
 ) -> tuple[LyricsDocument, AlignmentReport]:
+    for key in (
+        "forced_alignment",
+        "forced_alignment_warning",
+        "forced_alignment_attempted_lines",
+        "forced_alignment_aligned_lines",
+        "forced_alignment_accepted_lines",
+        "forced_alignment_accepted_line_indices",
+    ):
+        document.metadata.pop(key, None)
     if not options.forced_alignment or whisper_model is None:
         return document, report
     if progress:
@@ -212,13 +230,13 @@ def _apply_precise_forced_alignment(
             )
         elif progress:
             progress(
-                "KTV 精准对齐结果未通过安全质量门，已完整保留 0.12 粗对齐时间"
+                "KTV 精准对齐结果未通过安全质量门，已保留粗对齐时间"
             )
     except (AlignmentError, TranscriptionError) as exc:
         document.metadata["forced_alignment"] = "fallback-coarse"
         document.metadata["forced_alignment_warning"] = str(exc)
         if progress:
-            progress(f"KTV 精准对齐未达到安全质量门，已保留 0.12 粗对齐结果：{exc}")
+            progress(f"KTV 精准对齐未达到安全质量门，已保留粗对齐结果：{exc}")
     return document, report
 
 
@@ -369,6 +387,9 @@ def align_audio_and_lyrics(
     document.metadata["alignment_model"] = options.model
     document.metadata["alignment_profile"] = options.profile
     document.metadata["alignment_coverage"] = f"{report.coverage:.6f}"
+    document.metadata.pop("alignment_status", None)
+    document.metadata.pop("unmatched_lyric_lines", None)
+    annotate_alignment_review(document, estimated_source=True, new_alignment=True)
     if recovered:
         document.metadata["alignment_status"] = "low_coverage_recovery"
         document.metadata["unmatched_lyric_lines"] = ",".join(
@@ -401,6 +422,13 @@ def refine_audio_word_timing(
         metadata=dict(lyrics.metadata),
         source_format=lyrics.source_format,
     )
+    visible_indices = [index for index, line in enumerate(lyrics.lines, 1) if not line.hidden]
+    existing_reasons = review_reasons(lyrics)
+    store_review_reasons(visible_lyrics, {
+        index: existing_reasons[original]
+        for index, original in enumerate(visible_indices, 1)
+        if original in existing_reasons
+    })
     audio = Path(audio_path)
     alignment_audio = _prepare_alignment_audio(
         audio,
@@ -448,6 +476,10 @@ def refine_audio_word_timing(
         protect_existing_word_timing=protect_existing_word_timing,
         progress=progress,
     )
+    annotate_alignment_review(
+        document,
+        estimated_source=lyrics.metadata.get("word_timing") == "synthetic",
+    )
     if progress:
         if report.timing_anchor_lines:
             progress(
@@ -465,6 +497,23 @@ def refine_audio_word_timing(
         else:
             progress(f"逐字时间精修完成：已处理 {refined_lines} 行")
     if any(line.hidden for line in lyrics.lines):
+        # Refinement uses visible lines; persisted diagnostics use project line
+        # numbers, including hidden lyrics. Keep hidden review hints unchanged.
+        reasons = {
+            visible_indices[index - 1]: values
+            for index, values in review_reasons(document).items()
+        }
+        reasons.update({
+            index: values
+            for index, values in review_reasons(lyrics).items()
+            if lyrics.lines[index - 1].hidden
+        })
+        for key in ("audio_refined_line_indices", "forced_alignment_accepted_line_indices"):
+            document.metadata[key] = ",".join(
+                str(visible_indices[index - 1])
+                for index in sorted(line_indices(document.metadata.get(key, "")))
+                if index <= len(visible_indices)
+            )
         refined_visible = iter(document.lines)
         merged_lines = [
             copy.deepcopy(line) if line.hidden else next(refined_visible) for line in lyrics.lines
@@ -473,6 +522,13 @@ def refine_audio_word_timing(
             lines=merged_lines,
             metadata=dict(document.metadata),
             source_format=lyrics.source_format,
+        )
+        store_review_reasons(document, reasons)
+        report = replace(
+            report,
+            unmatched_line_indexes=tuple(
+                visible_indices[index] - 1 for index in report.unmatched_line_indexes
+            ),
         )
     if transcription.detected_language:
         document.metadata.setdefault("language", transcription.detected_language)
@@ -496,7 +552,7 @@ def refine_audio_word_timing_with_fallback(
     work_dir: str | Path | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> AlignResult | None:
-    """Refine timed lyrics, preserving them when optional recognition is unavailable."""
+    """Keep original timing on optional failure and persist review hints on its metadata."""
 
     normalized_mode = normalize_timing_refinement(timing_mode)
     try:
@@ -513,6 +569,13 @@ def refine_audio_word_timing_with_fallback(
     except (AlignmentError, TranscriptionError) as exc:
         if normalized_mode != "auto":
             raise
+        if lyrics.metadata.get("word_timing") == "synthetic":
+            reasons = review_reasons(lyrics)
+            warning = "自动精修未完成，逐字时间仍为估算"
+            for index, line in enumerate(lyrics.lines, 1):
+                if not line.hidden and split_display_units(line.text):
+                    reasons[index] = list(dict.fromkeys([*reasons.get(index, []), warning]))
+            store_review_reasons(lyrics, reasons)
         if progress:
             progress(f"自动逐字时间精修覆盖率不足或暂不可用，已保留原时间轴并继续：{exc}")
         return None

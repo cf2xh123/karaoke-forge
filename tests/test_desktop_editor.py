@@ -16,12 +16,29 @@ pytest.importorskip("PySide6")
 # Preload the app's Windows ICU guard before loading Qt extension modules.
 importlib.import_module("karaoke_forge.desktop")
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QFont,
+    QFontDatabase,
+    QInputMethodEvent,
+    QKeyEvent,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow, QTableWidgetItem
+from PySide6.QtWidgets import (
+    QApplication,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
+from karaoke_forge.alignment_quality import annotate_alignment_review
 from karaoke_forge.desktop.editor_page import EditorPage
 from karaoke_forge.editor_history import history_stacks
 from karaoke_forge.models import (
@@ -560,3 +577,488 @@ def test_loading_a_project_does_not_mutate_original_document(page, document):
     set_cell(page.tokens_table, 0, 0, "hey ")
     page.apply_pending()
     assert document.to_dict() == original
+
+
+def test_quality_findings_remain_visible_and_navigate_to_the_affected_lines(page, document):
+    document.metadata.update({
+        "alignment_coverage": "0.15",
+        "alignment_review_lines": "1,2",
+        "alignment_review_reasons": json.dumps({"1": ["低置信词较多"], "2": ["歌词未匹配"]}),
+    })
+    page.load_document(document)
+    assert "2 句" in page.review_summary and "15%" in page.review_summary
+    assert not page.review_bar.isHidden()
+    assert "低置信词较多" in page.lines_table.item(0, 0).toolTip()
+    assert page.lines_table.item(0, 1).text() == "显示"
+    page.select_review_line(1)
+    assert page._selected == 1
+    assert "歌词未匹配" in page.status.text()
+    page.select_review_line(1)
+    assert page._selected == 0
+    page.select_review_line(-1)
+    assert page._selected == 1
+    set_cell(page.lines_table, 1, 5, "人工修正翻译仍不意味着时间准确")
+    assert page.apply_pending()
+    assert "2 句" in page.review_summary
+    page.mark_saved()
+    assert not page.is_dirty and "2 句" in page.review_summary
+
+
+def test_quality_findings_follow_insert_delete_hide_and_undo(page, document):
+    document.metadata.update({
+        "alignment_status": "low_coverage_recovery",
+        "unmatched_lyric_lines": "2",
+    })
+    page.load_document(document)
+    page.insert_line(False)
+    assert page.current_document().metadata["alignment_review_lines"] == "3"
+    assert page.current_document().metadata["unmatched_lyric_lines"] == "3"
+    page.select_review_line()
+    assert page._selected == 2 and page.current_document().lines[2].text == "next"
+    page.toggle_hidden()
+    assert page.review_summary == ""
+    page.undo()
+    assert "1 句" in page.review_summary
+    page.delete_line()
+    assert page.review_summary == ""
+    assert page.current_document().metadata["alignment_review_lines"] == ""
+    page.undo()
+    assert page.current_document().metadata["alignment_review_lines"] == "3"
+    assert page.lines_table.item(2, 0).toolTip().startswith("第 3 句需要核对")
+
+
+def test_legacy_quality_metadata_and_malformed_details_do_not_break_loading(page, document):
+    document.metadata.update({
+        "alignment_status": "low_coverage_recovery",
+        "alignment_coverage": "not-a-number",
+        "alignment_review_reasons": "[invalid JSON",
+    })
+    page.load_document(document)
+    assert page._review_indexes == [0, 1]
+    document.metadata["alignment_review_lines"] = "0,2,999,invalid"
+    page.load_document(document)
+    assert page._review_indexes == [1]
+    assert "1 句" in page.review_summary
+
+
+def test_high_coverage_quality_findings_from_pipeline_survive_hide_and_export_reload(page, tmp_path):
+    source = LyricsDocument(
+        [LyricLine("空", 1, 2, [KaraokeToken("空", 1, 1.01, .99)])],
+        metadata={"alignment_coverage": "1.0", "auto_pronunciation": "false"},
+    )
+    annotate_alignment_review(source, estimated_source=True, new_alignment=True)
+    page.load_document(source)
+    assert "100%" in page.review_summary and "1 句" in page.review_summary
+    assert "20 毫秒" in page.lines_table.item(0, 0).toolTip()
+    page.toggle_hidden()
+    assert page.review_summary == ""
+    page.toggle_hidden()
+    assert "1 句" in page.review_summary
+    output = tmp_path / "high-coverage-review"
+    page.export_to(str(output))
+    page.load_source(str(output / PROJECT_FILENAME))
+    assert not page.is_dirty
+    assert "100%" in page.review_summary and "1 句" in page.review_summary
+    assert "20 毫秒" in page.lines_table.item(0, 0).toolTip()
+
+
+def test_explicit_review_confirmation_is_undoable_and_preserves_lyrics_and_timing(page, document):
+    document.metadata.update({
+        "alignment_review_lines": "1,2", "unmatched_lyric_lines": "1,2",
+        "alignment_review_reasons": '{"1":["未匹配"],"2":["低置信"]}',
+    })
+    page.load_document(document)
+    assert page.review_confirm_button.isEnabled()
+    page.confirm_review_line()
+    confirmed = page.current_document()
+    assert confirmed.lines == document.lines
+    assert confirmed.metadata["alignment_review_lines"] == "2"
+    assert confirmed.metadata["unmatched_lyric_lines"] == "2"
+    assert page.is_dirty and not page.review_confirm_button.isEnabled()
+    page.undo()
+    assert page.current_document().to_dict() == document.to_dict()
+    assert not page.is_dirty and page.review_confirm_button.isEnabled()
+    page.redo()
+    assert page.current_document().metadata["alignment_review_lines"] == "2"
+
+
+def test_review_confirmation_survives_save_but_new_alignment_can_flag_the_line_again(page, tmp_path):
+    source = LyricsDocument(
+        [LyricLine("空", 1, 2, [KaraokeToken("空", 1, 1.01, .99)])],
+        metadata={"auto_pronunciation": "false"},
+    )
+    annotate_alignment_review(source, estimated_source=True, new_alignment=True)
+    page.load_document(source)
+    page.confirm_review_line()
+    assert page.review_summary == ""
+    output = tmp_path / "confirmed-review"
+    page.export_to(str(output))
+    page.load_source(str(output / PROJECT_FILENAME))
+    assert page.review_summary == "" and not page.is_dirty
+    revised = page.current_document()
+    annotate_alignment_review(revised, estimated_source=True, new_alignment=True)
+    page.load_document(revised)
+    assert "1 句" in page.review_summary
+
+
+@pytest.mark.parametrize("surface", ["lines_table", "timeline", "token_timeline", "play_button"])
+def test_space_toggles_from_navigation_without_competing_shortcuts_or_repeat(page, app, monkeypatch, surface):
+    calls, conflicting = [], []
+    monkeypatch.setattr(page, "toggle_playback", lambda: calls.append(True))
+    shortcut = QShortcut(QKeySequence("Space"), page)
+    shortcut.activated.connect(lambda: conflicting.append(True))
+    page.resize(1280, 900)
+    page.show()
+    target = getattr(page, surface)
+    if surface == "timeline":
+        page.time_tabs.setCurrentWidget(page.song_panel)
+    target.setFocus()
+    app.processEvents()
+    QTest.keyPress(target, Qt.Key.Key_Space)
+    for _ in range(3):
+        QApplication.sendEvent(target, QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " ", True,
+        ))
+    QTest.keyRelease(target, Qt.Key.Key_Space)
+    assert calls == [True] and conflicting == []
+    QTest.keyClick(target, Qt.Key.Key_Space)
+    assert calls == [True, True]
+    assert QApplication.focusWidget() is target
+
+
+def test_space_remains_text_during_input_table_edit_and_ime_composition(page, app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(page, "toggle_playback", lambda: calls.append(True))
+    page.show()
+    page.name_edit.setFocus()
+    page.name_edit.setText("A")
+    QTest.keyClick(page.name_edit, Qt.Key.Key_Space)
+    assert page.name_edit.text() == "A "
+    table = page.lines_table
+    table.setCurrentCell(0, 4)
+    table.editItem(table.item(0, 4))
+    app.processEvents()
+    active = QApplication.focusWidget()
+    assert isinstance(active, QLineEdit)
+    active.selectAll()
+    QTest.keyClicks(active, "new words")
+    assert active.text() == "new words"
+    QApplication.sendEvent(active, QInputMethodEvent("かな", []))
+    QTest.keyClick(active, Qt.Key.Key_Space)
+    assert calls == []
+    assert QApplication.focusWidget() is active
+
+
+def test_space_scope_covers_workspace_buttons_and_excludes_other_player(page, app, monkeypatch):
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    outside = QPushButton("Save project")
+    output = QPushButton("Output player")
+    text = QLineEdit()
+    for widget in (outside, output, text, page):
+        layout.addWidget(widget)
+    allowed, calls = [True], []
+    monkeypatch.setattr(page, "toggle_playback", lambda: calls.append(True))
+    page.set_playback_shortcut_scope(container, excluded=(output,), guard=lambda: allowed[0])
+    container.show()
+    app.processEvents()
+    try:
+        outside.setFocus()
+        QTest.keyClick(outside, Qt.Key.Key_Space)
+        assert calls == [True]
+        output.setFocus()
+        QTest.keyClick(output, Qt.Key.Key_Space)
+        text.setFocus()
+        QTest.keyClick(text, Qt.Key.Key_Space)
+        assert text.text() == " " and calls == [True]
+        allowed[0] = False
+        outside.setFocus()
+        QTest.keyClick(outside, Qt.Key.Key_Space)
+        assert calls == [True]
+    finally:
+        page.set_playback_shortcut_scope(page)
+        page.setParent(None)
+        container.close()
+
+
+def test_seek_feedback_is_immediate_and_ignores_queued_old_media_positions(page, monkeypatch):
+    seeks = []
+    monkeypatch.setattr(page.player, "duration", lambda: 10000)
+    monkeypatch.setattr(page.player, "setPosition", seeks.append)
+    page.seek(7.25)
+    assert seeks == [7250]
+    assert page.position_label.text() == "00:07.25"
+    assert page.timeline._position == 7.25 and page.preview._position == 7.25
+    page._position_changed(1200)
+    assert page.timeline._position == 7.25
+    page._position_changed(7250)
+    page._position_changed(7300)
+    assert page.timeline._position == 7.3
+    page.seek_slider.sliderMoved.emit(4500)
+    assert seeks[-1] == 4500 and page.timeline._position == 4.5
+
+
+def test_playhead_interpolates_rate_without_backward_jitter_or_unbounded_prediction(page, monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("karaoke_forge.desktop.editor_page.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(page.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    monkeypatch.setattr(page.player, "playbackRate", lambda: 1.5)
+    monkeypatch.setattr(page.player, "duration", lambda: 20000)
+    page._position_changed(1000)
+    now[0] += .1
+    page._advance_playhead()
+    assert page.timeline._position == pytest.approx(1.15)
+    now[0] += .02
+    page._position_changed(1100)
+    assert page.timeline._position == pytest.approx(1.15)
+    now[0] += .04
+    page._advance_playhead()
+    assert page.timeline._position == pytest.approx(1.16)
+    now[0] += 5
+    page._advance_playhead()
+    assert page.timeline._position == pytest.approx(1.475)
+
+
+def test_word_axis_is_visible_and_selection_stays_in_sync_with_word_table(page, app):
+    page.set_workspace_mode(True)
+    page.resize(1280, 900)
+    page.show()
+    app.processEvents()
+    assert not page.details_panel.isVisible()
+    assert page.token_timeline.isVisible()
+    assert page.token_boundary_mode.currentData() is False
+    target = page.token_timeline.token_rect(1).center().toPoint()
+    QTest.mouseClick(page.token_timeline, Qt.MouseButton.LeftButton, pos=target)
+    assert page.tokens_table.currentRow() == page._selected_token == 1
+    page.tokens_table.setCurrentCell(0, 1)
+    assert page._selected_token == 0
+    assert "第 1 词" in page.token_selection_label.text()
+
+
+def test_dragging_touching_words_independently_and_moving_one_preserves_neighbor(page, app, document):
+    page.resize(1280, 900)
+    page.show()
+    app.processEvents()
+    axis = page.token_timeline
+    axis.set_snap_enabled(False)
+    page.select_token(0)
+    end = axis.token_rect(0).topRight().toPoint() + QPoint(0, 20)
+    target = end - QPoint(round(.2 * axis.pixels_per_second), 0)
+    QTest.mousePress(axis, Qt.MouseButton.LeftButton, pos=end)
+    QTest.mouseRelease(axis, Qt.MouseButton.LeftButton, pos=target)
+    changed = page.current_document()
+    assert changed.lines[0].tokens[0].end == pytest.approx(1.8, abs=.005)
+    assert changed.lines[0].tokens[1] == document.lines[0].tokens[1]
+    before_move = copy.deepcopy(changed.lines[0].tokens[0])
+    page.token_adjust_edge.setCurrentIndex(page.token_adjust_edge.findData("move"))
+    page.token_adjust_step.setValue(.1)
+    page.adjust_selected_token(1)
+    moved = page.current_document()
+    assert moved.lines[0].tokens[0].start == pytest.approx(before_move.start + .1)
+    assert moved.lines[0].tokens[0].end == pytest.approx(before_move.end + .1)
+    assert moved.lines[0].tokens[1] == document.lines[0].tokens[1]
+    assert moved.lines[1:] == document.lines[1:]
+
+
+def test_linked_boundary_is_explicit_and_word_adjustments_are_undoable(page, document):
+    page.select_token(0)
+    page.token_adjust_edge.setCurrentIndex(page.token_adjust_edge.findData("end"))
+    page.token_adjust_step.setValue(.1)
+    page.adjust_selected_token(1)
+    assert page.current_document().to_dict() == document.to_dict()
+    page.token_boundary_mode.setCurrentIndex(page.token_boundary_mode.findData(True))
+    page.adjust_selected_token(1)
+    linked = page.current_document()
+    assert linked.lines[0].tokens[0].end == pytest.approx(2.1)
+    assert linked.lines[0].tokens[1].start == pytest.approx(2.1)
+    assert linked.lines[0].tokens[1].end == 3
+    page.undo()
+    assert page.current_document().to_dict() == document.to_dict()
+
+
+def test_playback_does_not_replace_the_word_axis_during_an_active_drag(page, app, monkeypatch):
+    page.resize(1280, 900)
+    page.show()
+    app.processEvents()
+    axis = page.token_timeline
+    edge = axis.token_rect(0).topRight().toPoint() + QPoint(0, 20)
+    QTest.mousePress(axis, Qt.MouseButton.LeftButton, pos=edge)
+    assert axis.is_interacting
+    monkeypatch.setattr(page.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    page._position_changed(4500)
+    assert page._selected == 0 and axis.is_interacting
+    QTest.keyClick(axis, Qt.Key.Key_Escape)
+    assert not axis.is_interacting
+
+
+def test_invalid_word_draft_cancels_a_timeline_adjustment_without_losing_the_draft(page, document):
+    set_cell(page.tokens_table, 0, 2, "invalid")
+    page.adjust_selected_token(1)
+    assert not page.token_timeline.is_interacting
+    assert page.tokens_table.item(0, 2).text() == "invalid"
+    assert page._document.lines == document.lines
+    assert page.is_dirty
+
+
+def test_line_edits_and_undo_pause_without_rewinding_the_playhead(page, monkeypatch):
+    pauses, stops = [], []
+    monkeypatch.setattr(page.player, "pause", lambda: pauses.append(True))
+    monkeypatch.setattr(page.player, "stop", lambda: stops.append(True))
+    page._position_changed(2300)
+    page.nudge("end", .1)
+    page.undo()
+    page.redo()
+    assert len(pauses) >= 3 and stops == []
+    assert page.timeline._position == 2.3 and page._display_position_ms == 2300
+
+
+def test_clear_project_discards_live_draft_media_history_and_review(page, app, document):
+    document.metadata["alignment_review_lines"] = "1"
+    page.load_document(document, "old-song.wav", "Old project")
+    page.nudge("end", .1)
+    page.show()
+    page.lines_table.editItem(page.lines_table.item(0, 4))
+    app.processEvents()
+    active = QApplication.focusWidget()
+    assert isinstance(active, QLineEdit)
+    QTest.keyClicks(active, "unfinished")
+    page.clear_project()
+    assert not page.is_dirty and page._history == {}
+    assert page.lines_table.rowCount() == page.tokens_table.rowCount() == 0
+    assert page.player.source().isEmpty()
+    assert page.audio_picker.value() == page.source_picker.value() == page.name_edit.text() == ""
+    assert page.review_summary == ""
+    assert page.timeline._document.lines == [] and page.token_timeline._tokens == []
+    with pytest.raises(ValueError, match="先载入"):
+        page.current_document()
+
+
+def test_space_recovers_after_focus_or_window_loss_during_a_held_key(page, app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(page, "toggle_playback", lambda: calls.append(True))
+    page.show()
+    page.token_timeline.setFocus()
+    app.processEvents()
+    QTest.keyPress(page.token_timeline, Qt.Key.Key_Space)
+    assert page._space_held
+    QApplication.sendEvent(page, QEvent(QEvent.Type.WindowDeactivate))
+    assert not page._space_held
+    QTest.keyClick(page.token_timeline, Qt.Key.Key_Space)
+    assert calls == [True, True]
+
+
+def test_invalid_word_draft_restores_axis_and_table_selection(page, app):
+    page.show()
+    app.processEvents()
+    page.select_token(0)
+    set_cell(page.tokens_table, 0, 2, "invalid")
+    page.tokens_table.setCurrentCell(1, 0)
+    assert page._selected_token == page.tokens_table.currentRow() == page.token_timeline._selected == 0
+    target = page.token_timeline.token_rect(1).center().toPoint()
+    QTest.mouseClick(page.token_timeline, Qt.MouseButton.LeftButton, pos=target)
+    assert page._selected_token == page.tokens_table.currentRow() == page.token_timeline._selected == 0
+    assert page.tokens_table.item(0, 2).text() == "invalid"
+    assert page.is_dirty
+
+
+def test_calibration_tabs_keep_the_chosen_tool_when_switching_lyrics(page):
+    assert page.time_tabs.currentWidget() is page.token_panel
+    page.time_tabs.setCurrentWidget(page.song_panel)
+    page.select_line(1, seek=False)
+    assert page.time_tabs.currentWidget() is page.song_panel
+    page.time_tabs.setCurrentIndex(2)
+    page.select_line(0, seek=False)
+    assert page.time_tabs.currentIndex() == 2
+
+
+@pytest.mark.parametrize("size", [(730, 510), (1180, 760)])
+def test_common_calibration_controls_fit_without_page_scrolling(page, app, size):
+    # Match the application's font and control padding for physical dimensions.
+    page.setFont(QFont("Microsoft YaHei", 10))
+    page.setStyleSheet((Path(__file__).parents[1] / "src/karaoke_forge/desktop/theme.qss").read_text())
+    page.set_workspace_mode()
+    page.show()
+    app.processEvents()
+    page.resize(*size)
+    app.processEvents()
+    assert page.size().width() == size[0] and page.size().height() == size[1]
+    for widget in (page.preview, page.play_button, page.token_timeline, page.token_adjust_step):
+        assert widget.isVisible()
+        position = widget.mapTo(page, QPoint(0, 0))
+        assert position.x() >= 0 and position.y() >= 0
+        assert position.x() + widget.width() <= page.width()
+        assert position.y() + widget.height() <= page.height()
+    page.editing_splitter.setSizes([180, 330])
+    page.time_tabs.setCurrentWidget(page.song_panel)
+    app.processEvents()
+    assert page.timeline.isVisible() and not page.token_timeline.isVisible()
+
+
+@pytest.mark.parametrize("size", [(900, 640), (1380, 940)])
+def test_complete_window_keeps_calibration_controls_clear_of_each_other(
+    app, document, monkeypatch, tmp_path, size
+):
+    from karaoke_forge.desktop.app import MainWindow
+
+    monkeypatch.setenv("KARAOKE_FORGE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.app.QSettings",
+        lambda *_: QSettings(str(tmp_path / "window.ini"), QSettings.Format.IniFormat),
+    )
+    # The offscreen platform does not enumerate the Windows font directory.
+    # Load the real application font so placeholder glyphs cannot mask clipping.
+    font_ids = [
+        QFontDatabase.addApplicationFont(str(path))
+        for path in (Path("C:/Windows/Fonts/msyh.ttc"), Path("C:/Windows/Fonts/msyhbd.ttc"))
+        if path.is_file()
+    ]
+    window = MainWindow()
+    window.setFont(QFont("Microsoft YaHei", 10))
+    window.setStyleSheet(
+        (Path(__file__).parents[1] / "src/karaoke_forge/desktop/theme.qss").read_text()
+    )
+    document.lines[0].tokens[0].text = "長い歌詞のまとまり " * 15
+    document.lines[0].text = "".join(token.text for token in document.lines[0].tokens)
+    window.workspace.load_project(document, None, "")
+    window.show()
+    app.processEvents()
+    window.resize(*size)
+    app.processEvents()
+    editor = window.editor
+    try:
+        assert (window.width(), window.height()) == size
+        assert not editor.status.isVisible()
+        header = editor.lines_table.horizontalHeader()
+        assert [header.logicalIndex(index) for index in range(header.count())] == [0, 4, 2, 3, 5, 1]
+        lyric_rect = editor.lines_table.visualItemRect(editor.lines_table.item(0, 4))
+        assert editor.lines_table.columnWidth(4) >= 140
+        assert 0 <= lyric_rect.left() <= lyric_rect.right() < editor.lines_table.viewport().width()
+        for widget in (
+            editor.preview, editor.play_button, editor.seek_slider, editor.follow_playback,
+            editor.token_timeline, editor.token_selection_label, editor.token_adjust_step,
+        ):
+            assert widget.isVisible()
+            point = widget.mapTo(editor, QPoint(0, 0))
+            assert 0 <= point.x() <= editor.width() - widget.width()
+            assert 0 <= point.y() <= editor.height() - widget.height()
+        axis = editor.token_timeline
+        label = editor.token_selection_label
+        step = editor.token_adjust_step
+        assert axis.mapTo(editor, QPoint(0, axis.height())).y() <= label.mapTo(editor, QPoint()).y()
+        assert label.mapTo(editor, QPoint(0, label.height())).y() <= step.mapTo(editor, QPoint()).y()
+        editor.token_zoom.setCurrentIndex(1)
+        app.processEvents()
+        assert axis.token_rect(0).bottom() < axis._scroll.y()
+        for tab in (1, 2, 0):
+            editor.time_tabs.setCurrentIndex(tab)
+            editor.select_line(1, seek=False)
+            app.processEvents()
+            assert editor.time_tabs.currentIndex() == tab
+            assert (window.width(), window.height()) == size
+    finally:
+        window.hide()
+        window.deleteLater()
+        app.processEvents()
+        for font_id in font_ids:
+            QFontDatabase.removeApplicationFont(font_id)

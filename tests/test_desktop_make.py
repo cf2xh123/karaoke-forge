@@ -12,7 +12,7 @@ import karaoke_forge.desktop  # noqa: F401 -- initialize the Windows Qt DLL envi
 # isort: split
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
 
 from karaoke_forge.desktop.make_page import MakePage
 from karaoke_forge.formats import read_lyrics, write_json
@@ -61,6 +61,218 @@ def page(qt_app, monkeypatch, tmp_path, request):
 
 def document() -> LyricsDocument:
     return LyricsDocument(lines=[LyricLine("Song", 1, 2, [KaraokeToken("Song", 1, 2)])])
+
+
+def test_new_project_drops_edited_snapshot_and_old_sources_before_render(page, monkeypatch):
+    widget, runner = page
+    widget.set_editor_document(document())
+    widget._editor_source_settings = {"source_refs": {"netease": "old"}}
+    widget.controls["netease_link"].setText("old-link")
+    widget.controls["audio_offset"].setValue(25)
+    widget.controls["font_size"].setValue(70)
+    widget.controls["music_u"].setText("session-account")
+    snapshots = []
+    widget.settings_changed.connect(lambda _values: snapshots.append(widget._editor_document))
+    widget.reset_project({"netease_link": "new-link", "output_name": "New song"})
+    settings = widget.get_settings()
+    assert settings["netease_link"] == "new-link"
+    assert settings["lyrics_file"] == settings["pasted_lyrics"] == ""
+    assert settings["audio_offset"] == 0
+    assert settings["timing_refinement"] == "auto"
+    assert settings["font_size"] == 70
+    assert widget._workspace is widget._editor_document is widget._render_lyrics_snapshot is None
+    assert widget._editor_source_settings == {}
+    assert snapshots == [None]
+    assert widget.controls["music_u"].text() == "session-account"
+    assert not widget._match_timer.isActive()
+    assert runner.jobs == []
+    captured = []
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.make_page.run_make_job",
+        lambda **kwargs: captured.append(kwargs) or UiJobResult("Rendered", None, [], "", None),
+    )
+    widget.render_video()
+    runner.finish()
+    assert captured[0]["netease_link"] == "new-link"
+    assert captured[0]["lyrics_file"] is None
+
+
+def test_changing_source_keeps_edited_lyrics_until_explicit_regeneration(page):
+    widget, runner = page
+    widget.set_editor_document(document())
+    original = widget._editor_document.to_dict()
+    snapshots = []
+    widget.settings_changed.connect(snapshots.append)
+    widget.apply_material_settings({"lyrics_file": "", "netease_link": "new-song"})
+    assert widget._editor_document.to_dict() == original
+    assert len(snapshots) == 1
+    assert snapshots[0]["netease_link"] == "new-song"
+    assert not widget._match_timer.isActive()
+    assert runner.jobs == []
+
+
+def test_explicit_online_audio_preference_reaches_prepare_and_render_jobs(page, monkeypatch):
+    widget, runner = page
+    widget.apply_material_settings({
+        "netease_link": "https://music.163.com/song?id=123", "prefer_netease_audio": True,
+        "video_file": "independent-visual.mp4", "rights_confirmed": True,
+    })
+    captured = []
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.make_page.prepare_make_editor_job",
+        lambda **kwargs: captured.append(kwargs) or preparation(),
+    )
+    widget.prepare_project()
+    runner.finish()
+    assert captured[0]["prefer_netease_audio"] is True
+    assert captured[0]["audio_file"] is None
+    assert captured[0]["video_file"] == "independent-visual.mp4"
+    widget.stage_editor_document(document())
+    widget.controls["audio_file"].set_value("project-assets/downloaded.m4a")
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.make_page.run_make_job",
+        lambda **kwargs: captured.append(kwargs) or UiJobResult("Rendered", None, [], "", None),
+    )
+    widget.render_video()
+    runner.finish()
+    assert captured[1]["audio_file"] == "project-assets/downloaded.m4a"
+    assert captured[1]["video_file"] == "independent-visual.mp4"
+    assert captured[1]["netease_link"] == ""
+
+
+def test_new_project_rejects_invalid_settings_or_busy_job_without_clearing_lyrics(page):
+    widget, runner = page
+    widget.set_editor_document(document())
+    before = widget.get_settings()
+    original = widget._editor_document.to_dict()
+    with pytest.raises(ValueError, match="有效数字"):
+        widget.reset_project({"font_size": "invalid"})
+    assert widget.get_settings() == before
+    assert widget._editor_document.to_dict() == original
+    runner.is_busy = True
+    with pytest.raises(ValueError, match="当前任务"):
+        widget.reset_project({"netease_link": "new"})
+    assert widget.get_settings() == before
+    assert widget._editor_document.to_dict() == original
+
+
+def test_pure_settings_cannot_submit_work_or_save_preferences(qt_app, monkeypatch):
+    persisted = []
+    monkeypatch.setattr("karaoke_forge.desktop.make_page.save_preferences", lambda value: persisted.append(value))
+    runner = DeferredRunner()
+    widget = MakePage(runner, embedded=True, settings_only=True)
+    widget.controls["font_size"].setValue(72)
+    widget.controls["netease_link"].setText("https://music.163.com/song?id=123")
+    widget.prepare_project()
+    widget.render_video()
+    widget.refresh_preview()
+    widget.login_netease()
+    widget.logout_netease()
+    assert runner.jobs == []
+    assert not widget._match_timer.isActive()
+    assert persisted == []
+    widget.deleteLater()
+
+
+def test_new_project_settings_validate_before_changes_and_exclude_private_fields(page):
+    widget, _runner = page
+    before = widget.get_settings()
+    settings = widget.new_project_settings({
+        "output_name": "New", "font_size": 70, "music_u": "private",
+        "cookie_browser": "edge", "cookie_browser_profile": "private-profile",
+    })
+    assert settings["output_name"] == "New" and settings["font_size"] == 70
+    assert not {"music_u", "cookie_browser", "cookie_browser_profile"} & settings.keys()
+    assert widget.get_settings() == before
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_account_settings_only_changes_session_when_saved(page, monkeypatch, accepted):
+    widget, runner = page
+    widget.controls["music_u"].setText("original-session")
+    widget.controls["cookie_browser_profile"].setText("original-profile")
+
+    def edit(dialog):
+        browser = dialog.findChild(QComboBox)
+        browser.setCurrentIndex(browser.findData("edge"))
+        fields = dialog.findChildren(QLineEdit)
+        fields[0].setText("new-profile")
+        fields[1].setText("new-session")
+        return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", edit)
+    widget.show_account_settings()
+    assert widget.controls["music_u"].text() == ("new-session" if accepted else "original-session")
+    assert widget.controls["cookie_browser_profile"].text() == ("new-profile" if accepted else "original-profile")
+    assert not {"music_u", "cookie_browser", "cookie_browser_profile"} & widget.get_settings().keys()
+    assert runner.jobs == []
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_restored_project_keeps_original_lyrics_source_and_processing_settings(page, tmp_path, configured):
+    widget, _runner = page
+    lyrics = tmp_path / "lyrics.json"
+    lyrics.write_text(write_json(document()), encoding="utf-8")
+    workspace = save_workspace_project(
+        tmp_path / "project", name="Song", lyrics_project=lyrics,
+        settings={
+            "lyrics_file": "original.lrc", "pasted_lyrics": "原始歌词\nSing with me",
+            "preserve_lyrics_source": not configured, "language": "ja", "model": "profile:precise",
+        }, recent_root=tmp_path,
+    )
+    widget.restore_workspace(workspace, configured=configured)
+    settings = widget.get_settings()
+    assert settings["lyrics_file"] == "original.lrc"
+    assert settings["pasted_lyrics"] == "原始歌词\nSing with me"
+    assert settings["language"] == "ja" and settings["model"] == "profile:precise"
+
+
+def test_restored_relative_source_stays_inside_project_and_rejects_escaped_path(page, tmp_path):
+    widget, _runner = page
+    lyrics = tmp_path / "lyrics.json"
+    lyrics.write_text(write_json(document()), encoding="utf-8")
+    workspace = save_workspace_project(
+        tmp_path / "project", name="Song", lyrics_project=lyrics,
+        settings={"preserve_lyrics_source": True, "lyrics_source_asset": "project-assets/source.lrc"},
+        recent_root=tmp_path,
+    )
+    widget.restore_workspace(workspace)
+    assert widget.get_settings()["lyrics_file"] == str(workspace.manifest.parent / "project-assets" / "source.lrc")
+    before = widget.get_settings()
+    workspace.settings["lyrics_source_asset"] = "../outside.lrc"
+    with pytest.raises(ValueError, match="超出"):
+        widget.restore_workspace(workspace)
+    assert widget.get_settings() == before
+
+
+@pytest.mark.parametrize("source", ["local", "paste"])
+def test_saved_pending_source_is_used_for_explicit_regeneration(page, tmp_path, monkeypatch, source):
+    widget, runner = page
+    edited = tmp_path / "edited.json"
+    edited.write_text(write_json(document()), encoding="utf-8")
+    replacement = tmp_path / "replacement.lrc"
+    replacement.write_text("[00:01.00]新しい歌\n[00:03.00]Sing with me", encoding="utf-8")
+    values = {
+        "lyrics_file": str(replacement) if source == "local" else "",
+        "pasted_lyrics": "新しい歌\nSing with me" if source == "paste" else "",
+        "pending_lyrics_source": True,
+    }
+    saved = save_workspace_project(
+        tmp_path / "project", name="Edited song", lyrics_project=edited,
+        settings=values, recent_root=tmp_path,
+    )
+    # Load from disk as reopening does; the edited lyrics and new source coexist.
+    widget.restore_workspace(load_workspace_project(saved.manifest))
+    captured = []
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.make_page.prepare_make_editor_job",
+        lambda **kwargs: captured.append(kwargs) or preparation(),
+    )
+    widget.prepare_project()
+    runner.finish()
+    assert captured[0]["lyrics_file"] == (values["lyrics_file"] or None)
+    assert captured[0]["pasted_lyrics"] == values["pasted_lyrics"]
+    assert read_lyrics(saved.lyrics_project).lines[0].text == "Song"
 
 
 def preparation(project: str | None = None, output_dir: str | None = None):

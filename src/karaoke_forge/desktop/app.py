@@ -6,15 +6,19 @@ import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
+    QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -26,6 +30,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +47,7 @@ from ..web import UiJobResult, _default_output_root
 from .common import JobRunner
 from .editor_page import EditorPage
 from .make_page import MakePage
+from .project_dialog import ProjectDialog
 from .tools_page import SettingsPage, ToolsPage
 from .workspace import WorkspacePage
 
@@ -50,6 +56,8 @@ class OutputPage(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.directory = ""
+        self._shortcut_scope = self
+        self._space_held = False
         layout = QVBoxLayout(self)
         self.status = QTextBrowser()
         self.status.setMaximumHeight(64)
@@ -100,6 +108,70 @@ class OutputPage(QWidget):
         self.player.errorOccurred.connect(
             lambda error, message: self.log.appendPlainText(f"播放失败：{message}")
         )
+        QApplication.instance().installEventFilter(self)
+
+    def set_playback_shortcut_scope(self, scope: QWidget) -> None:
+        self._shortcut_scope = scope
+
+    def _can_handle_space(self) -> bool:
+        focused = QApplication.focusWidget()
+        scope = self._shortcut_scope
+        if (
+            focused is None or not scope.isVisible() or not scope.isEnabled()
+            or QApplication.activeModalWidget() is not None
+            or QApplication.activePopupWidget() is not None
+            or focused.window() is not self.window()
+            or not (focused is scope or scope.isAncestorOf(focused))
+        ):
+            return False
+        if not (
+            focused is self or self.isAncestorOf(focused)
+            or self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ):
+            return False
+        widget = focused
+        while widget is not None and widget is not scope.parentWidget():
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                return False
+            if isinstance(widget, QComboBox) and widget.isEditable():
+                return False
+            widget = widget.parentWidget()
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.Type.FocusOut, QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate,
+        ):
+            self._space_held = False
+        if (
+            event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease, QEvent.Type.ShortcutOverride)
+            and event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            if event.type() == QEvent.Type.KeyRelease and self._space_held:
+                if not event.isAutoRepeat():
+                    self._space_held = False
+                event.accept()
+                return True
+            if self._can_handle_space():
+                if event.type() == QEvent.Type.ShortcutOverride:
+                    event.accept()
+                    return True
+                if event.type() == QEvent.Type.KeyPress:
+                    if not event.isAutoRepeat() and not self._space_held:
+                        self._space_held = True
+                        self.toggle_playback()
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def clear_project(self) -> None:
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.directory = ""
+        self.files.clear()
+        self.log.clear()
+        self.status.setPlainText("制作、转换或导出后，这里会显示成品和文件。")
 
     def _position_changed(self, value: int) -> None:
         if not self.position.isSliderDown():
@@ -146,13 +218,23 @@ class MainWindow(QMainWindow):
         self.outputs = OutputPage()
         self.environment = SettingsPage(self.runner)
         self.workspace = WorkspacePage(self.make, self.editor, self.outputs, self.runner)
+        self.editor.set_playback_shortcut_scope(
+            self, excluded=(self.outputs,),
+            guard=lambda: self.pages.currentWidget() is self.workspace
+            and self.outputs.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState,
+        )
+        self.outputs.set_playback_shortcut_scope(self)
+        self.outputs.player.playbackStateChanged.connect(
+            lambda state: self.editor.stop_playback()
+            if state == QMediaPlayer.PlaybackState.PlayingState else None
+        )
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         rail = QWidget()
         rail.setObjectName("navigationRail")
-        rail.setFixedWidth(174)
+        rail.setFixedWidth(150)
         rail_layout = QVBoxLayout(rail)
         brand = QLabel("KARAOKE\nFORGE")
         brand.setObjectName("brand")
@@ -162,8 +244,11 @@ class MainWindow(QMainWindow):
         rail_layout.addWidget(version)
         self.navigation = QListWidget()
         self.navigation.setObjectName("navigation")
-        self.navigation.addItems(["歌曲工作台", "歌词工具", "环境设置"])
+        self.navigation.addItems(["项目编辑", "歌词工具", "环境设置"])
         rail_layout.addWidget(self.navigation, 1)
+        new_project = QPushButton("新建工程…")
+        new_project.clicked.connect(self.new_project_dialog)
+        rail_layout.addWidget(new_project)
         open_project = QPushButton("打开工程…")
         open_project.clicked.connect(self.open_project_dialog)
         rail_layout.addWidget(open_project)
@@ -182,7 +267,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.statusBar().addPermanentWidget(self.progress)
-        self.statusBar().showMessage("就绪 · 选择素材或打开已保存的工程")
+        self.statusBar().showMessage("就绪 · 新建工程并保存配置，或打开已保存的工程")
         self.runner.busy_changed.connect(self._busy_changed)
         self.runner.message.connect(self.statusBar().showMessage)
         self.runner.message.connect(self.outputs.log.appendPlainText)
@@ -193,6 +278,8 @@ class MainWindow(QMainWindow):
         self.tools.completed.connect(self._tool_result)
         self.tools.open_requested.connect(self.open_project)
         self.workspace.open_requested.connect(self.open_project_dialog)
+        self.workspace.new_requested.connect(self.new_project_dialog)
+        self.workspace.source_requested.connect(self.edit_project_sources)
         self.workspace.changed.connect(self.setWindowModified)
         self.setWindowTitle(self.windowTitle() + "[*]")
         self._build_menu()
@@ -202,6 +289,10 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menu = self.menuBar().addMenu("文件")
+        self.new_project_action = QAction("新建工程…", self)
+        self.new_project_action.setShortcut(QKeySequence.StandardKey.New)
+        self.new_project_action.triggered.connect(self.new_project_dialog)
+        menu.addAction(self.new_project_action)
         open_action = QAction("打开工程或歌词…", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_project_dialog)
@@ -210,6 +301,13 @@ class MainWindow(QMainWindow):
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self.workspace.save_project)
         menu.addAction(save_action)
+        save_as_action = QAction("工程另存为…", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        save_as_action.triggered.connect(lambda: self.workspace.save_project(as_new=True))
+        menu.addAction(save_as_action)
+        self.project_settings_action = QAction("项目设置…", self)
+        self.project_settings_action.triggered.connect(self.edit_project_sources)
+        menu.addAction(self.project_settings_action)
         self.recent = menu.addMenu("最近的工程")
         self.recent.aboutToShow.connect(self._refresh_recent)
         menu.addSeparator()
@@ -217,17 +315,32 @@ class MainWindow(QMainWindow):
         close_action.setShortcut(QKeySequence.StandardKey.Quit)
         close_action.triggered.connect(self.close)
         menu.addAction(close_action)
+        edit_menu = self.menuBar().addMenu("编辑")
+        undo_action = edit_menu.addAction("撤销\tCtrl+Z")
+        undo_action.triggered.connect(self.editor.undo)
+        redo_action = edit_menu.addAction("重做\tCtrl+Y")
+        redo_action.triggered.connect(self.editor.redo)
+        account_menu = self.menuBar().addMenu("网易云账号")
+        login_action = account_menu.addAction("连接官方账号…")
+        login_action.triggered.connect(self.make.login_netease)
+        relogin_action = account_menu.addAction("重新连接…")
+        relogin_action.triggered.connect(lambda: self.make.login_netease(relogin=True))
+        logout_action = account_menu.addAction("断开账号")
+        logout_action.triggered.connect(self.make.logout_netease)
+        account_menu.addSeparator()
+        account_options = account_menu.addAction("高级连接选项…")
+        account_options.triggered.connect(lambda: self.make.show_account_settings(self))
         help_menu = self.menuBar().addMenu("帮助")
         help_action = QAction("使用说明", self)
         help_action.triggered.connect(
             lambda: QMessageBox.information(
                 self,
                 "使用流程",
-                "1. 在工作台顶部选择歌曲、歌词，并添加 MV 或封面。\n"
-                "2. 点击载入 / 生成时间轴，直接在下方试听和调整歌词。\n"
-                "3. 点击导出视频，成品就在工作台下方预览和下载，无需来回切页。\n\n"
-                "素材与样式按钮可调整字幕、在线来源和识别设置。\n"
-                "保存完整工程会保留当前歌词、素材和样式；进度与日志可随时展开。\n"
+                "1. 新建工程：选择保存位置、音频和歌词来源。\n"
+                "2. 配置 AI 对齐、字幕外观和输出选项，确认后保存工程并进入编辑。\n"
+                "3. 生成时间轴后，在编辑区试听、调整歌词，完成后导出视频。\n\n"
+                "项目设置可随时修改，保存工程会保留配置、素材和当前歌词。\n"
+                "当前句逐词与整曲时间轴在同一区域切换；空格播放 / 暂停，输入文字时仍输入空格。\n"
                 "桌面版与网页版共用工程 JSON，旧工程可从“文件”菜单打开。",
             )
         )
@@ -256,7 +369,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
 
     def _allow_replace(self) -> bool:
-        if self.runner.is_busy:
+        if self.runner.is_busy or self.workspace.is_saving_revision:
             QMessageBox.information(self, "任务进行中", "请等待当前任务完成后再打开其他工程。")
             return False
         if not self.workspace.is_dirty:
@@ -281,6 +394,45 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.open_project(path)
+
+    def new_project_dialog(self) -> None:
+        if self.runner.is_busy or self.workspace.is_saving_revision:
+            QMessageBox.information(self, "任务进行中", "请等待当前任务完成后再新建工程。")
+            return
+        dialog = ProjectDialog(self, default_settings=self.make.get_settings())
+        replacement_allowed = False
+        try:
+            while dialog.exec() == QDialog.DialogCode.Accepted:
+                if not replacement_allowed:
+                    if not self._allow_replace():
+                        return
+                    replacement_allowed = True
+                if self.workspace.start_project(dialog.project_settings(), dialog.project_directory()):
+                    self.navigation.setCurrentRow(0)
+                    self.statusBar().showMessage("工程与配置已保存 · 生成时间轴后开始编辑")
+                    return
+                QMessageBox.warning(self, "工程未创建", self.workspace.activity.text())
+                # Keep the same setup draft so a missing file or unwritable folder
+                # can be corrected without entering all the project options again.
+        finally:
+            if isinstance(dialog, QDialog):
+                dialog.deleteLater()
+
+    def edit_project_sources(self) -> None:
+        if self.runner.is_busy or self.workspace.is_saving_revision:
+            return
+        if not self.workspace.project_directory and not self.workspace.has_project:
+            self.new_project_dialog()
+            return
+        dialog = ProjectDialog(
+            self, settings=self.make.get_settings(), directory=self.workspace.project_directory
+        )
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.workspace.apply_project_settings(dialog.project_settings())
+        finally:
+            if isinstance(dialog, QDialog):
+                dialog.deleteLater()
 
     def open_project(self, path: str) -> None:
         if not self._allow_replace():
@@ -341,7 +493,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.tools.result_status.toPlainText())
 
     def closeEvent(self, event) -> None:
-        if self.runner.is_busy:
+        if self.runner.is_busy or self.workspace.is_saving_revision:
             QMessageBox.information(
                 self, "后台任务尚未完成", "请等待处理结束后退出。可以最小化窗口，让任务继续运行。"
             )

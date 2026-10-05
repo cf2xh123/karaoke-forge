@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from . import __version__
 from .network import _model_ssl_context
 
 MODELSCOPE_ENDPOINT = "https://modelscope.cn"
@@ -734,7 +735,7 @@ def _download_file(
             raise DomesticModelDownloadError(f"模型文件多次中断，已保留断点：{item.path}")
         headers = {
             "Accept-Encoding": "identity",
-                "User-Agent": "Karaoke-Forge/1.0.0",
+                "User-Agent": f"Karaoke-Forge/{__version__}",
         }
         if current:
             headers["Range"] = f"bytes={current}-"

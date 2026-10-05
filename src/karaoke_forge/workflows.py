@@ -123,6 +123,7 @@ def make_karaoke_video(
                 alignment_options,
                 separate_vocals=False,
                 prefer_vocal_separation=False,
+                alignment_audio_is_vocals=True,
             )
             if progress:
                 progress("歌词识别将复用本次 Demucs 生成的人声轨，不再重复分离")

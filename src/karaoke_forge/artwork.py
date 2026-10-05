@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from . import __version__
+
 
 class ArtworkError(RuntimeError):
     pass
@@ -52,7 +54,7 @@ def download_public_cover(
         headers={
             "Accept": "image/avif,image/webp,image/png,image/jpeg,*/*;q=0.5",
             "Referer": "https://music.163.com/" if "126.net" in host else "https://y.qq.com/",
-        "User-Agent": "Mozilla/5.0 Karaoke-Forge/1.0.0",
+            "User-Agent": f"Mozilla/5.0 Karaoke-Forge/{__version__}",
         },
     )
     try:

@@ -1615,6 +1615,7 @@ def prepare_make_editor_job(
     cookie_browser_profile: str = "",
     music_u: str = "",
     *,
+    prefer_netease_audio: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
     """Build an editable timed-lyrics project from the MV page's existing inputs."""
@@ -1658,7 +1659,7 @@ def prepare_make_editor_job(
             audio = None
         video_audio_state: bool | None = False if video is None else None
         using_mv_audio = False
-        if audio is None and video is not None:
+        if audio is None and video is not None and not (prefer_netease_audio and link):
             video_audio_state = probe_media_has_audio(video)
             if video_audio_state is True:
                 audio = video
@@ -1888,7 +1889,7 @@ def prepare_make_editor_job(
             if aligned.recovered:
                 timing_summary = _low_coverage_summary(
                     aligned,
-                    source,
+                    aligned.document,
                     model=model,
                     separate_vocals=separate_vocals,
                 )
@@ -1957,6 +1958,7 @@ def prepare_make_editor_job(
                 "cover_waveform": bool(cover_waveform),
                 "export_original": bool(export_original),
                 "export_instrumental": bool(export_instrumental),
+                "prefer_netease_audio": bool(prefer_netease_audio),
                 **_workspace_source_settings(netease_info, qqmusic_info, utaten_info),
             },
             recent_root=_default_output_root(),
@@ -2067,6 +2069,7 @@ def run_make_job(
     show_countdown: bool = True,
     countdown_gap_threshold: float = 8.0,
     *,
+    prefer_netease_audio: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
     logs: list[str] = []
@@ -2099,7 +2102,7 @@ def run_make_job(
             audio = None
 
         video_audio_state: bool | None = None
-        if audio is None and video is not None:
+        if audio is None and video is not None and not (prefer_netease_audio and str(netease_link or "").strip()):
             video_audio_state = probe_media_has_audio(video)
             if video_audio_state is True:
                 audio = video
@@ -2131,6 +2134,8 @@ def run_make_job(
                 netease_info = track
                 if track.is_preview:
                     track.audio_path.unlink(missing_ok=True)
+                    if prefer_netease_audio:
+                        raise ValueError("网易云只返回试听片段；请选择可获取完整音频的歌曲，或改用本地歌曲音频。")
                     if video_audio_state is True:
                         audio = video
                         report("网易云只返回试听片段，已自动改用 MV 内嵌的完整音轨")
@@ -2404,6 +2409,7 @@ def run_make_job(
                 "cover_waveform": bool(cover_waveform),
                 "export_original": bool(export_original),
                 "export_instrumental": bool(export_instrumental),
+                "prefer_netease_audio": bool(prefer_netease_audio),
                 **_workspace_source_settings(netease_info, qqmusic_info, utaten_info),
             },
             recent_root=_default_output_root(),

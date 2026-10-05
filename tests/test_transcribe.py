@@ -10,12 +10,88 @@ from karaoke_forge.models import LyricLine, LyricsDocument
 from karaoke_forge.network import configure_model_download_settings
 from karaoke_forge.transcribe import (
     PINNED_MODEL_REVISIONS,
+    RecognizedWord,
     TranscriptionError,
+    _merge_latin_subwords,
+    _native_alignment_words,
     force_align_lyrics_with_faster_whisper,
     load_faster_whisper_model,
     predownload_faster_whisper_model,
     transcribe_with_faster_whisper,
 )
+
+
+@pytest.mark.parametrize("text,pieces,expected", [
+    ("dreaming together", ["d", "reaming", " together"], ["dreaming", " together"]),
+    ("夢dreamingは光", ["夢", "d", "reaming", "は", "光"], ["夢", "dreaming", "は", "光"]),
+    ("hello world", ["hello", "world"], ["hello", "world"]),
+    ("hello,world", ["hello,", "world"], ["hello,", "world"]),
+    ("dreaming, together", ["d", "reaming,", " together"], ["dreaming,", " together"]),
+    ("don't stop", ["don", "'", "t", " stop"], ["don't", " stop"]),
+    ("re-enter", ["re-", "enter"], ["re-", "enter"]),
+    ("2026 30", ["20", "26", "30"], ["2026", "30"]),
+    ("3.14", ["3.", "14"], ["3.", "14"]),
+    ("春夏秋冬", ["春", "夏", "秋", "冬"], ["春", "夏", "秋", "冬"]),
+    ("unrelated text", ["d", "reaming"], ["d", "reaming"]),
+    ("", ["d", "reaming"], ["d", "reaming"]),
+])
+def test_latin_subwords_require_contiguous_reference_word_boundaries(text, pieces, expected):
+    words = [RecognizedWord(piece, index * 0.2, (index + 1) * 0.2, 0.95 - index * 0.02)
+             for index, piece in enumerate(pieces)]
+    result = _merge_latin_subwords(words, text)
+    assert [word.text for word in result] == expected
+    assert result[0].start == words[0].start
+    assert result[-1].end == words[-1].end
+    assert all(word.end > word.start for word in result)
+
+
+def test_transcription_merges_mixed_language_subwords_using_each_segment_text(tmp_path):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"fixture")
+
+    def segment(text, pieces, offset):
+        return SimpleNamespace(
+            start=offset, end=offset + 2, text=text,
+            words=[SimpleNamespace(word=piece, start=offset + index * 0.2,
+                                   end=offset + (index + 1) * 0.2, probability=0.95 - index * 0.1)
+                   for index, piece in enumerate(pieces)],
+        )
+
+    segments = [segment("夢dreaming", ["夢", "d", "reaming"], 0),
+                segment("hello world", ["hello", "world"], 3),
+                segment("dream", ["dream"], 6), segment("ing", ["ing"], 8)]
+    model = SimpleNamespace(transcribe=lambda *_a, **_kw: (
+        iter(segments), SimpleNamespace(language="ja", language_probability=0.99),
+    ))
+    result = transcribe_with_faster_whisper(audio, whisper_model=model, language="ja")
+    assert [word.text for word in result.words] == ["夢", "dreaming", "hello", "world", "dream", "ing"]
+    assert result.words[1].start == pytest.approx(0.2)
+    assert result.words[1].end == pytest.approx(0.6)
+    assert result.words[1].confidence == pytest.approx(0.75)
+
+
+def test_native_alignment_joins_recorded_large_v3_japanese_english_bpe_pieces():
+    # Recorded from the real large-v3 tokenizer with language="ja". That
+    # tokenizer uses Unicode boundaries even for the English words in a song.
+    class RecordedJapaneseTokenizer:
+        eot = 50257
+
+        def split_to_word_tokens(self, ids):
+            assert ids == [67, 38072, 1214, self.eot]
+            return ["d", "reaming", " together", ""], [[67], [38072], [1214], [self.eot]]
+
+    native = SimpleNamespace(
+        alignments=[(0, 0), (1, 10), (2, 20), (3, 30)],
+        text_token_probs=[0.96, 0.92, 0.95],
+    )
+    words = _native_alignment_words(
+        native, [67, 38072, 1214], tokenizer=RecordedJapaneseTokenizer(), tokens_per_second=50,
+    )
+    assert [word["word"] for word in words] == ["dreaming", " together"]
+    assert words[0]["start"] == 0
+    assert words[0]["end"] == pytest.approx(0.4)
+    assert words[0]["probability"] == pytest.approx(0.92)
+    assert words[1]["start"] == pytest.approx(0.4)
 
 
 @pytest.fixture(autouse=True)

@@ -1,8 +1,14 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from karaoke_forge.pipeline import AlignOptions
+from karaoke_forge.transcribe import (
+    ForcedAlignmentResult,
+    RecognizedWord,
+    TranscriptionResult,
+)
 from karaoke_forge.workflows import MakeOptions, make_karaoke_video
 
 
@@ -122,6 +128,61 @@ def test_precise_alignment_reuses_vocals_created_for_instrumental_export(
     assert alignment_options.profile == "precise"
     assert not alignment_options.separate_vocals
     assert not alignment_options.prefer_vocal_separation
+
+
+@pytest.mark.parametrize("timed_lyrics", [False, True])
+def test_precise_real_pipeline_does_not_separate_reused_vocals_again(
+    tmp_path, monkeypatch, timed_lyrics,
+) -> None:
+    """Keep both workflow and pipeline option resolution active in this regression."""
+    audio, video, vocals, instrumental = (
+        tmp_path / name for name in ("audio.wav", "video.mp4", "vocals.wav", "no_vocals.wav")
+    )
+    for path in (audio, video, vocals, instrumental):
+        path.write_bytes(b"media")
+    lyrics = tmp_path / ("lyrics.lrc" if timed_lyrics else "lyrics.txt")
+    lyrics.write_text("[00:01.00]hello world\n" if timed_lyrics else "hello world\n", encoding="utf-8")
+    separation_calls = []
+
+    def first_separation(source, *_args, **_kwargs):
+        separation_calls.append(Path(source))
+        return SimpleNamespace(vocals=vocals, instrumental=instrumental)
+
+    def unexpected_separation(*_args, **_kwargs):
+        raise AssertionError("The actual pipeline must reuse the already separated vocals")
+
+    def transcribe(source, **_kwargs):
+        assert Path(source) == vocals
+        return TranscriptionResult(
+            [RecognizedWord("hello", 1, 1.4, 0.95), RecognizedWord(" world", 1.5, 2, 0.95)],
+            "en", 0.99,
+        )
+
+    def render(_video, _ass, target, **_kwargs):
+        Path(target).write_bytes(b"rendered")
+        return Path(target)
+
+    monkeypatch.setattr("karaoke_forge.workflows.separate_audio_stems", first_separation)
+    monkeypatch.setattr("karaoke_forge.pipeline.separate_vocals", unexpected_separation)
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.inspect_demucs_runtime", lambda: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr("karaoke_forge.pipeline.load_faster_whisper_model", lambda **_kw: object())
+    monkeypatch.setattr("karaoke_forge.pipeline.transcribe_with_faster_whisper", transcribe)
+    monkeypatch.setattr(
+        "karaoke_forge.pipeline.force_align_lyrics_with_faster_whisper",
+        lambda *_args, **_kw: ForcedAlignmentResult((), 1, 0, 1),
+    )
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", render)
+    result = make_karaoke_video(
+        audio, video, lyrics, tmp_path / "output.mp4", tmp_path / "assets",
+        options=MakeOptions(
+            align=AlignOptions(model="profile:precise"), auto_sync=False,
+            export_original=False, export_instrumental=True,
+        ),
+    )
+    assert separation_calls == [audio]
+    assert result.source_document.metadata["alignment_profile"] == "precise"
 
 
 def test_make_requires_at_least_one_final_video(tmp_path) -> None:
