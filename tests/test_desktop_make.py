@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
 from karaoke_forge.desktop.make_page import MakePage
 from karaoke_forge.formats import read_lyrics, write_json
 from karaoke_forge.models import KaraokeToken, LyricLine, LyricsDocument
+from karaoke_forge.preferences import load_preferences
 from karaoke_forge.projects import load_workspace_project, save_workspace_project
 from karaoke_forge.web import UiEditorPreparationResult, UiJobResult, _workspace_asset_fallbacks
 
@@ -184,6 +185,18 @@ def test_new_project_settings_validate_before_changes_and_exclude_private_fields
     assert settings["output_name"] == "New" and settings["font_size"] == 70
     assert not {"music_u", "cookie_browser", "cookie_browser_profile"} & settings.keys()
     assert widget.get_settings() == before
+
+
+def test_upcoming_lyrics_opt_in_updates_preview_and_saved_preferences(page):
+    widget, _runner = page
+    assert widget.get_settings()["show_upcoming_lyrics"] is False
+    assert widget.preview._ass_style.show_upcoming_lyrics is False
+    widget.controls["show_upcoming_lyrics"].setChecked(True)
+    assert widget.get_settings()["show_upcoming_lyrics"] is True
+    assert widget.preview._ass_style.show_upcoming_lyrics is True
+    assert load_preferences()["show_upcoming_lyrics"] is True
+    widget.controls["show_upcoming_lyrics"].setChecked(False)
+    assert load_preferences()["show_upcoming_lyrics"] is False
 
 
 @pytest.mark.parametrize("accepted", [False, True])
@@ -385,6 +398,7 @@ def test_workspace_restore_preserves_all_style_settings_and_multiple_fonts(page,
             "translation_margin_v": 128,
             "pronunciation_color": "#AA88CC",
             "show_countdown": False,
+            "show_upcoming_lyrics": True,
             "cover_background": "ocean",
             "cover_style": "halo",
             "quality": "高质量",
@@ -397,6 +411,7 @@ def test_workspace_restore_preserves_all_style_settings_and_multiple_fonts(page,
     assert settings["font_size"] == 72
     assert settings["show_translation"] is False
     assert settings["show_countdown"] is False
+    assert settings["show_upcoming_lyrics"] is True
     assert settings["pronunciation_color"] == "#AA88CC"
     assert settings["translation_margin_v"] == 128
     assert settings["cover_background"] == "ocean"
@@ -429,6 +444,7 @@ def test_rendering_editor_document_keeps_original_media_and_exact_timeline(
             "font_size": 76,
             "show_translation": False,
             "translation_margin_v": 160,
+            "show_upcoming_lyrics": True,
             "cover_style": "halo",
             "quality": "高质量",
         },
@@ -458,6 +474,7 @@ def test_rendering_editor_document_keeps_original_media_and_exact_timeline(
     assert values["font_size"] == 76
     assert values["show_translation"] is False
     assert values["translation_margin_v"] == 160
+    assert values["show_upcoming_lyrics"] is True
     assert values["cover_style"] == "halo"
     assert values["quality"] == "高质量"
     assert values["timing_refinement"] == "off"

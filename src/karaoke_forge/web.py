@@ -1180,6 +1180,7 @@ def _build_style(
     translation_margin_v: float = 54,
     show_countdown: bool = True,
     countdown_gap_threshold: float = 8.0,
+    show_upcoming_lyrics: bool = False,
 ) -> AssStyle:
     return AssStyle(
         font=font or "Microsoft YaHei",
@@ -1191,6 +1192,7 @@ def _build_style(
         translation_font_size=int(translation_font_size),
         translation_color=translation_color,
         translation_margin_v=int(translation_margin_v),
+        show_upcoming_lyrics=bool(show_upcoming_lyrics),
         show_countdown=bool(show_countdown),
         countdown_gap_threshold=float(countdown_gap_threshold),
         show_pronunciation=show_pronunciation,
@@ -2069,6 +2071,7 @@ def run_make_job(
     show_countdown: bool = True,
     countdown_gap_threshold: float = 8.0,
     *,
+    show_upcoming_lyrics: bool = False,
     prefer_netease_audio: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiJobResult:
@@ -2352,6 +2355,7 @@ def run_make_job(
                     translation_margin_v,
                     show_countdown,
                     countdown_gap_threshold,
+                    show_upcoming_lyrics=show_upcoming_lyrics,
                 ),
                 audio_offset=float(audio_offset),
                 crf=crf,
@@ -2400,6 +2404,7 @@ def run_make_job(
                 "font": font,
                 "font_size": int(font_size),
                 "translation_margin_v": int(translation_margin_v),
+                "show_upcoming_lyrics": bool(show_upcoming_lyrics),
                 "show_countdown": bool(show_countdown),
                 "countdown_gap_threshold": float(countdown_gap_threshold),
                 "quality": quality,

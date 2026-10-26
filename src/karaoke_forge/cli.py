@@ -72,6 +72,7 @@ def _style_from_args(args: argparse.Namespace) -> AssStyle:
         translation_font_size=args.translation_font_size,
         translation_color=args.translation_color,
         translation_margin_v=args.translation_margin_v,
+        show_upcoming_lyrics=args.show_upcoming_lyrics,
         show_countdown=args.show_countdown,
         countdown_gap_threshold=args.countdown_gap_threshold,
         show_pronunciation=args.show_pronunciation,
@@ -102,6 +103,12 @@ def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=54,
         help="translation distance from the top edge in ASS design pixels",
+    )
+    group.add_argument(
+        "--show-upcoming-lyrics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="preview the next lyric before singing; by default lyrics appear only when sung",
     )
     group.add_argument(
         "--show-countdown",

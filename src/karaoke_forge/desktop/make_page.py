@@ -95,6 +95,7 @@ _STYLE_FIELDS = {
     "pronunciation_font_size",
     "pronunciation_color",
     "auto_english_pronunciation",
+    "show_upcoming_lyrics",
     "show_countdown",
     "countdown_gap_threshold",
 }
@@ -682,6 +683,7 @@ class MakePage(QWidget):
         self._number(form, "pronunciation_font_size", "注音字号", 18, 40, 26)
         self._add(form, "pronunciation_color", "注音颜色", ColorButton("#FFFFFF"))
         form = self._group(layout, "间奏与开唱提示")
+        self._check(form, "show_upcoming_lyrics", "提前显示下一句歌词", False)
         self._check(form, "show_countdown", "长间奏结束前显示三音符提示")
         self._number(form, "countdown_gap_threshold", "长间奏阈值（秒）", 5, 20, 8)
         layout.addStretch()

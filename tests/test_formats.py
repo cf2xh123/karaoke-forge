@@ -162,7 +162,7 @@ def test_generated_ass_round_trip_ignores_preview_and_pronunciation_events() -> 
     document.lines[0].translation = "你好，世界"
     document.lines[0].pronunciation = "ハロー ワールド"
 
-    restored = parse_ass(write_ass(document))
+    restored = parse_ass(write_ass(document, AssStyle(show_upcoming_lyrics=True)))
 
     assert [line.text for line in restored.lines] == ["Hello world", "Next line"]
     assert restored.lines[0].translation == "你好，世界"
@@ -184,7 +184,9 @@ def test_translation_uses_top_center_split_ktv_layout() -> None:
 
     output = write_ass(
         document,
-        AssStyle(font="Microsoft YaHei", translation_color="#AADDFF"),
+        AssStyle(
+            font="Microsoft YaHei", translation_color="#AADDFF", show_upcoming_lyrics=True,
+        ),
     )
 
     assert count == 2
@@ -218,6 +220,7 @@ def test_long_instrumental_break_clears_lyrics_and_cues_the_next_line() -> None:
         document,
         AssStyle(
             show_pronunciation=False,
+            show_upcoming_lyrics=True,
             countdown_gap_threshold=8.0,
             countdown_lead_in=3.0,
         ),
@@ -254,6 +257,7 @@ def test_translation_top_margin_and_countdown_can_be_configured() -> None:
         document,
         AssStyle(
             translation_margin_v=240,
+            show_upcoming_lyrics=True,
             show_countdown=False,
             countdown_gap_threshold=8.0,
             show_pronunciation=False,
@@ -289,15 +293,15 @@ def test_ass_rolls_one_ktv_row_at_each_new_line() -> None:
         "4\n00:00:07,000 --> 00:00:08,000\nD\n"
     )
 
-    output = write_ass(document, AssStyle(show_pronunciation=False))
+    output = write_ass(document, AssStyle(show_pronunciation=False, show_upcoming_lyrics=True))
 
     assert "Dialogue: 0,0:00:01.00,0:00:03.00,KaraokeInactive" not in output
     assert "Dialogue: 0,0:00:01.00,0:00:03.00,KaraokeLowerInactive" in output
-    assert r"{\fad(120,180)}B" in output
+    assert r"{\fad(120,0)}B" in output
     assert "Dialogue: 0,0:00:03.00,0:00:05.00,KaraokeInactive" in output
-    assert r"{\fad(120,180)}C" in output
+    assert r"{\fad(120,0)}C" in output
     assert "Dialogue: 0,0:00:05.00,0:00:07.00,KaraokeLowerInactive" in output
-    assert r"{\fad(120,180)}D" in output
+    assert r"{\fad(120,0)}D" in output
 
 
 def test_ass_ignores_timed_blank_rows_for_events_and_ktv_parity() -> None:
@@ -341,7 +345,9 @@ def test_ass_never_overlaps_active_events_on_the_same_ktv_row_or_translation() -
     rows = _dialogue_rows(
         write_ass(
             document,
-            AssStyle(show_countdown=False, show_pronunciation=False),
+            AssStyle(
+                show_countdown=False, show_pronunciation=False, show_upcoming_lyrics=True,
+            ),
         )
     )
     for style_name in ("Karaoke", "KaraokeLower", "Translation"):
@@ -370,7 +376,9 @@ def test_inactive_lyrics_are_only_next_line_previews() -> None:
     rows = _dialogue_rows(
         write_ass(
             document,
-            AssStyle(show_countdown=False, show_pronunciation=False),
+            AssStyle(
+                show_countdown=False, show_pronunciation=False, show_upcoming_lyrics=True,
+            ),
         )
     )
     inactive = [row for row in rows if str(row["style"]).endswith("Inactive")]
@@ -382,6 +390,72 @@ def test_inactive_lyrics_are_only_next_line_previews() -> None:
     line_starts = {"A": 1.0, "B": 3.0, "C": 5.0}
     for row in inactive:
         assert float(row["end"]) <= line_starts[row["text"].split("}")[-1]]
+
+
+def test_default_lyrics_wait_for_their_sung_start_and_clear_short_gaps() -> None:
+    # Use the reported Home timing pattern without depending on the user's files.
+    document = LyricsDocument(
+        lines=[
+            LyricLine("First", 1.26, 3.12, translation="第一句", pronunciation="ファースト"),
+            LyricLine("Second", 3.12, 4.92, translation="第二句", pronunciation="セカンド"),
+            LyricLine("Third", 6.87, 11.25, translation="第三句", pronunciation="サード"),
+        ]
+    )
+    rows = _dialogue_rows(write_ass(document, AssStyle(auto_pronunciation=False)))
+
+    assert not any(
+        row["style"] in {"KaraokeInactive", "KaraokeLowerInactive", "PronunciationInactive"}
+        for row in rows
+    )
+    for timestamp in (0.0, 1.25, 4.92, 5.5, 6.86, 11.25):
+        assert not any(row["start"] <= timestamp < row["end"] for row in rows)
+    for timestamp, expected in ((1.26, "First"), (3.12, "Second"), (6.87, "Third")):
+        active = [
+            row for row in rows
+            if row["style"] in {"Karaoke", "KaraokeLower"}
+            and row["start"] <= timestamp < row["end"]
+        ]
+        assert len(active) == 1
+        assert active[0]["text"].endswith(expected)
+
+
+def test_default_countdown_does_not_reveal_lyrics_or_readings_before_singing() -> None:
+    document = LyricsDocument(
+        lines=[LyricLine("Opening", 12.0, 15.0, translation="开场", pronunciation="オープニング")]
+    )
+    rows = _dialogue_rows(write_ass(document, AssStyle(auto_pronunciation=False)))
+    visible_before_singing = [row for row in rows if row["start"] <= 11.0 < row["end"]]
+
+    assert visible_before_singing
+    assert all(row["style"] in {"Countdown", "CountdownInactive"} for row in visible_before_singing)
+    assert not any(
+        row["style"] in {"KaraokeInactive", "KaraokeLowerInactive", "PronunciationInactive"}
+        for row in rows
+    )
+    assert any(row["style"] == "Karaoke" and row["start"] == 12.0 for row in rows)
+
+
+def test_opted_in_next_line_and_reading_do_not_fade_out_and_restart_at_sung_start() -> None:
+    document = LyricsDocument(
+        lines=[
+            LyricLine("Alpha", 3.12, 4.92),
+            LyricLine("Bravo", 6.87, 11.25, pronunciation="ブラボー"),
+        ]
+    )
+    rows = _dialogue_rows(
+        write_ass(document, AssStyle(show_upcoming_lyrics=True, auto_pronunciation=False))
+    )
+
+    for inactive_style, active_style in (
+        ("KaraokeLowerInactive", "KaraokeLower"),
+        ("PronunciationInactive", "Pronunciation"),
+    ):
+        preview = next(row for row in rows if row["style"] == inactive_style)
+        singing = next(row for row in rows if row["style"] == active_style)
+        assert preview["start"] == 3.12
+        assert preview["end"] == singing["start"] == 6.87
+        assert r"\fad(120,0)" in preview["text"]
+        assert r"\fad(0,180)" in singing["text"]
 
 
 def test_countdown_notes_track_the_upcoming_row_and_actual_pronunciation() -> None:
@@ -452,7 +526,9 @@ def test_countdown_requires_a_real_lyric_free_gap_across_overlapping_rows() -> N
 
 def test_countdown_fills_notes_cumulatively_until_exact_singing_boundary() -> None:
     document = LyricsDocument(lines=[LyricLine(text="Start singing", start=12.0, end=15.0)])
-    output = write_ass(document, AssStyle(font="Arial", show_pronunciation=False))
+    output = write_ass(
+        document, AssStyle(font="Arial", show_pronunciation=False, show_upcoming_lyrics=True),
+    )
     notes = [row for row in _dialogue_rows(output) if row["style"] == "Countdown"]
     dim_notes = [row for row in _dialogue_rows(output) if row["style"] == "CountdownInactive"]
 

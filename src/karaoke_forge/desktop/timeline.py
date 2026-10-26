@@ -822,10 +822,14 @@ class LyricPreviewWidget(QWidget):
                 breaks[index] = (preceding_end, float(line.start))
             preceding_end = max(preceding_end, ends[index])
         self._render_ends = dict(zip(timed_indices, ends))
-        self._waiting = {
-            original: _inactive_display_windows(lines, ends, breaks, index, lead_in)
-            for index, original in enumerate(timed_indices)
-        }
+        self._waiting = (
+            {
+                original: _inactive_display_windows(lines, ends, breaks, index, lead_in)
+                for index, original in enumerate(timed_indices)
+            }
+            if style.show_upcoming_lyrics
+            else {}
+        )
         self._cues = {
             timed_indices[index]: (max(gap_start, start - lead_in), start)
             for index, (gap_start, start) in breaks.items()
@@ -883,9 +887,10 @@ class LyricPreviewWidget(QWidget):
             if self._current not in self._indices:
                 return []
             ordinal = self._indices.index(self._current)
+            count = 2 if self._ass_style.show_upcoming_lyrics else 1
             return [
                 (position % 2, self._indices[position])
-                for position in range(ordinal, min(ordinal + 2, len(self._indices)))
+                for position in range(ordinal, min(ordinal + count, len(self._indices)))
             ]
         rows = []
         for ordinal, index in enumerate(self._indices):
