@@ -127,7 +127,7 @@ def audio_file(path):
     return path
 
 
-def source_dialog(monkeypatch, *, accepted, settings=None):
+def source_dialog(monkeypatch, *, accepted, settings=None, directory=None):
     class Dialog:
         def __init__(self, *args, **kwargs):
             self.original_settings = kwargs.get("settings")
@@ -142,7 +142,7 @@ def source_dialog(monkeypatch, *, accepted, settings=None):
             return settings
 
         def project_directory(self):
-            return None
+            return directory
 
     monkeypatch.setattr("karaoke_forge.desktop.app.ProjectDialog", Dialog)
 
@@ -173,7 +173,7 @@ def test_new_project_confirmation_respects_rejected_discard(window, monkeypatch)
     assert not window.runner.jobs
 
 
-def test_new_online_project_clears_stale_content_and_applies_only_configuration(window, monkeypatch):
+def test_new_online_project_clears_stale_content_and_starts_initial_generation(window, monkeypatch):
     window.workspace.adopt_prepared(preparation())
     window.make.controls["lyrics_file"].set_value("previous.json")
     window.make.controls["pasted_lyrics"].setPlainText("old pasted text")
@@ -193,7 +193,9 @@ def test_new_online_project_clears_stale_content_and_applies_only_configuration(
     assert window.editor.player.source().isEmpty()
     assert window.outputs.player.source().isEmpty()
     assert not window.outputs.directory and not window.outputs.files.count()
-    assert not window.runner.jobs
+    assert window.runner.is_busy and len(window.runner.jobs) == 1
+    assert window.workspace._preparing_timeline
+    assert window.workspace.empty_title.text() == "正在生成时间轴"
     assert window.navigation.currentRow() == 0
     assert "网易云" in window.workspace.project_summary.text()
     assert window.workspace.source_button.text() == "项目设置…"
@@ -880,7 +882,7 @@ def test_tools_continue_prioritizes_complete_manifest_regardless_of_result_order
 
 
 @pytest.mark.parametrize("source_kind", ["local", "paste", "netease"])
-def test_created_configuration_is_saved_and_reopens_before_any_timeline_exists(
+def test_created_configuration_survives_interrupted_generation_and_reopens_without_regenerating(
     window, tmp_path, source_kind
 ):
     audio = audio_file(tmp_path / "selected.wav")
@@ -892,22 +894,29 @@ def test_created_configuration_is_saved_and_reopens_before_any_timeline_exists(
     elif source_kind == "paste":
         settings["pasted_lyrics"] = "春の夢\nsing with me"
     else:
-        settings.update({"netease_link": "12345", "use_netease_lyrics": True})
+        settings.update({"netease_link": "12345", "use_netease_lyrics": True, "rights_confirmed": True})
     destination = tmp_path / "configured"
     assert window.workspace.start_project(settings, str(destination))
     assert window.workspace.has_project and not window.workspace._has_document
     assert not window.workspace.is_dirty
     assert window.workspace.project_directory == str(destination)
-    assert not window.runner.jobs
+    assert len(window.runner.jobs) == 1 and window.runner.is_busy
     saved = load_workspace_project(destination / PROJECT_FILENAME)
     pending = read_workspace_lyrics(saved)
     assert pending.lines == [] and pending.metadata["project_state"] == "configured"
     assert saved.audio.is_file() and saved.audio != audio
     assert saved.settings["font_size"] == 67
+    # The project is durable before the worker finishes, including after a crash
+    # or task failure. Opening it later must never replace manual edits implicitly.
+    window.runner.jobs.clear()
+    window.runner.is_busy = False
+    window.runner.busy_changed.emit(False)
+    window.runner.failed.emit("任务中断")
     audio.unlink()
     if source_kind == "local":
         source.unlink()
     window.workspace.load_project(pending, saved, str(saved.manifest))
+    assert not window.runner.jobs
     values = window.make.get_settings()
     assert values["font_size"] == 67 and values["audio_file"] == str(saved.audio)
     assert not window.workspace.is_dirty
@@ -920,6 +929,131 @@ def test_created_configuration_is_saved_and_reopens_before_any_timeline_exists(
         assert values["lyrics_file"] == ""
     else:
         assert values["netease_link"] == "12345" and values["lyrics_file"] == ""
+
+
+def test_new_project_automatically_imports_timed_lyrics_and_enters_editor(
+    window, monkeypatch, tmp_path
+):
+    audio = audio_file(tmp_path / "song.wav")
+    video = tmp_path / "song.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "lyrics.json"
+    timed = LyricsDocument(
+        [LyricLine("Song", 1, 2, [KaraokeToken("Song", 1, 2)])],
+        metadata={"word_timing": "manual", "auto_pronunciation": "false"},
+    )
+    source.write_text(write_json(timed), encoding="utf-8")
+    destination = tmp_path / "created"
+    source_dialog(monkeypatch, accepted=True, directory=str(destination), settings={
+        "output_name": "Song", "audio_file": str(audio), "video_file": str(video),
+        "lyrics_file": str(source), "timing_refinement": "auto",
+    })
+    for function in ("align_audio_and_lyrics", "refine_audio_word_timing_with_fallback"):
+        monkeypatch.setattr(
+            f"karaoke_forge.web.{function}",
+            lambda *args, **kwargs: pytest.fail("trusted word times must not invoke AI"),
+        )
+    window.new_project_dialog()
+    assert window.runner.is_busy and len(window.runner.jobs) == 1
+    assert "正在生成时间轴" in window.workspace.activity.text()
+    assert window.workspace.empty_title.text() == "正在生成时间轴"
+    assert window.workspace.prepare_project() is False  # A second click cannot duplicate the job.
+    window.runner.finish()
+    assert window.workspace._has_document and not window.workspace._preparing_timeline
+    assert window.workspace.pages.currentWidget() is window.workspace.content
+    assert window.workspace.prepare_button.text() == "重新生成时间轴"
+    assert window.editor.current_document().lines == timed.lines
+    assert window.workspace.project_directory == str(destination)
+    stored = load_workspace_project(destination / PROJECT_FILENAME)
+    assert read_workspace_lyrics(stored).lines == timed.lines
+    assert not window.workspace.is_dirty
+    window.workspace.load_project(read_workspace_lyrics(stored), stored, str(stored.manifest))
+    assert not window.runner.jobs, "reopening an editable project must not realign it"
+
+
+def test_new_project_without_audio_saves_configuration_and_explains_what_is_missing(
+    window, tmp_path
+):
+    assert window.workspace.start_project(
+        {"output_name": "Draft", "pasted_lyrics": "春の夢"}, str(tmp_path / "draft")
+    )
+    assert window.workspace.has_project and not window.workspace._has_document
+    assert not window.runner.jobs
+    assert "歌曲音频或有声 MV" in window.workspace.empty_description.text()
+    assert "项目设置" in window.workspace.activity.text()
+    assert window.workspace.prepare_button.text() == "生成时间轴"
+    assert window.workspace.prepare_project() is False
+    assert not window.runner.jobs
+
+
+@pytest.mark.parametrize("pasted_lyrics,recognize_audio", [("", True), ("Provided lyrics", False)])
+def test_native_new_project_only_requests_audio_recognition_without_a_lyrics_source(
+    window, monkeypatch, tmp_path, pasted_lyrics, recognize_audio
+):
+    audio = audio_file(tmp_path / "song.wav")
+    received = []
+
+    def prepare(**kwargs):
+        received.append(kwargs)
+        return preparation()
+
+    monkeypatch.setattr("karaoke_forge.desktop.make_page.prepare_make_editor_job", prepare)
+    assert window.workspace.start_project({
+        "output_name": "Song", "audio_file": str(audio), "pasted_lyrics": pasted_lyrics,
+    }, str(tmp_path / "created"))
+    window.runner.finish()
+    assert len(received) == 1
+    assert received[0]["recognize_audio"] is recognize_audio
+    assert received[0]["pasted_lyrics"] == pasted_lyrics
+    assert window.workspace._has_document
+
+
+def test_initial_generation_failure_keeps_saved_project_and_retries_without_recreating(
+    window, monkeypatch, tmp_path
+):
+    audio = audio_file(tmp_path / "song.wav")
+    destination = tmp_path / "created"
+    failed = replace(preparation(), project=None, payload=None, status="模型下载失败，请检查网络")
+    outcomes = [failed, preparation()]
+    monkeypatch.setattr(
+        "karaoke_forge.desktop.make_page.prepare_make_editor_job", lambda **kwargs: outcomes.pop(0)
+    )
+    assert window.workspace.start_project(
+        {"output_name": "Song", "audio_file": str(audio), "pasted_lyrics": "春"},
+        str(destination),
+    )
+    window.runner.finish()
+    saved = load_workspace_project(destination / PROJECT_FILENAME)
+    assert read_workspace_lyrics(saved).metadata["project_state"] == "configured"
+    assert window.workspace.project_directory == str(destination)
+    assert window.workspace.empty_title.text() == "时间轴生成失败"
+    assert "模型下载失败" in window.workspace.empty_description.text()
+    assert window.workspace.prepare_button.text() == "重试生成时间轴"
+    assert window.workspace.prepare_button.isEnabled()
+    assert not window.workspace.is_dirty
+    assert window.workspace.prepare_project()
+    assert window.workspace._preparing_timeline and not window.workspace._preparation_error
+    window.runner.finish()
+    assert not outcomes
+    assert window.workspace._has_document
+    assert window.workspace.project_directory == str(destination)
+    assert read_workspace_lyrics(load_workspace_project(saved.manifest)).lines == document().lines
+
+
+def test_raised_initial_worker_error_exposes_retry_and_keeps_configuration(window, tmp_path):
+    audio = audio_file(tmp_path / "song.wav")
+    destination = tmp_path / "created"
+    assert window.workspace.start_project(
+        {"output_name": "Song", "audio_file": str(audio), "pasted_lyrics": "春"},
+        str(destination),
+    )
+    window.runner.jobs.clear()
+    window.runner.is_busy = False
+    window.runner.busy_changed.emit(False)
+    window.runner.failed.emit("音频无法读取")
+    assert "音频无法读取" in window.workspace.empty_description.text()
+    assert window.workspace.prepare_button.text() == "重试生成时间轴"
+    assert load_workspace_project(destination / PROJECT_FILENAME).settings["pasted_lyrics"] == "春"
 
 
 def test_creation_save_failure_preserves_open_document_settings_and_history(

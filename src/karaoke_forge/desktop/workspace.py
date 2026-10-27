@@ -230,6 +230,8 @@ class WorkspacePage(QWidget):
         self._project_directory: Path | None = None
         self._configured_document: LyricsDocument | None = None
         self._pending_lyrics_source = False
+        self._preparing_timeline = False
+        self._preparation_error = ""
         self.is_saving_revision = False
         self._saved_settings = copy.deepcopy(make.get_settings())
         self._active_lyrics_sources = self._lyrics_sources(self._saved_settings)
@@ -240,6 +242,7 @@ class WorkspacePage(QWidget):
         self.make.style_changed.connect(self.editor.preview.set_style)
         self.make.material_preview_changed.connect(self.editor.preview.set_background)
         self.make.before_prepare = self._allow_regenerate
+        self.make.preparation_failed.connect(self._preparation_failed)
         self.runner.busy_changed.connect(self._busy_changed)
         self.runner.message.connect(self.activity.setText)
         self.runner.failed.connect(self._render_failed)
@@ -372,7 +375,9 @@ class WorkspacePage(QWidget):
                 )
         elif self.has_project:
             self.document_status.setText(
-                "● 有未保存的项目设置。" if dirty else "项目设置已保存；生成时间轴后开始编辑。"
+                "正在生成时间轴，完成后自动进入歌词编辑。" if self._preparing_timeline else
+                "时间轴生成失败，工程配置仍已保留，可修正后重试。" if self._preparation_error else
+                "● 有未保存的项目设置。" if dirty else "项目设置已保存；等待生成时间轴。"
             )
 
     def _settings_changed(self, settings) -> None:
@@ -409,13 +414,11 @@ class WorkspacePage(QWidget):
             self.source_button.setEnabled(self.has_project and not self.runner.is_busy)
             self.render_button.setEnabled(self._has_document and not self.runner.is_busy)
             self.prepare_button.setVisible(self.has_project)
-            self.prepare_button.setText("重新生成时间轴" if self._has_document else "生成时间轴")
-            self.empty_title.setText("工程已创建" if self.has_project else "开始制作一首歌")
-            self.empty_description.setText(
-                "项目配置已保存。点击上方“生成时间轴”，完成后直接进入歌词编辑。"
-                if self.has_project else
-                "创建工程，依次选择歌词来源、处理方式与外观；保存后进入编辑。"
+            self.prepare_button.setText(
+                "重新生成时间轴" if self._has_document else
+                "重试生成时间轴" if self._preparation_error else "生成时间轴"
             )
+            self._update_creation_status(settings)
             visual = settings.get("video_file") or settings.get("cover_file")
             self.visual_summary.setText(
                 f"画面：{Path(visual).name}" if visual else "画面：默认动态背景"
@@ -552,8 +555,63 @@ class WorkspacePage(QWidget):
             == QMessageBox.StandardButton.Yes
         )
 
-    def prepare_project(self) -> None:
-        self.make.prepare_project()
+    @staticmethod
+    def _preparation_missing_items(settings: dict) -> list[str]:
+        missing = []
+        online_audio = bool(settings.get("netease_link"))
+        if not (settings.get("audio_file") or settings.get("video_file") or online_audio):
+            missing.append("歌曲音频或有声 MV")
+        if (
+            any(settings.get(key) for key in ("netease_link", "qqmusic_link", "utaten_link"))
+            and not settings.get("rights_confirmed")
+        ):
+            missing.append("在线歌曲及歌词使用权确认")
+        return missing
+
+    def _update_creation_status(self, settings: dict) -> None:
+        if not self.has_project:
+            title = "开始制作一首歌"
+            description = "创建工程，依次选择歌词来源、处理方式与外观；保存后自动生成时间轴并进入编辑。"
+        elif self._preparing_timeline:
+            title = "正在生成时间轴"
+            description = "正在载入歌词并处理时间轴。首次 AI 识别可能需要下载模型；完成后会自动进入编辑。"
+        elif self._preparation_error:
+            title = "时间轴生成失败"
+            description = f"{self._preparation_error}\n工程配置已保留，可在项目设置中修正后点击“重试生成时间轴”。"
+        else:
+            title = "工程已创建"
+            missing = self._preparation_missing_items(settings)
+            description = (
+                f"工程配置已保存，尚缺：{'、'.join(missing)}。请在“项目设置”中补充后生成时间轴。"
+                if missing else "工程配置已保存。点击“生成时间轴”继续上次未完成的处理，完成后进入编辑。"
+            )
+        self.empty_title.setText(title)
+        self.empty_description.setText(description)
+
+    def prepare_project(self) -> bool:
+        if self.runner.is_busy:
+            return False
+        missing = self._preparation_missing_items(self.make.get_settings())
+        if missing and not self._has_document:
+            self.activity.setText(f"尚缺：{'、'.join(missing)}。请在“项目设置”中补充后生成时间轴。")
+            self._settings_changed(self.make.get_settings())
+            return False
+        self._preparing_timeline = True
+        self._preparation_error = ""
+        self._settings_changed(self.make.get_settings())
+        self.activity.setText("正在生成时间轴，完成后自动进入歌词编辑。")
+        accepted = self.make.prepare_project()
+        if not accepted:
+            self._preparing_timeline = False
+            self._settings_changed(self.make.get_settings())
+            self.activity.setText("时间轴生成任务未启动，当前工程已保留。")
+        return bool(accepted)
+
+    def _preparation_failed(self, message: str) -> None:
+        self._preparing_timeline = False
+        self._preparation_error = message
+        self._settings_changed(self.make.get_settings())
+        self.activity.setText(f"时间轴生成失败：{message}。工程配置已保留，可修正后重试。")
 
     def _save_revision_responsive(self, document, settings, directory):
         """Keep setup's transactional return value while large assets are copied."""
@@ -610,6 +668,8 @@ class WorkspacePage(QWidget):
             self.outputs.clear_project()
             self._has_document = False
             self._pending_lyrics_source = False
+            self._preparing_timeline = False
+            self._preparation_error = ""
             self._configured_document = configured
             self._project_directory = saved.manifest.parent if saved else None
             self._render_settings = None
@@ -621,9 +681,13 @@ class WorkspacePage(QWidget):
         self._settings_changed(self.make.get_settings())
         self.results_button.setChecked(False)
         self.activity.setText(
-            f"工程配置已保存至 {self.project_directory}；生成时间轴后开始编辑。"
-            if saved else "工程配置已应用；保存工程或生成时间轴后继续。"
+            f"工程配置已保存至 {self.project_directory}。"
+            if saved else "工程配置已应用。"
         )
+        if self._preparation_missing_items(self.make.get_settings()):
+            self.activity.setText(self.empty_description.text())
+        else:
+            self.prepare_project()
         return True
 
     def apply_project_settings(self, settings: dict) -> bool:
@@ -689,9 +753,11 @@ class WorkspacePage(QWidget):
         self.activity.setText("素材来源已更改；点击载入 / 生成时间轴后采用新歌词。")
 
     def adopt_prepared(self, result) -> None:
+        self._preparing_timeline = False
         if not result.payload or not result.payload.get("lines"):
-            self.activity.setText(result.status)
+            self._preparation_failed(result.status)
             return
+        self._preparation_error = ""
         document = document_from_payload(result.payload)
         project_directory = self._project_directory
         project_save_failed = False
@@ -785,6 +851,8 @@ class WorkspacePage(QWidget):
                 self.editor.load_document(document, audio, name)
                 self._configured_document = None
             self._has_document = bool(document.lines)
+            self._preparing_timeline = False
+            self._preparation_error = ""
             self.outputs.clear_project()
             self.results_button.setChecked(False)
             self._pending_lyrics_source = bool(
@@ -829,6 +897,8 @@ class WorkspacePage(QWidget):
 
     def _render_failed(self, _message: str) -> None:
         self._render_settings = None
+        if self._preparing_timeline:
+            self._preparation_failed(_message)
 
     def _adopt_rendered_project(self, result) -> bool:
         submitted = self._render_settings

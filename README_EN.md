@@ -1,6 +1,6 @@
 # Karaoke Forge
 
-> The current release is `1.0.1`. Windows users can extract the portable ZIP and run the
+> The current release is `1.0.2`. Windows users can extract the portable ZIP and run the
 > native workspace directly. Python, Qt, FFmpeg, and CPU vocal-separation runtimes are
 > included; recognition and separation models download on first use. Recognition models
 > default to anonymous ModelScope downloads, without administrator access or system `PATH` changes.
@@ -25,10 +25,12 @@ It opens a native window without a browser or local HTTP server. The existing we
 use the same project JSON and processing pipeline.
 
 The desktop workflow starts with **New project (Ctrl+N)**: choose a project folder,
-song/MV and lyric source, configure alignment and appearance, then save and enter the editor.
-Projects can be saved and reopened before timing is generated. Source links and initial
+song/MV and lyric source, configure alignment and appearance, then confirm creation. The project
+is saved first; complete inputs automatically load existing timing or start AI alignment, with
+progress shown before the editor is ready. Missing inputs or preparation failures leave the
+saved configuration available with a clear correction or retry action. Source links and initial
 processing options belong to **Project settings**, which can be reopened later.
-Prepare timing, then edit, preview and export in the same workspace; task results stay inline.
+Edit, preview and export in the same workspace; task results stay inline.
 Lyric tools and environment settings remain available as auxiliary functions.
 Native tables and draggable timelines support
 word timings, pronunciation, hiding/inserting/deleting lines, ripple editing, 100-step
@@ -39,8 +41,14 @@ or closing; running jobs finish before the app exits.
 The current-line word timeline, song overview and advanced edits share one tabbed area.
 Drag the splitter to adjust preview and timing space. Space toggles playback while ordinary
 text inputs retain spaces. Word starts, ends and whole tokens can be adjusted independently,
-with linked boundaries available as an explicit option. Creating or saving settings does not
-fetch online content; preparation starts when generating the timeline.
+with linked boundaries available as an explicit option. Confirming a new project starts timeline
+preparation automatically. Browsing or cancelling setup does not process inputs. Use **Regenerate
+timeline** after changing an existing lyric source; reopening an edited project preserves its timing.
+
+Lyrics appear only during the current sung line by default. **Preview upcoming lyrics** is an
+optional project setting; enabling it preserves a continuous transition into the active line.
+Exported MP4s already contain burned-in subtitles. Disable externally loaded ASS/LRC subtitles
+in a player to avoid an extra overlay; normal video exports keep subtitle files in `.assets`.
 
 Opening another project restores its own assets and settings. Rendering the current
 project reads the latest lyrics and preserves current materials and style choices instead

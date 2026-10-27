@@ -409,7 +409,7 @@ class MainWindow(QMainWindow):
                     replacement_allowed = True
                 if self.workspace.start_project(dialog.project_settings(), dialog.project_directory()):
                     self.navigation.setCurrentRow(0)
-                    self.statusBar().showMessage("工程与配置已保存 · 生成时间轴后开始编辑")
+                    self.statusBar().showMessage(self.workspace.activity.text())
                     return
                 QMessageBox.warning(self, "工程未创建", self.workspace.activity.text())
                 # Keep the same setup draft so a missing file or unwritable folder

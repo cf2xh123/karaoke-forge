@@ -183,6 +183,7 @@ class MakePage(QWidget):
     """Collect options on the GUI thread; execute pipeline jobs through JobRunner."""
 
     prepared = Signal(object)
+    preparation_failed = Signal(str)
     rendered = Signal(object)
     settings_changed = Signal(object)
     style_changed = Signal(object)
@@ -795,6 +796,10 @@ class MakePage(QWidget):
             values["cookie_browser_profile"] = ""
         for key in ("audio_file", "video_file", "lyrics_file", "cover_file"):
             values[key] = values[key] or None
+        values["recognize_audio"] = not any(
+            str(values.get(key) or "").strip()
+            for key in ("lyrics_file", "pasted_lyrics", "netease_link", "qqmusic_link", "utaten_link")
+        )
         return values
 
     def _validated_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1073,11 +1078,11 @@ class MakePage(QWidget):
         )
         log("已保存完整字幕、识别和导出设置。")
 
-    def prepare_project(self) -> None:
+    def prepare_project(self) -> bool:
         if self.settings_only:
-            return
+            return False
         if self.before_prepare is not None and not self.before_prepare():
-            return
+            return False
         values = self._job_values()
         settings = self.get_settings()
         arguments = {key: value for key, value in values.items() if key in _PREPARE_FIELDS}
@@ -1093,7 +1098,7 @@ class MakePage(QWidget):
                 log(f"工程已处理，但完整界面设置保存失败：{exc}")
             return result
 
-        self.runner.submit("生成可编辑歌词工程", task, self._prepared_result)
+        return self.runner.submit("生成可编辑歌词工程", task, self._prepared_result)
 
     def render_video(self) -> None:
         if self.settings_only:
@@ -1146,7 +1151,7 @@ class MakePage(QWidget):
 
     def _prepared_result(self, result: UiEditorPreparationResult) -> None:
         self._show_result(result)
-        if result.project and result.payload:
+        if result.project and result.payload and result.payload.get("lines"):
             if not self.embedded:
                 from ..editor import document_from_payload
 
@@ -1154,8 +1159,10 @@ class MakePage(QWidget):
                 self.set_editor_document(document)
             self.status.setText(_plain(result.status))
             self.prepared.emit(result)
-        elif not self.embedded:
-            self.tabs.setCurrentIndex(self.tabs.count() - 1)
+        else:
+            self.preparation_failed.emit(_plain(result.status))
+            if not self.embedded:
+                self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
     def _rendered_result(self, result: UiJobResult) -> None:
         self._show_result(result)

@@ -91,6 +91,7 @@ from .pipeline import (
     AlignOptions,
     align_audio_and_lyrics,
     normalize_timing_refinement,
+    recognize_audio_lyrics,
     refine_audio_word_timing_with_fallback,
     resolve_align_options,
     should_refine_timing,
@@ -1617,6 +1618,7 @@ def prepare_make_editor_job(
     cookie_browser_profile: str = "",
     music_u: str = "",
     *,
+    recognize_audio: bool = False,
     prefer_netease_audio: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> UiEditorPreparationResult:
@@ -1744,12 +1746,6 @@ def prepare_make_editor_job(
             else None
         )
         cover = _online_cover_for_job(cover, online_cover_url, job_dir, report)
-        if video is None and cover is None:
-            raise ValueError(
-                "没有上传 MV 时，请上传一张专辑图片；"
-                "也可以填写带公开封面的网易云或 QQ 音乐单曲链接。"
-            )
-
         translated_lyrics = (
             netease_info.translated_lyrics
             if netease_info is not None
@@ -1765,6 +1761,7 @@ def prepare_make_editor_job(
             else None
         )
 
+        recognized_source = False
         provided_lyrics = lyrics_file is not None or bool(pasted_lyrics and pasted_lyrics.strip())
         if provided_lyrics:
             lyrics_path = _prepare_lyrics(lyrics_file, pasted_lyrics, job_dir)
@@ -1816,9 +1813,20 @@ def prepare_make_editor_job(
             lyrics_path.write_text(utaten_info.plain_lyrics, encoding="utf-8")
             report(f"已导入 UtaTen 的 {len(utaten_info.lyrics)} 行公开歌词和假名")
         else:
-            raise ValueError(
-                "请上传/粘贴歌词，或填写网易云/QQ 音乐/UtaTen 链接并勾选使用公开歌词。"
+            if not recognize_audio:
+                raise ValueError(
+                    "请上传/粘贴歌词，或填写网易云/QQ 音乐/UtaTen 链接并勾选使用公开歌词。"
+                )
+            if link or qq_link or uta_link:
+                raise ValueError("所选在线来源没有可用歌词，请提供本地歌词或选择自动识别音频。")
+            report("未提供歌词，正在按所选设置自动识别音频并生成可编辑时间轴")
+            recognized = recognize_audio_lyrics(
+                audio, options=_build_align_options(language, model, device, separate_vocals),
+                work_dir=job_dir / ".work", progress=report,
             )
+            lyrics_path = job_dir / "recognized-lyrics.json"
+            lyrics_path.write_text(write_format(recognized, "json"), encoding="utf-8")
+            recognized_source = True
 
         if qqmusic_info is not None:
             lyrics_path = _lyrics_with_qqmusic_source(lyrics_path, qqmusic_info, job_dir)
@@ -1845,7 +1853,10 @@ def prepare_make_editor_job(
         source = read_lyrics(lyrics_path)
         if source.is_timed:
             timing_mode = _web_timing_refinement(timing_refinement)
-            if should_refine_timing(source, timing_mode):
+            if recognized_source:
+                document = source
+                timing_summary = "已从音频识别歌词并生成逐词时间轴，请试听复核识别文字。"
+            elif should_refine_timing(source, timing_mode):
                 refined = refine_audio_word_timing_with_fallback(
                     audio,
                     source,
