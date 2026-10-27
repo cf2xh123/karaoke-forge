@@ -30,6 +30,7 @@ _BOOLEANS = {
     "show_translation",
     "show_pronunciation",
     "auto_english_pronunciation",
+    "show_upcoming_lyrics",
     "show_countdown",
     "ripple_following",
     "snap_enabled",

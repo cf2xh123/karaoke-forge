@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 import karaoke_forge.desktop  # noqa: F401 - prepare Windows ICU before Qt
 
 # isort: split
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel
 
 from karaoke_forge.desktop.make_page import MakePage
 from karaoke_forge.desktop.project_dialog import ProjectDialog
@@ -165,6 +165,21 @@ def test_new_project_requires_its_own_directory_and_uses_three_steps(qt_app, tmp
     dialog.accept()
     assert dialog.result() == QDialog.DialogCode.Accepted
     dialog.deleteLater()
+
+
+def test_creation_confirmation_explains_automatic_processing_and_editing_stays_explicit(chooser):
+    assert chooser.buttons.button(QDialogButtonBox.StandardButton.Ok).text() == "保存并生成时间轴"
+    confirmation = "\n".join(label.text() for label in chooser.stack.widget(2).findChildren(QLabel))
+    assert "自动载入歌词 / 生成时间轴" in confirmation
+    assert "下载模型" in confirmation and "缺少音频时先保存配置" in confirmation
+    editing = ProjectDialog(settings={"output_name": "Existing", "lyrics_file": "song.json"})
+    try:
+        assert editing.buttons.button(QDialogButtonBox.StandardButton.Ok).text() == "保存项目设置"
+        text = "\n".join(label.text() for label in editing.stack.widget(2).findChildren(QLabel))
+        assert "保留当前歌词与编辑" in text and "自动载入歌词" not in text
+    finally:
+        editing.close()
+        editing.deleteLater()
 
 
 def test_new_project_inherits_processing_but_clears_previous_materials_and_private_data(qt_app):

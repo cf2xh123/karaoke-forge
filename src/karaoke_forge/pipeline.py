@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from math import isfinite
 from pathlib import Path
 from typing import Literal
 
@@ -21,7 +22,7 @@ from .alignment_quality import (
 )
 from .formats import read_lyrics
 from .media import MediaError, separate_vocals
-from .models import LyricsDocument
+from .models import KaraokeToken, LyricLine, LyricsDocument
 from .runtime import inspect_demucs_runtime
 from .text import split_display_units
 from .transcribe import (
@@ -321,6 +322,62 @@ def _build_lyric_hotwords(lyrics: LyricsDocument, *, limit: int = 320) -> str:
         if len(hint) <= limit:
             return hint
     return ""
+
+
+def recognize_audio_lyrics(
+    audio_path: str | Path,
+    *,
+    options: AlignOptions | None = None,
+    work_dir: str | Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> LyricsDocument:
+    """Create editable lyrics only when the user chose audio recognition without text."""
+    options = resolve_align_options(options or AlignOptions())
+    audio = _prepare_alignment_audio(Path(audio_path), options, work_dir=work_dir, progress=progress)
+    transcription = transcribe_with_faster_whisper(
+        audio, model=options.model, language=options.language, device=options.device,
+        compute_type=options.compute_type, beam_size=options.beam_size, progress=progress,
+    )
+    lines: list[LyricLine] = []
+    tokens: list[KaraokeToken] = []
+
+    def finish_line() -> None:
+        if not tokens:
+            return
+        tokens[0].text = tokens[0].text.lstrip()
+        tokens[-1].text = tokens[-1].text.rstrip()
+        lines.append(LyricLine(
+            "".join(token.text for token in tokens), tokens[0].start,
+            max(token.end for token in tokens), list(tokens),
+        ))
+        tokens.clear()
+
+    for word in transcription.words:
+        if not word.text.strip() or not isfinite(word.start) or not isfinite(word.end):
+            continue
+        if word.start < 0 or word.end <= word.start:
+            continue
+        if tokens and (
+            word.start - tokens[-1].end >= 0.8
+            or word.end - tokens[0].start > 8
+            or sum(len(token.text) for token in tokens) + len(word.text) > 48
+        ):
+            finish_line()
+        tokens.append(KaraokeToken(word.text, word.start, word.end, confidence=word.confidence))
+        if word.text.rstrip().endswith(("。", "！", "？", ".", "!", "?")):
+            finish_line()
+    finish_line()
+    if not lines:
+        raise ValueError("未识别到可用的歌词和时间轴，请检查音频或提供准确歌词后重试。")
+    document = LyricsDocument(lines, metadata={
+        "generator": "Karaoke Forge", "lyrics_source": "transcription",
+        "word_timing": "recognized", "alignment_model": options.model,
+        "alignment_profile": options.profile,
+    })
+    if transcription.detected_language:
+        document.metadata["language"] = transcription.detected_language
+    annotate_alignment_review(document, estimated_source=False)
+    return document
 
 
 def align_audio_and_lyrics(

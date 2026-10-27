@@ -191,8 +191,10 @@ class ProjectDialog(QDialog):
         self.summary.setTextFormat(Qt.TextFormat.PlainText)
         summary_layout.addWidget(self.summary)
         note = QLabel(
-            "保存后进入歌词编辑。载入歌词 / AI 生成时间轴由你在编辑器中启动；"
-            "此处不会下载歌曲、连接账号或运行识别。"
+            "保存后保留当前歌词与编辑，修改歌词来源后可在编辑器中重新生成时间轴。"
+            if editing else
+            "确认后先保存工程，素材齐备时自动载入歌词 / 生成时间轴，完成后进入编辑。"
+            "在线来源会按所选设置获取歌曲与歌词，首次 AI 识别可能下载模型；缺少音频时先保存配置。"
         )
         note.setWordWrap(True)
         summary_layout.addWidget(note)
@@ -214,7 +216,7 @@ class ProjectDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "保存项目设置" if editing else "保存并进入编辑"
+            "保存项目设置" if editing else "保存并生成时间轴"
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         self.buttons.accepted.connect(self.accept)

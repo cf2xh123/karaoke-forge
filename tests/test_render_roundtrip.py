@@ -36,6 +36,39 @@ def render_options(audio, video, lyrics, output_root, *, offset=2, auto_sync=Fal
     }
 
 
+@pytest.mark.parametrize("preview_next", [False, True])
+def test_native_render_preserves_upcoming_lyrics_choice(tmp_path, monkeypatch, preview_next):
+    audio, video, lyrics = (tmp_path / name for name in ("song.wav", "mv.mp4", "lyrics.json"))
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    document = source_document()
+    document.lines.append(LyricLine("Next", 4, 5, [KaraokeToken("Next", 4, 5)]))
+    lyrics.write_text(write_json(document), encoding="utf-8")
+    monkeypatch.setenv("KARAOKE_FORGE_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr("karaoke_forge.workflows.probe_media_has_audio", lambda _path: True)
+    rendered_subtitles = []
+
+    def render(_video, subtitles, target, **kwargs):
+        rendered_subtitles.append(Path(subtitles).read_text(encoding="utf-8-sig"))
+        Path(target).write_bytes(b"rendered")
+        return Path(target)
+
+    monkeypatch.setattr("karaoke_forge.workflows.render_karaoke_video", render)
+    result = run_make_job(
+        **render_options(audio, video, lyrics, tmp_path / "outputs", offset=0),
+        show_upcoming_lyrics=preview_next,
+    )
+    assert result.video, result.log
+    workspace = load_workspace_project(Path(result.output_dir) / PROJECT_FILENAME)
+    assert workspace.settings["show_upcoming_lyrics"] is preview_next
+    preview_events = [
+        event for event in rendered_subtitles[0].splitlines()
+        if event.startswith("Dialogue:") and ",KaraokeLowerInactive," in event
+    ]
+    assert bool(preview_events) is preview_next
+    assert read_workspace_lyrics(workspace).lines == document.lines
+
+
 @pytest.mark.parametrize("offset,sync_offset", [(2.0, None), (-2.0, None), (0.5, 3.0)])
 def test_real_exports_round_trip_without_reapplying_offset(tmp_path, monkeypatch, offset, sync_offset):
     audio, video, lyrics = (tmp_path / name for name in ("song.mp3", "mv.mp4", "lyrics.json"))

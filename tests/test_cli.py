@@ -18,6 +18,31 @@ def test_convert_command(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8").startswith("WEBVTT")
 
 
+def test_convert_next_line_preview_is_opt_in_and_reaches_ass_output(tmp_path: Path) -> None:
+    source = tmp_path / "input.srt"
+    output = tmp_path / "output.ass"
+    source.write_text(
+        "1\n00:00:03,120 --> 00:00:04,920\nAlpha\n\n"
+        "2\n00:00:06,870 --> 00:00:11,250\nBravo\n",
+        encoding="utf-8",
+    )
+    command = [
+        "convert", str(source), "-o", str(output), "--no-show-pronunciation", "--overwrite",
+    ]
+
+    assert main(command) == 0
+    default_output = output.read_text(encoding="utf-8")
+    assert "Dialogue: 0," not in default_output
+    assert "Dialogue: 1,0:00:06.87,0:00:11.25,KaraokeLower" in default_output
+
+    assert main([*command, "--show-upcoming-lyrics"]) == 0
+    opted_in = output.read_text(encoding="utf-8")
+    assert "Dialogue: 0,0:00:03.12,0:00:06.87,KaraokeLowerInactive" in opted_in
+
+    assert main([*command, "--show-upcoming-lyrics", "--no-show-upcoming-lyrics"]) == 0
+    assert "Dialogue: 0," not in output.read_text(encoding="utf-8")
+
+
 def test_align_make_and_netease_share_timing_refinement_choices() -> None:
     parser = build_parser()
 

@@ -672,7 +672,10 @@ def _visible_ass_rows(document, style, seconds):
     return rows
 
 
-def test_preview_rows_follow_exported_ass_events_across_overlap_blank_rows_and_long_breaks(app):
+@pytest.mark.parametrize("show_upcoming", [False, True])
+def test_preview_rows_follow_exported_ass_events_across_overlap_blank_rows_and_long_breaks(
+    app, show_upcoming
+):
     document = LyricsDocument(
         [
             LyricLine("", 0, 0.5),
@@ -683,10 +686,10 @@ def test_preview_rows_follow_exported_ass_events_across_overlap_blank_rows_and_l
             LyricLine("after break", 20, 22, [KaraokeToken("after break", 20, 22)]),
         ]
     )
-    style = AssStyle(auto_pronunciation=False)
+    style = AssStyle(auto_pronunciation=False, show_upcoming_lyrics=show_upcoming)
     widget = show(LyricPreviewWidget(), app, height=400)
     widget.set_document(document)
-    widget.set_style({"auto_pronunciation": False})
+    widget.set_style({"auto_pronunciation": False, "show_upcoming_lyrics": show_upcoming})
     for seconds in (0, 1, 2, 3.5, 5.5, 6.1, 8.5, 9.5, 16.9, 17, 18.1, 19.9, 20, 22):
         widget.set_position(seconds)
         assert set(widget.preview_rows()) == _visible_ass_rows(document, style, seconds), seconds
@@ -697,7 +700,7 @@ def test_countdown_stages_and_gap_threshold_match_the_exported_cues(app):
     source = LyricsDocument([LyricLine("before", 0, 2), LyricLine("after", 20, 23)])
     widget = show(LyricPreviewWidget(), app)
     widget.set_document(source)
-    widget.set_style({"auto_pronunciation": False})
+    widget.set_style({"auto_pronunciation": False, "show_upcoming_lyrics": True})
     widget.set_position(10)
     assert widget.preview_rows() == []
     assert widget.countdown_state() is None
@@ -706,16 +709,72 @@ def test_countdown_stages_and_gap_threshold_match_the_exported_cues(app):
         assert widget.preview_rows() == [(1, 1)]
         assert widget.countdown_state() == (1, 1, filled)
     with_cue = widget.grab().toImage()
-    widget.set_style({"auto_pronunciation": False, "show_countdown": False})
+    widget.set_style({
+        "auto_pronunciation": False, "show_upcoming_lyrics": True, "show_countdown": False,
+    })
     assert widget.preview_rows() == [(1, 1)]
     assert widget.countdown_state() is None
     assert widget.grab().toImage() != with_cue
     widget.set_position(20)
     assert widget.countdown_state() is None
-    widget.set_style({"auto_pronunciation": False, "countdown_gap_threshold": 20})
+    widget.set_style({
+        "auto_pronunciation": False, "show_upcoming_lyrics": True, "countdown_gap_threshold": 20,
+    })
     widget.set_position(10)
     assert widget.preview_rows() == [(1, 1)]
-    assert _visible_ass_rows(source, AssStyle(countdown_gap_threshold=20), 10) == {(1, 1)}
+    assert _visible_ass_rows(
+        source, AssStyle(countdown_gap_threshold=20, show_upcoming_lyrics=True), 10
+    ) == {(1, 1)}
+    widget.close()
+
+
+def test_preview_waits_for_each_line_and_clears_short_gaps_by_default(app):
+    source = LyricsDocument([
+        LyricLine("Will you know", 3.12, 4.92),
+        LyricLine("I found", 6.87, 11.25),
+    ])
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    assert widget.preview_rows() == [(0, 0)]
+    for position, expected in (
+        (0, []), (3.12, [(0, 0)]), (4.0, [(0, 0)]),
+        (4.92, []), (5.8, []), (6.869, []),
+        (6.87, [(1, 1)]), (11.25, []),
+    ):
+        widget.set_position(position)
+        assert widget.preview_rows() == expected, position
+    widget.close()
+
+
+def test_preview_upcoming_option_is_continuous_at_singing_boundary(app):
+    source = LyricsDocument([
+        LyricLine("First", 1, 3), LyricLine("Next", 4, 6, [KaraokeToken("Next", 4, 6)]),
+    ])
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_style({"show_upcoming_lyrics": True, "show_pronunciation": False})
+    assert widget.preview_rows() == [(0, 0), (1, 1)]
+    for position in (3.9, 3.999, 4.0, 4.001):
+        widget.set_position(position)
+        assert widget.preview_rows() == [(1, 1)]
+    widget.set_style({"show_upcoming_lyrics": False, "show_pronunciation": False})
+    widget.set_position(3.999)
+    assert widget.preview_rows() == []
+    widget.set_position(4)
+    assert widget.preview_rows() == [(1, 1)]
+    widget.close()
+
+
+def test_countdown_can_appear_without_showing_lyrics_before_singing(app):
+    source = LyricsDocument([LyricLine("Opening", 12, 15)])
+    widget = show(LyricPreviewWidget(), app)
+    widget.set_document(source)
+    widget.set_position(10)
+    assert widget.countdown_state() == (0, 0, 2)
+    assert widget.preview_rows() == []
+    widget.set_position(12)
+    assert widget.countdown_state() is None
+    assert widget.preview_rows() == [(0, 0)]
     widget.close()
 
 

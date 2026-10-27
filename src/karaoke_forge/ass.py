@@ -34,6 +34,7 @@ class AssStyle:
     translation_font_size: int = 38
     translation_color: str = "#EAF4FF"
     translation_margin_v: int = 54
+    show_upcoming_lyrics: bool = False
     show_countdown: bool = True
     countdown_gap_threshold: float = 8.0
     countdown_lead_in: float = 3.0
@@ -498,6 +499,12 @@ def write_ass(document: LyricsDocument, style: AssStyle | None = None) -> str:
             break_before[index] = (gap_start, line.start)
         preceding_render_end = max(preceding_render_end, render_ends[index])
 
+    waiting_windows = [
+        _inactive_display_windows(lines, render_ends, break_before, index, lead_in)
+        if style.show_upcoming_lyrics else []
+        for index in range(len(lines))
+    ]
+
     pronunciations = [
         (
             _line_pronunciation(
@@ -536,24 +543,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events: list[str] = []
 
-    # An inactive event is only an upcoming-line preview. It ends exactly when
-    # that line becomes active, so the same text is never painted twice.
-    # Long instrumental breaks split the preview so the middle remains clean.
+    # Upcoming lyrics are opt-in. By default only actual sung intervals contain
+    # lyric text, regardless of the threshold used for countdown notes.
+    # Optional previews end exactly at the singing boundary without fading out
+    # and back in, so switching karaoke layers cannot flash the same line blank.
     for index, line in enumerate(lines):
         assert line.start is not None and line.end is not None
         row = index % 2
         inactive_style = "KaraokeInactive" if row == 0 else "KaraokeLowerInactive"
         pronunciation = pronunciations[index]
-        for display_start, display_end in _inactive_display_windows(
-            lines,
-            render_ends,
-            break_before,
-            index,
-            lead_in,
-        ):
+        for display_start, display_end in waiting_windows[index]:
             # The upcoming lyric stays visible while the notes disappear at
             # the singing boundary; fading both events would flash it blank.
-            fade_out = 0 if index in break_before and display_end == line.start else 180
+            fade_out = 0 if display_end == line.start else 180
             events.append(
                 "Dialogue: 0,"
                 f"{ass_clock(display_start)},{ass_clock(display_end)},"
@@ -637,7 +639,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             lyric_text = _escape_ass_text(line.text)
         karaoke_style = "Karaoke" if index % 2 == 0 else "KaraokeLower"
-        fade_in = 0 if index in break_before else 120
+        continues_preview = any(end == line.start for _, end in waiting_windows[index])
+        fade_in = 0 if index in break_before or continues_preview else 120
         events.append(
             "Dialogue: 1,"
             f"{ass_clock(line.start)},{ass_clock(render_end)},"
