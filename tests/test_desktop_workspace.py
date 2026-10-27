@@ -883,8 +883,9 @@ def test_tools_continue_prioritizes_complete_manifest_regardless_of_result_order
 
 @pytest.mark.parametrize("source_kind", ["local", "paste", "netease"])
 def test_created_configuration_survives_interrupted_generation_and_reopens_without_regenerating(
-    window, tmp_path, source_kind
+    window, tmp_path, source_kind, monkeypatch
 ):
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: QMessageBox.StandardButton.Ok)
     audio = audio_file(tmp_path / "selected.wav")
     settings = {"output_name": "Configured song", "audio_file": str(audio), "font_size": 67}
     if source_kind == "local":
@@ -1040,7 +1041,8 @@ def test_initial_generation_failure_keeps_saved_project_and_retries_without_recr
     assert read_workspace_lyrics(load_workspace_project(saved.manifest)).lines == document().lines
 
 
-def test_raised_initial_worker_error_exposes_retry_and_keeps_configuration(window, tmp_path):
+def test_raised_initial_worker_error_exposes_retry_and_keeps_configuration(window, tmp_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: QMessageBox.StandardButton.Ok)
     audio = audio_file(tmp_path / "song.wav")
     destination = tmp_path / "created"
     assert window.workspace.start_project(
